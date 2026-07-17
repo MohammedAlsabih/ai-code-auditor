@@ -205,10 +205,6 @@ class PythonAdapter(LanguageAdapter):
         return self._parse_requirements(target, seen, depth + 1,
                                         constraint=constraint or is_c)
 
-    def _note(self, message: str) -> None:
-        if self._diag is not None and message not in self._diag.notes:
-            self._diag.notes.append(message)
-
     def _req_dep(self, line: str, rel: str, lineno: int) -> DeclaredDep | None:
         head = line.split(";", 1)[0].strip()   # drop environment marker
         # bare URL / VCS ref (checked FIRST so `https://...@host` is not mistaken
@@ -230,14 +226,6 @@ class PythonAdapter(LanguageAdapter):
             return None
         return DeclaredDep(name=canonical(m.group(1)), ecosystem="pypi",
                            source_file=rel, line=lineno, raw=line, skip_registry=False)
-
-    def _schema_note(self, path: Path, what: str) -> None:
-        """A schema-invalid section was skipped: note it AND mark the manifest
-        partially extracted, so analysis_confidence() actually reflects it."""
-        self._note(f"{path.name}: unexpected schema for {what} — section skipped")
-        rel = self._provenance(path)
-        if self._diag is not None and rel not in self._diag.manifest_incomplete:
-            self._diag.manifest_incomplete.append(rel)
 
     def _dep_string_list(self, value, path: Path, what: str) -> list[str]:
         """A list of PEP 508 strings, or [] + one diagnostic on a wrong type.
@@ -466,8 +454,7 @@ class PythonAdapter(LanguageAdapter):
         manifest partially extracted (drives analysis_confidence to 'partial')."""
         self._note(f"{rel}: dynamic/non-literal {what} in setup.py — "
                    "dependencies not fully extracted")
-        if self._diag is not None and rel not in self._diag.manifest_incomplete:
-            self._diag.manifest_incomplete.append(rel)
+        self._mark_incomplete(path)
 
     _IMPORT_QUERY = "[(import_statement) (import_from_statement)] @imp"
 

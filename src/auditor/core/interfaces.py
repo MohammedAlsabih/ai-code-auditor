@@ -91,6 +91,31 @@ class LanguageAdapter(ABC):
             if msg not in self._diag.manifest_errors:   # one entry per broken file
                 self._diag.manifest_errors.append(msg)
 
+    def _note(self, message: str) -> None:
+        if self._diag is not None and message not in self._diag.notes:
+            self._diag.notes.append(message)
+
+    def _mark_incomplete(self, path: Path) -> None:
+        """Record a manifest whose extraction was partial (drives
+        analysis_confidence to 'partial')."""
+        if self._diag is None:
+            return
+        rel = path.name
+        scan_root = getattr(self, "_scan_root", None)
+        if scan_root is not None:
+            try:
+                rel = path.resolve().relative_to(scan_root).as_posix()
+            except (ValueError, OSError):
+                pass
+        if rel not in self._diag.manifest_incomplete:
+            self._diag.manifest_incomplete.append(rel)
+
+    def _schema_note(self, path: Path, what: str) -> None:
+        """A schema-invalid manifest section was skipped: never silent, and the
+        manifest counts as partially extracted."""
+        self._note(f"{path.name}: unexpected schema for {what} — section skipped")
+        self._mark_incomplete(path)
+
     @abstractmethod
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]: ...
 
