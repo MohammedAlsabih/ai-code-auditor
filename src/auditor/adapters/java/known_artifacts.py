@@ -1,0 +1,48 @@
+# Curated package-prefix -> Maven coordinates map (longest prefix wins).
+# Accuracy limit by design: anything not listed and not matching a declared
+# groupId is reported as H007 "cannot map", never guessed into a RED.
+PACKAGE_TO_ARTIFACT = {
+    "com.fasterxml.jackson": "com.fasterxml.jackson.core:jackson-databind",
+    "com.fasterxml.jackson.core": "com.fasterxml.jackson.core:jackson-core",
+    "com.fasterxml.jackson.annotation": "com.fasterxml.jackson.core:jackson-annotations",
+    "com.google.common": "com.google.guava:guava",
+    "com.google.gson": "com.google.code.gson:gson",
+    "org.apache.commons.lang3": "org.apache.commons:commons-lang3",
+    "org.apache.commons.io": "commons-io:commons-io",
+    "org.apache.commons.collections4": "org.apache.commons:commons-collections4",
+    "org.slf4j": "org.slf4j:slf4j-api",
+    "ch.qos.logback": "ch.qos.logback:logback-classic",
+    "org.junit.jupiter": "org.junit.jupiter:junit-jupiter",
+    "org.junit": "junit:junit",   # JUnit4 (org.junit.Test); jupiter's longer prefix wins for JUnit5
+    "org.mockito": "org.mockito:mockito-core",
+    "org.springframework.boot": "org.springframework.boot:spring-boot",
+    "org.springframework.context": "org.springframework:spring-context",
+    "org.springframework.web": "org.springframework:spring-web",
+    "org.springframework": "org.springframework:spring-core",
+    "lombok": "org.projectlombok:lombok",
+    "okhttp3": "com.squareup.okhttp3:okhttp",
+    "retrofit2": "com.squareup.retrofit2:retrofit",
+    "org.hibernate": "org.hibernate.orm:hibernate-core",
+    "com.zaxxer.hikari": "com.zaxxer:HikariCP",
+    "org.yaml.snakeyaml": "org.yaml:snakeyaml",
+    "redis.clients": "redis.clients:jedis",
+    "com.mysql": "com.mysql:mysql-connector-j",
+    "org.postgresql": "org.postgresql:postgresql",
+    "io.netty": "io.netty:netty-all",
+    "io.jsonwebtoken": "io.jsonwebtoken:jjwt-api",
+    "kotlin": "org.jetbrains.kotlin:kotlin-stdlib",   # stdlib packages are kotlin.*, not org.jetbrains.*
+    "org.apache.logging.log4j": "org.apache.logging.log4j:log4j-core",
+    "org.apache.hc.client5": "org.apache.httpcomponents.client5:httpclient5",
+    "org.apache.hc.core5": "org.apache.httpcomponents.core5:httpcore5",
+    "com.github.benmanes.caffeine": "com.github.ben-manes.caffeine:caffeine",  # hyphen not derivable
+    "jakarta.persistence": "jakarta.persistence:jakarta.persistence-api",
+    "javax.servlet": "javax.servlet:javax.servlet-api",
+    "javax.persistence": "javax.persistence:javax.persistence-api",
+    "javax.validation": "javax.validation:validation-api",
+    "javax.inject": "javax.inject:javax.inject",
+    "javax.annotation": "javax.annotation:javax.annotation-api",
+    "javax.xml.bind": "javax.xml.bind:jaxb-api",
+    "org.testng": "org.testng:testng",
+    "org.assertj": "org.assertj:assertj-core",
+    "com.opencsv": "com.opencsv:opencsv",
+}
