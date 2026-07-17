@@ -92,7 +92,9 @@ def function_name(fn_node) -> str:
     return ""
 
 
-def hook_calls(sf: SourceFile) -> list[tuple[object, str]]:
+def hook_calls(sf: SourceFile) -> list[tuple]:
+    """(call_expression node, hook name) pairs. Typed loosely: tree_sitter.Node
+    is deliberately not imported at module level (grammar wheels load lazily)."""
     out = []
     for callee in captures(sf.language, sf.tree.root_node, _CALL_QUERY).get("callee", []):
         name = node_text(callee)
