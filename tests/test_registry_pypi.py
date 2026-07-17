@@ -127,6 +127,63 @@ def test_foreign_cache_value_shape_is_miss_not_registry_failure(tmp_path):
     assert calls == ["requests"]                     # corrupt hit => re-queried
 
 
+def test_cache_wrong_field_types_are_cold_miss(tmp_path):
+    """{"exists": "false"} (truthy string!) and created=123 (age_days would
+    crash) must both be treated as cache MISSES and re-queried."""
+    import json
+    import time
+
+    from auditor.core.models import PackageInfo
+    from auditor.registries.base import CachedRegistry, RegistryClient, age_days
+
+    calls = []
+
+    class Inner(RegistryClient):
+        ecosystem = "pypi"
+        def cache_key(self, name): return name
+        def lookup(self, name):
+            calls.append(name)
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+
+    for bad_value in ({"exists": "false"},
+                      {"exists": True, "created": 123},
+                      {"exists": True, "downloads": True},   # bool where int|None
+                      {"exists": 1}):
+        calls.clear()
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps({"pypi:x": {
+            "expires": time.time() + 9999, "value": bad_value}}), encoding="utf-8")
+        info = CachedRegistry(Inner(), Cache(p)).lookup("x")
+        assert calls == ["x"], bad_value              # re-queried, not served
+        assert info.exists is True and info.error is None
+        age_days(info.created)                        # usable downstream
+
+
+def test_cache_correct_types_still_hit(tmp_path):
+    import json
+    import time
+
+    from auditor.core.models import PackageInfo
+    from auditor.registries.base import CachedRegistry, RegistryClient
+    from dataclasses import asdict
+
+    calls = []
+
+    class Inner(RegistryClient):
+        ecosystem = "pypi"
+        def cache_key(self, name): return name
+        def lookup(self, name):
+            calls.append(name)
+            return PackageInfo(exists=True)
+
+    good = asdict(PackageInfo(exists=True, created="2019-01-01T00:00:00Z"))
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"pypi:x": {
+        "expires": time.time() + 9999, "value": good}}), encoding="utf-8")
+    info = CachedRegistry(Inner(), Cache(p)).lookup("x")
+    assert calls == [] and info.created == "2019-01-01T00:00:00Z"
+
+
 @responses.activate
 def test_pypi_cache_key_shares_entry_across_name_forms(tmp_path):
     responses.get(SIMPLE.format("typing-extensions"), json={"files": [

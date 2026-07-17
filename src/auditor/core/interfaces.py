@@ -59,6 +59,23 @@ class LanguageAdapter(ABC):
 
     def _read(self, path: Path) -> str:
         from auditor.core.walk import read_text_capped
+        # CENTRAL symlink-escape guard (verified empirically under WSL): a
+        # manifest whose RESOLVED location is outside the scan root (a symlink
+        # planted inside the repo) is refused, with a ledger entry — adapters
+        # that set self._scan_root get this for free on every manifest read.
+        scan_root = getattr(self, "_scan_root", None)
+        if scan_root is not None:
+            try:
+                rp = path.resolve()
+            except OSError:
+                rp = path
+            if rp != scan_root and scan_root not in rp.parents:
+                if self._diag is not None:
+                    msg = (f"{path.as_posix()}: resolves outside the scan root "
+                           "(symlink?) — NOT read")
+                    if msg not in self._diag.manifest_errors:
+                        self._diag.manifest_errors.append(msg)
+                return ""
         if self._diag is not None:
             key = str(path)
             if key not in self._diag.manifest_files:   # UNIQUE files, not read ops
@@ -114,6 +131,15 @@ class LanguageAdapter(ABC):
         """Non-None when the project configures a custom/private package source
         (=> missing packages become H010, not H001/H008)."""
         return None
+
+    def import_mapping_trust(self, imp: ImportRef) -> str:
+        """Per-IMPORT mapping confidence: "exact" only when the import→registry
+        mapping for THIS import is authoritative (curated alias table, literal
+        identity as in npm paths); "heuristic" when it rests on a naming
+        convention. Gates the definitive RED H008 on the import path — a
+        convention guess must never produce a red "hallucinated" verdict that a
+        declared distribution could explain. Default: the adapter-wide level."""
+        return self.mapping_precision
 
     def unresolvable_hint(self, identifier: str) -> str | None:
         """Ecosystem-specific reason a not-found identifier might still be valid

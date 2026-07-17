@@ -233,8 +233,28 @@ def test_clone_error_redacts_credentials(monkeypatch):
         resolve_target("https://alice:TOPSECRET@example.invalid/repo.git")
     msg = str(exc.value)
     assert "TOPSECRET" not in msg                    # secret redacted
-    assert "alice:***@example.invalid" in msg        # message still informative
+    # ENTIRE userinfo goes: a token in the username slot must not survive
+    assert "alice" not in msg
+    assert "***@example.invalid" in msg              # message still informative
     assert "403" in msg
+
+
+def test_redact_covers_userinfo_and_sensitive_query_keys():
+    from auditor.fetch import _redact
+    cases = [
+        "https://INERTSECRET@example.invalid/repo.git",        # token-as-username
+        "https://u:INERTSECRET@example.invalid/x.git",
+        "https://example.invalid/x?api_key=INERTSECRET",
+        "https://example.invalid/x?a=1&access-key=INERTSECRET&b=2",
+        "https://example.invalid/x?private-token=INERTSECRET",
+        "password=INERTSECRET",
+        "Authorization: INERTSECRET",
+        "auth_token = INERTSECRET",
+    ]
+    for c in cases:
+        assert "INERTSECRET" not in _redact(c), c
+    # non-sensitive text passes through untouched
+    assert _redact("author=alice&tokenize=no") == "author=alice&tokenize=no"
 
 
 def test_global_post_checkout_hook_does_not_execute(monkeypatch, tmp_path):

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from auditor.adapters.python.adapter import PythonAdapter
 from auditor.core.models import DeclaredDep, ImportRef, PackageInfo
 from auditor.core.treesitter import parse_source
@@ -309,23 +311,75 @@ def test_known_divergent_import_matches_declared_distribution(tmp_path):
     assert audit_hallucinations(a, tmp_path, files, declared, Reg()) == []
 
 
-def test_unmapped_multisegment_import_is_h007_not_red_h008(tmp_path):
+class _MissingReg:
+    ecosystem = "pypi"
+    def __init__(self, exists=()):
+        self._exists = set(exists)
+    def lookup(self, n):
+        return PackageInfo(exists=True, created="2019-01-01T00:00:00Z") \
+            if n in self._exists else PackageInfo(exists=False)
+
+
+def _audit(tmp_path, reg):
     from auditor.core.hallucination import audit_hallucinations
-    _mk(tmp_path, "requirements.txt", "requests\n")
-    _mk(tmp_path, "app.py", "import totallymadeup.submodule\nimport superhallucinated\n")
     a = PythonAdapter()
     files = _files(tmp_path, a)
     a.prepare(tmp_path, files)
     declared = a.parse_dependencies(tmp_path)
+    return audit_hallucinations(a, tmp_path, files, declared, reg)
 
-    class Reg:
-        ecosystem = "pypi"
-        def lookup(self, n):
-            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z") if n == "requests" \
-                else PackageInfo(exists=False)
-    ids = sorted(f.rule_id for f in audit_hallucinations(a, tmp_path, files, declared, Reg()))
-    # multi-segment unmapped => H007 (heuristic); single-segment hallucination => H008 red
-    assert ids == ["H007", "H008"]
+
+def test_unmapped_multisegment_import_is_h007_not_red_h008(tmp_path):
+    # NO declared deps at all => nothing could provide the imports:
+    # multi-segment unmapped => H007; single-segment hallucination => H008 red
+    # stamped precision=heuristic (identity mapping is a convention, not a fact)
+    _mk(tmp_path, "app.py", "import totallymadeup.submodule\nimport superhallucinated\n")
+    fs = _audit(tmp_path, _MissingReg())
+    assert sorted(f.rule_id for f in fs) == ["H007", "H008"]
+    h008 = next(f for f in fs if f.rule_id == "H008")
+    assert h008.precision == "heuristic"
+
+
+def test_trust_gate_unmatched_declared_downgrades_h008_to_h007(tmp_path):
+    # an UNMATCHED declared distribution may provide the module (the
+    # rest_framework<-djangorestframework shape) => no definitive RED
+    _mk(tmp_path, "requirements.txt", "some-unmatched-dist\n")
+    _mk(tmp_path, "app.py", "import mystery_module\n")
+    fs = _audit(tmp_path, _MissingReg(exists={"some-unmatched-dist"}))
+    ids = [f.rule_id for f in fs]
+    assert "H008" not in ids and "H007" in ids
+    h007 = next(f for f in fs if f.rule_id == "H007")
+    assert "some-unmatched-dist" in h007.detail      # names the possible provider
+
+
+def test_import_dist_corpus_no_false_positives(tmp_path):
+    # CORPUS (CP-3): famous import!=dist divergences + namespace packages must
+    # produce ZERO findings when the real distribution is declared
+    _mk(tmp_path, "requirements.txt",
+        "biopython\ndnspython\ngrpcio\ndjangorestframework\n"
+        "google-cloud-storage\nazure-storage-blob\npyyaml\npillow\nkafka-python\n")
+    _mk(tmp_path, "app.py",
+        "import Bio\nimport dns\nimport grpc\nimport rest_framework\n"
+        "import google.cloud.storage\nimport azure.storage.blob\n"
+        "import yaml\nimport PIL\nimport kafka\n")
+    fs = _audit(tmp_path, _MissingReg(exists={
+        "biopython", "dnspython", "grpcio", "djangorestframework",
+        "google-cloud-storage", "azure-storage-blob", "pyyaml", "pillow",
+        "kafka-python"}))
+    assert fs == []
+
+
+def test_import_mapping_trust_levels():
+    a = PythonAdapter()
+    exact = [ImportRef("yaml", "f", 1, top_level="yaml"),          # curated alias
+             ImportRef("Bio", "f", 1, top_level="Bio"),
+             ImportRef("win32file", "f", 1, top_level="win32file")]
+    for imp in exact:
+        assert a.import_mapping_trust(imp) == "exact", imp.module
+    conventional = [ImportRef("requests", "f", 1, top_level="requests"),
+                    ImportRef("mystery", "f", 1, top_level="mystery")]
+    for imp in conventional:
+        assert a.import_mapping_trust(imp) == "heuristic", imp.module
 
 
 def test_missing_and_outside_includes_produce_diagnostics(tmp_path):
@@ -370,6 +424,142 @@ def test_uv_sources_workspace_and_git_skip_registry(tmp_path):
         'git-lib = { git = "https://x/y.git" }\n')
     by = {d.name: d.skip_registry for d in PythonAdapter().parse_dependencies(tmp_path)}
     assert by["ws-lib"] is True and by["git-lib"] is True
+
+
+def test_setup_py_comment_and_string_are_not_dependencies(tmp_path):
+    _mk(tmp_path, "setup.py",
+        'from setuptools import setup\n'
+        '# install_requires = ["not-a-real-dependency"]\n'
+        'DOCS = \'install_requires = ["fake-from-string"]\'\n'
+        'setup(name="x", install_requires=["real-dep>=1.0"])\n')
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert names == {"real-dep"}          # AST sees only the real setup(...) kwarg
+
+
+def test_setup_py_dynamic_install_requires_is_recorded_limitation(tmp_path):
+    from auditor.core.models import Diagnostics
+    _mk(tmp_path, "setup.py",
+        'from setuptools import setup\n'
+        'setup(name="x", install_requires=get_reqs())\n')
+    diag = Diagnostics()
+    deps = PythonAdapter().parse_dependencies(tmp_path, diag=diag)
+    assert deps == []
+    assert any("dynamic" in n and "install_requires" in n for n in diag.notes)
+    assert "setup.py" in diag.manifest_incomplete
+    assert diag.analysis_confidence() == "partial"   # not a cosmetic note
+
+
+def test_setup_py_extras_and_line_numbers(tmp_path):
+    _mk(tmp_path, "setup.py",
+        'from setuptools import setup\n'
+        'setup(\n'
+        '    name="x",\n'
+        '    install_requires=[\n'
+        '        "dep-one",\n'
+        '        "dep-two>=2",\n'
+        '    ],\n'
+        '    extras_require={"dev": ["dep-three"]},\n'
+        ')\n')
+    deps = {d.name: d.line for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert deps == {"dep-one": 5, "dep-two": 6, "dep-three": 8}
+
+
+def test_local_module_file_does_not_claim_subtree(tmp_path):
+    _mk(tmp_path, "foo.py", "X = 1\n")
+    _mk(tmp_path, "pkg/__init__.py", "")
+    _mk(tmp_path, "pkg/real.py", "Y = 1\n")
+    _mk(tmp_path, "ns/actual.py", "Z = 1\n")     # namespace dir (no __init__)
+    _mk(tmp_path, "app.py", "import foo\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+
+    def internal(module):
+        return a.is_internal(ImportRef(module, "app.py", 1,
+                                       top_level=module.split(".")[0]))
+    assert internal("foo") is True               # the module file itself
+    assert internal("foo.nonexistent") is False  # foo.py is NOT a package
+    assert internal("pkg.anything") is True      # regular package: subtree claim
+    assert internal("ns") is True                # namespace dir itself
+    assert internal("ns.actual") is True         # existing child
+    assert internal("ns.ghost") is False         # nonexistent child not claimed
+
+
+def test_silent_schema_cases_now_produce_diagnostics(tmp_path):
+    from auditor.core.models import Diagnostics
+    cases = {
+        'project = "oops"\n': "project",
+        'tool = "oops"\n': "tool",
+        '[tool.poetry.group.dev]\ndependencies = ["a"]\n': "tool.poetry.group.dev",
+        '[tool.uv]\nsources = "oops"\n[project]\ndependencies = ["x"]\n': "tool.uv.sources",
+    }
+    for body, expect in cases.items():
+        root = tmp_path / expect.replace(".", "_")
+        root.mkdir()
+        _mk(root, "pyproject.toml", body)
+        diag = Diagnostics()
+        PythonAdapter().parse_dependencies(root, diag=diag)
+        assert any(expect in n for n in diag.notes), (expect, diag.notes)
+        assert "pyproject.toml" in diag.manifest_incomplete, expect
+        assert diag.analysis_confidence() == "partial", expect
+
+
+def test_oversized_pyproject_double_read_dedups_ledger(tmp_path):
+    from auditor.core.models import Diagnostics
+    big = '[project]\ndependencies = ["x"]\n' + "#" + "x" * 2_100_000 + "\n"
+    _mk(tmp_path, "pyproject.toml", big)
+    a = PythonAdapter()
+    diag = Diagnostics()
+    a.parse_dependencies(tmp_path, diag=diag)
+    a.private_registry_reason(tmp_path)          # second read of the same file
+    oversize = [e for e in diag.manifest_errors if "exceeds" in e]
+    assert len(oversize) == 1                    # deduped by entry
+    assert len(diag.manifest_files) == 1
+    assert diag.analysis_confidence() == "partial"
+
+
+def test_uv_conditional_source_list_is_local(tmp_path):
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\ndependencies = ["dep-a", "dep-b", "dep-c"]\n'
+        '[tool.uv.sources]\n'
+        'dep-a = [{ path = "../local", marker = "sys_platform == \'win32\'" },'
+        ' { index = "corp" }]\n'
+        'dep-b = { workspace = true }\n'
+        'dep-c = [{ index = "corp" }]\n')
+    by = {d.name: d.skip_registry for d in PythonAdapter().parse_dependencies(tmp_path)}
+    # conservative: ANY local alternative (even marker-gated, mixed with an
+    # index entry) => skip the public-registry H001 claim
+    assert by == {"dep-a": True, "dep-b": True, "dep-c": False}
+
+
+def test_requires_python_dash_prerelease_form(tmp_path):
+    # PEP 440: 3.13.0-rc1 IS 3.13.0rc1 — bounds come from SpecifierSet objects
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\nrequires-python = ">3.13.0-rc1,<3.13.0-rc3"\n')
+    assert PythonAdapter()._allowed_minors(tmp_path) == [(3, 13)]
+
+
+def test_requires_python_wildcard_form(tmp_path):
+    _mk(tmp_path, "pyproject.toml", '[project]\nrequires-python = "==3.12.*"\n')
+    assert PythonAdapter()._allowed_minors(tmp_path) == [(3, 12)]
+
+
+def test_symlinked_manifest_outside_scan_root_is_refused(tmp_path):
+    import os
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("leaked-dep-name==1.0\n", encoding="utf-8")
+    root = tmp_path / "scanroot"
+    root.mkdir()
+    try:
+        os.symlink(outside / "secret.txt", root / "requirements.txt")
+    except OSError:
+        pytest.skip("symlink creation not permitted in this environment")
+    from auditor.core.models import Diagnostics
+    diag = Diagnostics()
+    deps = PythonAdapter().parse_dependencies(root, diag=diag)
+    assert all(d.name != "leaked-dep-name" for d in deps)
+    assert any("outside the scan root" in e for e in diag.manifest_errors)
 
 
 def test_partial_parse_recorded_in_diagnostics(tmp_path):

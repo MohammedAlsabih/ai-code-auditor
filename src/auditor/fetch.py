@@ -13,14 +13,20 @@ from typing import Callable
 from auditor.errors import AuditorError
 
 _URL_PREFIXES = ("http://", "https://", "git@", "ssh://", "file://")
-# userinfo (user:password@) and inline tokens in URLs / stderr must never be echoed
-_CRED_URL = re.compile(r"(\b[a-z][a-z0-9+.\-]*://)([^/\s:@'\"]{1,128})(:[^@/\s'\"]{1,256})?@")
-_TOKEN_KV = re.compile(r"(?i)((?:token|password|pwd|secret|access[_-]?key)=)([^&\s'\"]{3,})")
+# The ENTIRE userinfo is redacted — `https://TOKEN@host` puts the secret in the
+# username slot, so preserving "user" while masking "pass" leaks tokens.
+_CRED_URL = re.compile(r"(\b[a-z][a-z0-9+.\-]*://)([^/\s@'\"]{1,384})@")
+_SENSITIVE_KEYS = (
+    "api[-_]?key|access[-_]?key|private[-_]?token|auth[-_]?token|"
+    "session[-_]?token|token|password|passwd|pwd|secret|authorization|"
+    "credentials?|auth"
+)
+_TOKEN_KV = re.compile(rf"(?i)\b({_SENSITIVE_KEYS})(\s*[=:]\s*)([^&\s'\";,]{{1,512}})")
 
 
 def _redact(text: str) -> str:
-    text = _CRED_URL.sub(lambda m: m.group(1) + m.group(2) + (":***" if m.group(3) else "") + "@", text)
-    return _TOKEN_KV.sub(r"\1***", text)
+    text = _CRED_URL.sub(r"\1***@", text)
+    return _TOKEN_KV.sub(r"\1\g<2>***", text)
 
 
 def _force_remove(path: Path) -> None:

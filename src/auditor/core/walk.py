@@ -16,8 +16,12 @@ MAX_MANIFEST_BYTES = 2_000_000
 
 
 def _note(diag, field_name: str, message: str) -> None:
+    # dedup per entry: the SAME file read twice (parse_dependencies +
+    # private_registry_reason) must not double its ledger entry
     if diag is not None:
-        getattr(diag, field_name).append(message)
+        entries = getattr(diag, field_name)
+        if message not in entries:
+            entries.append(message)
 
 
 def collect_source_files(root: Path, adapter, exclude_roots: tuple[Path, ...] = (),

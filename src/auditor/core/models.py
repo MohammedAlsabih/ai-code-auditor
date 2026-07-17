@@ -77,6 +77,9 @@ class Diagnostics:
     report.json (`diagnostics`) and the limitations section — no silent failures."""
     manifest_errors: list[str] = field(default_factory=list)   # "pom.xml: ParseError ..." (unique per file)
     manifest_files: list[str] = field(default_factory=list)    # UNIQUE manifest paths read (denominator)
+    # manifests read but NOT fully extracted (dynamic setup.py exprs, schema
+    # sections skipped, out-of-root symlinks) — unique paths; drives confidence
+    manifest_incomplete: list[str] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)     # "big.py: exceeds 1.5MB"
     parse_error_files: list[str] = field(default_factory=list)
     rule_errors: list[str] = field(default_factory=list)       # "R005 on x.tsx: KeyError"
@@ -87,11 +90,25 @@ class Diagnostics:
     semgrep_status: str = "not attempted"
     notes: list[str] = field(default_factory=list)
 
+    def analysis_confidence(self) -> str:
+        """The report's headline trust level, DERIVED from the ledger — not a
+        cosmetic note. "degraded": the analysis machinery itself failed (rules
+        crashed / registry unreachable). "partial": inputs were not fully
+        read or extracted. "full": everything attempted succeeded."""
+        if self.rule_failures or self.registry_failures:
+            return "degraded"
+        if (self.manifest_errors or self.manifest_incomplete
+                or self.parse_error_files or self.skipped_files):
+            return "partial"
+        return "full"
+
     def merge(self, other: "Diagnostics") -> None:
         self.manifest_errors += [e for e in other.manifest_errors
                                  if e not in self.manifest_errors]
         self.manifest_files += [f for f in other.manifest_files
                                 if f not in self.manifest_files]
+        self.manifest_incomplete += [p for p in other.manifest_incomplete
+                                     if p not in self.manifest_incomplete]
         self.skipped_files += other.skipped_files
         self.parse_error_files += other.parse_error_files
         self.rule_errors += other.rule_errors

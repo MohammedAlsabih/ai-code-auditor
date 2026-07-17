@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast as _ast
 import re
 import tomllib
 from dataclasses import replace
@@ -11,8 +12,6 @@ from auditor.core.models import DeclaredDep, Finding, ImportRef, Severity, Sourc
 from auditor.registries.pypi import canonical
 
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
-_SETUP_LIST = re.compile(r"install_requires\s*=\s*\[(.*?)\]", re.S)
-_QUOTED = re.compile(r"""["']([^"']+)["']""")
 _VCS_SCHEMES = ("git+", "hg+", "svn+", "bzr+")
 _URL_START = _VCS_SCHEMES + ("http://", "https://", "file://", "ftp://")
 _EGG = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
@@ -27,28 +26,47 @@ NAMESPACE_PREFIXES = frozenset({
 })
 
 
-def _reachable_minors(sset, spec: str, max_minor: int) -> set[int]:
+def _bound_versions(sset) -> list:
+    """The NORMALIZED Version of every bound in the specifier set. Iterating the
+    parsed Specifier objects (not regexing raw text) makes `3.13.0-rc1` and
+    `3.13.0rc1` identical, exactly as PEP 440 defines them."""
+    from packaging.version import InvalidVersion, Version
+    out = []
+    for spec in sset:
+        text = spec.version
+        if text.endswith(".*"):
+            text = text[:-2]          # ==3.12.* — probe the prefix itself
+        try:
+            out.append(Version(text))
+        except InvalidVersion:
+            continue                  # e.g. ===arbitrary-string
+    return out
+
+
+def _reachable_minors(sset, max_minor: int) -> set[int]:
     """The set of 3.x minors admitted by the specifier: a synthetic patch sweep
-    (0, a large sentinel, spec patch literals ±1) plus explicit version literals
-    and their numeric neighbours (for prerelease-only ranges)."""
+    (0, a large sentinel, bound patch numbers ±1) plus each normalized bound
+    version and its numeric neighbours (for prerelease-only ranges)."""
     from packaging.version import Version
+    bounds = _bound_versions(sset)
     patches = {0, 10_000}
-    for mt in re.finditer(r"3\.\d+\.(\d+)", spec):
-        p = int(mt.group(1))
-        patches.update({max(0, p - 1), p, p + 1})
+    for v in bounds:
+        if len(v.release) >= 3 and v.release[0] == 3:
+            p = v.release[2]
+            patches.update({max(0, p - 1), p, p + 1})
     reachable: set[int] = set()
     for minor in range(0, max_minor + 1):
         if any(sset.contains(Version(f"3.{minor}.{c}"), prereleases=True) for c in patches):
             reachable.add(minor)
     literals: set[str] = set()
-    for mt in re.finditer(r"3\.\d+(?:\.\w+)*", spec):
-        literals.update(_numeric_neighbours(mt.group(0)))
+    for v in bounds:
+        literals.update(_numeric_neighbours(str(v)))
     for lit in literals:
         try:
             v = Version(lit)
         except Exception:
             continue
-        if sset.contains(v, prereleases=True) and len(v.release) >= 2:
+        if sset.contains(v, prereleases=True) and len(v.release) >= 2 and v.release[0] == 3:
             reachable.add(v.release[1])
     return reachable
 
@@ -77,7 +95,8 @@ class PythonAdapter(LanguageAdapter):
 
     def __init__(self) -> None:
         self._internal_roots: set[str] = set()
-        self._local_regular: set[str] = set()
+        self._local_packages: set[str] = set()
+        self._local_modules: set[str] = set()
         self._local_namespace: set[str] = set()
 
     def detect(self, root: Path) -> bool:
@@ -187,7 +206,7 @@ class PythonAdapter(LanguageAdapter):
                                         constraint=constraint or is_c)
 
     def _note(self, message: str) -> None:
-        if self._diag is not None:
+        if self._diag is not None and message not in self._diag.notes:
             self._diag.notes.append(message)
 
     def _req_dep(self, line: str, rel: str, lineno: int) -> DeclaredDep | None:
@@ -213,9 +232,12 @@ class PythonAdapter(LanguageAdapter):
                            source_file=rel, line=lineno, raw=line, skip_registry=False)
 
     def _schema_note(self, path: Path, what: str) -> None:
-        if self._diag is not None:
-            self._diag.notes.append(
-                f"{path.name}: unexpected schema for {what} — section skipped")
+        """A schema-invalid section was skipped: note it AND mark the manifest
+        partially extracted, so analysis_confidence() actually reflects it."""
+        self._note(f"{path.name}: unexpected schema for {what} — section skipped")
+        rel = self._provenance(path)
+        if self._diag is not None and rel not in self._diag.manifest_incomplete:
+            self._diag.manifest_incomplete.append(rel)
 
     def _dep_string_list(self, value, path: Path, what: str) -> list[str]:
         """A list of PEP 508 strings, or [] + one diagnostic on a wrong type.
@@ -241,7 +263,7 @@ class PythonAdapter(LanguageAdapter):
         if not isinstance(data, dict):
             self._schema_note(path, "top-level document")
             return []
-        uv_local = self._uv_local_names(data)
+        uv_local = self._uv_local_names(data, path)
         out: list[DeclaredDep] = []
         for spec in self._pep621_specs(data, path):
             dep = self._from_pep508(spec, path.name)
@@ -255,6 +277,9 @@ class PythonAdapter(LanguageAdapter):
 
     def _pep621_specs(self, data: dict, path: Path) -> list[str]:
         proj = data.get("project")
+        if proj is not None and not isinstance(proj, dict):
+            self._schema_note(path, "project")     # `project = "oops"` is NOT silent
+            proj = {}
         proj = proj if isinstance(proj, dict) else {}
         specs = self._dep_string_list(proj.get("dependencies"), path, "project.dependencies")
         opt = proj.get("optional-dependencies")
@@ -272,21 +297,25 @@ class PythonAdapter(LanguageAdapter):
             self._schema_note(path, "dependency-groups")
         return specs
 
+    def _checked_table(self, data: dict, key: str, path: Path, label: str):
+        """data[key] as a dict, or None — a wrong-typed section gets a schema
+        note instead of a silent coercion."""
+        value = data.get(key)
+        if value is None or isinstance(value, dict):
+            return value
+        self._schema_note(path, label)
+        return None
+
     def _poetry_deps(self, data: dict, path: Path) -> list[DeclaredDep]:
-        tool = data.get("tool")
-        poetry = tool.get("poetry") if isinstance(tool, dict) else None
-        poetry = poetry if isinstance(poetry, dict) else {}
+        tool = self._checked_table(data, "tool", path, "tool") or {}
+        poetry = self._checked_table(tool, "poetry", path, "tool.poetry") or {}
         tables = []
         main = poetry.get("dependencies")
         if isinstance(main, dict):
             tables.append(main)
         elif main is not None:
             self._schema_note(path, "tool.poetry.dependencies")
-        groups = poetry.get("group")
-        if isinstance(groups, dict):
-            for grp in groups.values():
-                if isinstance(grp, dict) and isinstance(grp.get("dependencies"), dict):
-                    tables.append(grp["dependencies"])
+        tables += self._poetry_group_tables(poetry, path)
         out = []
         for table in tables:
             for k, v in table.items():
@@ -299,18 +328,50 @@ class PythonAdapter(LanguageAdapter):
                                        skip_registry=skip))
         return out
 
-    @staticmethod
-    def _uv_local_names(data: dict) -> set[str]:
+    def _poetry_group_tables(self, poetry: dict, path: Path) -> list[dict]:
+        groups = poetry.get("group")
+        if groups is None:
+            return []
+        if not isinstance(groups, dict):
+            self._schema_note(path, "tool.poetry.group")
+            return []
+        tables = []
+        for gname, grp in groups.items():
+            deps = grp.get("dependencies") if isinstance(grp, dict) else None
+            if isinstance(deps, dict):
+                tables.append(deps)
+            elif not isinstance(grp, dict) or deps is not None:
+                # a group that is not a table, or whose dependencies is a
+                # list/string: declared deps would be silently DROPPED
+                self._schema_note(path, f"tool.poetry.group.{gname}")
+        return tables
+
+    _UV_LOCAL_KEYS = ("path", "git", "url", "workspace")
+
+    def _uv_local_names(self, data: dict, path: Path) -> set[str]:
         """Canonical names declared with a local/vcs/workspace [tool.uv.sources]
-        entry — these resolve off-registry and must NOT be PyPI-checked (H001)."""
+        entry — these resolve off-registry and must NOT be PyPI-checked (H001).
+        uv also allows a LIST of conditional sources per name (marker-gated);
+        conservative policy: if ANY alternative is local/vcs/workspace — even
+        alongside an index entry — never claim H001 from a public lookup."""
         tool = data.get("tool")
         uv = tool.get("uv") if isinstance(tool, dict) else None
         sources = uv.get("sources") if isinstance(uv, dict) else None
-        if not isinstance(sources, dict):
+        if sources is None:
             return set()
-        local_keys = ("path", "git", "url", "workspace")
-        return {canonical(name) for name, src in sources.items()
-                if isinstance(src, dict) and any(k in src for k in local_keys)}
+        if not isinstance(sources, dict):
+            self._schema_note(path, "tool.uv.sources")
+            return set()
+        out: set[str] = set()
+        for name, src in sources.items():
+            entries = src if isinstance(src, list) else [src]
+            tables = [e for e in entries if isinstance(e, dict)]
+            if not tables:
+                self._schema_note(path, f"tool.uv.sources.{name}")
+                continue
+            if any(k in e for e in tables for k in self._UV_LOCAL_KEYS):
+                out.add(canonical(name))
+        return out
 
     def _parse_pipfile(self, path: Path) -> list[DeclaredDep]:
         try:
@@ -343,30 +404,94 @@ class PythonAdapter(LanguageAdapter):
         return DeclaredDep(name=canonical(m.group(1)), ecosystem="pypi",
                            source_file=src, raw=spec, skip_registry="@" in spec)
 
+    _SETUP_DEP_KWARGS = ("install_requires", "setup_requires", "tests_require")
+
     def _parse_setup_py(self, path: Path) -> list[DeclaredDep]:
-        m = _SETUP_LIST.search(self._read(path))
-        if not m:
+        """AST-based, never executes the file: only literal lists inside the real
+        setup(...) call count — a commented-out or string-embedded
+        install_requires can no longer fabricate declared deps. Dynamic
+        expressions surface as manifest_incomplete, not a silent []."""
+        src = self._read(path)
+        if not src:
             return []
-        return [d for d in (self._from_pep508(s, path.name) for s in _QUOTED.findall(m.group(1)))
-                if d is not None]
+        rel = self._provenance(path)
+        try:
+            tree = _ast.parse(src)
+        except SyntaxError as e:
+            self._manifest_error(path, e)
+            return []
+        out: list[DeclaredDep] = []
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Call) and self._is_setup_call(node):
+                out += self._setup_call_deps(node, rel, path)
+        return out
+
+    @staticmethod
+    def _is_setup_call(call) -> bool:
+        f = call.func
+        return (isinstance(f, _ast.Name) and f.id == "setup") or \
+               (isinstance(f, _ast.Attribute) and f.attr == "setup")
+
+    def _setup_call_deps(self, call, rel: str, path: Path) -> list[DeclaredDep]:
+        out: list[DeclaredDep] = []
+        for kw in call.keywords:
+            if kw.arg in self._SETUP_DEP_KWARGS:
+                out += self._static_spec_list(kw.value, kw.arg, rel, path)
+            elif kw.arg == "extras_require":
+                if isinstance(kw.value, _ast.Dict):
+                    for v in kw.value.values:
+                        out += self._static_spec_list(v, "extras_require", rel, path)
+                else:
+                    self._dynamic_manifest(path, rel, "extras_require")
+        return out
+
+    def _static_spec_list(self, node, arg: str, rel: str, path: Path) -> list[DeclaredDep]:
+        """Literal list/tuple elements only. Per-element: a string constant keeps
+        its own line; a non-literal element marks the manifest incomplete."""
+        if not isinstance(node, (_ast.List, _ast.Tuple)):
+            self._dynamic_manifest(path, rel, arg)
+            return []
+        out = []
+        for elt in node.elts:
+            if isinstance(elt, _ast.Constant) and isinstance(elt.value, str):
+                d = self._from_pep508(elt.value, rel)
+                if d is not None:
+                    out.append(replace(d, line=elt.lineno))
+            else:
+                self._dynamic_manifest(path, rel, arg)
+        return out
+
+    def _dynamic_manifest(self, path: Path, rel: str, what: str) -> None:
+        """A dependency expression we cannot resolve statically: note + mark the
+        manifest partially extracted (drives analysis_confidence to 'partial')."""
+        self._note(f"{rel}: dynamic/non-literal {what} in setup.py — "
+                   "dependencies not fully extracted")
+        if self._diag is not None and rel not in self._diag.manifest_incomplete:
+            self._diag.manifest_incomplete.append(rel)
 
     _IMPORT_QUERY = "[(import_statement) (import_from_statement)] @imp"
 
     def prepare(self, root: Path, files: list[SourceFile]) -> None:
         self.ensure_grammars()
         self._last_files = files   # reused by project_rules (P008)
-        regular: set[str] = set()      # regular packages / .py file modules (claim subtree)
-        namespace: set[str] = set()    # PEP 420 namespace dirs (claim only exact + children)
+        # three distinct kinds of local names (a module FILE is not a package —
+        # `import foo.x` fails at runtime when foo is foo.py, so it must NOT be
+        # silenced as internal):
+        packages: set[str] = set()     # dirs with __init__.py  -> claim subtree
+        modules: set[str] = set()      # plain .py files        -> exact match only
+        namespace: set[str] = set()    # PEP 420 dirs           -> exact match only
         for base in (root, root / "src", root / "lib"):
             if base.is_dir():
-                self._scan_local(base, regular, namespace)
-        self._local_regular = regular
+                self._scan_local(base, packages, modules, namespace)
+        self._local_packages = packages
+        self._local_modules = modules
         self._local_namespace = namespace
-        self._internal_roots = {m.split(".")[0] for m in (regular | namespace)}
+        self._internal_roots = {m.split(".")[0]
+                                for m in (packages | modules | namespace)}
 
     @staticmethod
-    def _scan_local(base: Path, regular: set[str], namespace: set[str],
-                    max_depth: int = 6) -> None:
+    def _scan_local(base: Path, packages: set[str], modules: set[str],
+                    namespace: set[str], max_depth: int = 6) -> None:
         import os
         from auditor.core.walk import IGNORE_DIRS
         base_len = len(base.parts)
@@ -376,13 +501,13 @@ class PythonAdapter(LanguageAdapter):
             if len(rel) > max_depth:
                 dirnames[:] = []
                 continue
-            if rel:   # a subdirectory of base: a package (regular if __init__.py)
+            if rel:   # a subdirectory of base
                 dotted = ".".join(rel)
-                (regular if "__init__.py" in filenames else namespace).add(dotted)
+                (packages if "__init__.py" in filenames else namespace).add(dotted)
             for f in filenames:
                 if f.endswith(".py") and f != "__init__.py":
                     stem = f[:-3]
-                    regular.add(".".join(rel + (stem,)) if rel else stem)
+                    modules.add(".".join(rel + (stem,)) if rel else stem)
 
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]:
         from auditor.core.treesitter import captures, parse_source
@@ -439,13 +564,14 @@ class PythonAdapter(LanguageAdapter):
                 or top in self.REMOVED_STDLIB:
             return True
         mod = imp.module
-        if mod in self._local_regular or mod in self._local_namespace:
+        # module FILES and namespace dirs own only names that actually exist on
+        # disk (every existing child is itself in one of the scanned sets);
+        # ONLY a regular package (__init__.py) claims its whole dotted subtree.
+        # So foo.py does NOT make `import foo.nonexistent` internal, and a local
+        # `google/myapp` does NOT make `google.cloud.x` internal.
+        if mod in self._local_modules or mod in self._local_namespace:
             return True
-        # a regular local module (package with __init__ or a .py file) claims its
-        # whole dotted subtree; a namespace dir claims ONLY itself and existing
-        # children (so a local `google.myapp` does NOT make `google.cloud.X`
-        # internal — that resolves to the external google-cloud package)
-        return any(mod == m or mod.startswith(m + ".") for m in self._local_regular)
+        return any(mod == p or mod.startswith(p + ".") for p in self._local_packages)
 
     def match_declared(self, imp: ImportRef, declared: list[DeclaredDep]) -> DeclaredDep | None:
         names = {canonical(imp.top_level)}
@@ -482,6 +608,19 @@ class PythonAdapter(LanguageAdapter):
         if "." in imp.module:
             return []
         return [canonical(top)]   # single-segment: the import==dist convention
+
+    def import_mapping_trust(self, imp: ImportRef) -> str:
+        """TRUST POLICY (CP-3): import-name == PyPI-name is a packaging
+        CONVENTION, not a guarantee — any distribution may provide any module
+        (biopython->Bio, djangorestframework->rest_framework). So only the
+        curated alias table is "exact"; the identity convention is "heuristic",
+        which (in core) forbids a definitive RED H008 whenever an unmatched
+        declared distribution could be the module's real provider."""
+        top = imp.top_level
+        if (top in IMPORT_TO_DIST or top.startswith("win32")
+                or top in ("pythoncom", "pywintypes")):
+            return "exact"
+        return "heuristic"
 
     def grammars(self) -> dict[str, object]:
         import tree_sitter_python
@@ -612,6 +751,6 @@ class PythonAdapter(LanguageAdapter):
             sset = SpecifierSet(spec)
         except InvalidSpecifier:
             return None
-        reachable = _reachable_minors(sset, spec, self._MAX_MINOR)
+        reachable = _reachable_minors(sset, self._MAX_MINOR)
         allowed = sorted((3, m) for m in reachable)
         return allowed or None

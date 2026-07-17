@@ -55,6 +55,28 @@ class RegistryClient(ABC):
     def lookup(self, name: str) -> PackageInfo: ...
 
 
+# exact field set AND field TYPES a cached PackageInfo must carry — a value
+# like {"exists": "false"} (truthy string!) or created=123 (age_days would
+# crash) must be a cold MISS, never served
+_HIT_SCHEMA: dict[str, tuple[type, ...]] = {
+    "exists": (bool,), "created": (str, type(None)), "latest": (str, type(None)),
+    "downloads": (int, type(None)), "downloads_period": (str,),
+    "quarantined": (bool,), "archived": (bool,), "error": (str, type(None)),
+}
+
+
+def _valid_hit(hit: object) -> bool:
+    if not isinstance(hit, dict) or set(hit) != set(_HIT_SCHEMA):
+        return False
+    for field_name, types in _HIT_SCHEMA.items():
+        value = hit[field_name]
+        if isinstance(value, bool) and bool not in types:
+            return False           # bool IS an int — reject True where int expected
+        if not isinstance(value, types):
+            return False
+    return True
+
+
 class CachedRegistry:
     def __init__(self, inner: RegistryClient, cache: Cache):
         self.inner = inner
@@ -69,13 +91,9 @@ class CachedRegistry:
         # coordinates or any case-sensitive ecosystem
         key = f"{self.ecosystem}:{self.inner.cache_key(name)}"
         hit = self.cache.get(key)
-        if hit is not None:
-            try:
-                return PackageInfo(**hit)
-            except TypeError:
-                # a foreign/older cache value shape (missing/extra/wrong fields)
-                # is a cache MISS, never a registry failure — re-query fresh
-                pass
+        if hit is not None and _valid_hit(hit):
+            return PackageInfo(**hit)
+        # foreign/corrupt shape or wrong field types => cache MISS, re-query fresh
         info = self.inner.lookup(name)
         if info.error is None:
             ttl = TTL_EXISTS if info.exists else TTL_MISSING

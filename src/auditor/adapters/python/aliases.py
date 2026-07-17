@@ -6,6 +6,11 @@ IMPORT_TO_DIST = {
     "pptx": "python-pptx", "fitz": "pymupdf", "nacl": "pynacl", "github": "pygithub",
     "telegram": "python-telegram-bot", "socks": "pysocks", "websocket": "websocket-client",
     "zmq": "pyzmq", "attr": "attrs", "gi": "pygobject",
+    "Bio": "biopython", "dns": "dnspython", "grpc": "grpcio",
+    "rest_framework": "djangorestframework",
+    "psycopg2": "psycopg2-binary", "MySQLdb": "mysqlclient", "kafka": "kafka-python",
+    "usb": "pyusb", "snap7": "python-snap7", "ldap": "python-ldap",
+    "jose": "python-jose", "memcache": "python-memcached", "openid": "python-openid",
     # well-known import != distribution divergences (a red H008 here would be a
     # false hallucination; these resolve to their real declaring distribution)
     "pkg_resources": "setuptools", "setuptools": "setuptools",

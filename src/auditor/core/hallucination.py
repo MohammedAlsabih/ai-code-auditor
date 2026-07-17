@@ -30,16 +30,23 @@ _SEV = {"H001": Severity.RED, "H002": Severity.YELLOW, "H003": Severity.BLUE,
 _MAPPING_RULES = {"H002", "H007", "H008"}
 
 
-def _finding(rule_id: str, adapter, file: str, line: int, detail: str, snippet: str = "") -> Finding:
+def _finding(rule_id: str, adapter, file: str, line: int, detail: str,
+             snippet: str = "", trust: str | None = None) -> Finding:
     if rule_id == "H007":
         precision = "heuristic"   # H007 == "could not map reliably" => never exact
     elif rule_id in _MAPPING_RULES:
-        precision = getattr(adapter, "mapping_precision", "exact")
+        # per-import trust (when the caller knows it) beats the adapter-wide level
+        precision = trust or str(getattr(adapter, "mapping_precision", "exact"))
     else:
         precision = "exact"
     return Finding(rule_id=rule_id, severity=_SEV[rule_id], title=_TITLES[rule_id],
                    file=file, line=line, snippet=snippet, detail=detail,
                    language=adapter.name, engine="auditor", precision=precision)
+
+
+def _import_trust(adapter, imp: ImportRef) -> str:
+    fn = getattr(adapter, "import_mapping_trust", None)
+    return fn(imp) if callable(fn) else getattr(adapter, "mapping_precision", "exact")
 
 
 def _bulk_lookup(registry, names: list[str]) -> dict[str, PackageInfo]:
@@ -81,11 +88,20 @@ def _collect_checkable(declared: list[DeclaredDep]) -> list[DeclaredDep]:
     return out
 
 
-def _collect_externals(adapter, imports, declared) -> list[ImportRef]:
+def _collect_externals(adapter, imports, declared) -> tuple[list[ImportRef], list[str]]:
+    """(unmatched external imports, POTENTIAL PROVIDERS). Providers are declared
+    deps no import matched — a distribution can provide modules under any name
+    (biopython->Bio), so an unmatched declared dep may be the true source of an
+    unmatched import, and that possibility must temper H002/H008 verdicts."""
     out: list[ImportRef] = []
     seen: set[str] = set()
+    matched_names: set[str] = set()
     for imp in imports:
-        if adapter.is_internal(imp) or adapter.match_declared(imp, declared):
+        if adapter.is_internal(imp):
+            continue
+        dep = adapter.match_declared(imp, declared)
+        if dep is not None:
+            matched_names.add(dep.name)
             continue
         # dedup by registry candidate(s); with no reliable mapping (shared
         # namespace) fall back to the FULL module so distinct distributions under
@@ -96,7 +112,8 @@ def _collect_externals(adapter, imports, declared) -> list[ImportRef]:
             continue
         seen.add(key)
         out.append(imp)
-    return out
+    providers = sorted({d.name for d in declared} - matched_names)
+    return out, providers
 
 
 def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
@@ -107,7 +124,7 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     if diag is not None:
         _record_parse_errors(files, diag)
     checkable = _collect_checkable(declared)
-    externals = _collect_externals(adapter, imports, declared)
+    externals, providers = _collect_externals(adapter, imports, declared)
 
     if registry is None:
         for dep in checkable:
@@ -125,11 +142,18 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     for dep in checkable:
         info = dep_infos[dep.lookup_name]
         findings += _judge_declared(adapter, dep, info, private_reason)
+    if private_reason is None:
+        # a declared dep CONFIRMED absent from the registry (an H001 ghost)
+        # cannot be installed, so it cannot provide any module — it must not
+        # soften an H008 verdict. With a private source it stays a candidate.
+        dead = {d.name for d in checkable
+                if (i := dep_infos[d.lookup_name]).error is None and not i.exists}
+        providers = [p for p in providers if p not in dead]
 
     cand_names = sorted({c for imp in externals for c in adapter.registry_candidates(imp)})
     cand_infos = _bulk_lookup(registry, cand_names)
     for imp in externals:
-        findings += _judge_import(adapter, imp, cand_infos, private_reason)
+        findings += _judge_import(adapter, imp, cand_infos, private_reason, providers)
     if diag is not None:
         # count UNIQUE lookups and their failures, not H004 findings — a single
         # crashed candidate shared by N imports must not inflate the failure
@@ -191,26 +215,43 @@ def _status_findings(adapter, info: PackageInfo, file: str, line: int,
     return []
 
 
+def _provider_hint(providers: list[str]) -> str:
+    shown = ", ".join(providers[:3]) + (", …" if len(providers) > 3 else "")
+    return (f" A declared-but-unmatched distribution ({shown}) may be the real "
+            "provider of this module — verify before treating it as undeclared.")
+
+
+def _judge_import_exists(adapter, imp: ImportRef, label: str, exists_name: str,
+                         existing: PackageInfo, trust: str,
+                         providers: list[str]) -> list[Finding]:
+    # keep the undeclared FACT (H002) AND surface the package's security
+    # state (quarantine/archive/newness) — undeclared must not hide risk
+    detail = (f"{label}: imported but not declared in the manifest "
+              f"(exists in registry as '{exists_name}').")
+    if trust != "exact" and providers:
+        detail += _provider_hint(providers)
+    return [_finding("H002", adapter, imp.file, imp.line, detail, imp.module,
+                     trust=trust)] \
+        + _status_findings(adapter, existing, imp.file, imp.line, label, imp.module)
+
+
 def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
-                  private_reason: str | None) -> list[Finding]:
+                  private_reason: str | None, providers: list[str]) -> list[Finding]:
     label = imp.top_level or imp.module
     cands = adapter.registry_candidates(imp)
+    trust = _import_trust(adapter, imp)
     if not cands:
         return [_finding("H007", adapter, imp.file, imp.line,
                          f"{label}: imported but not declared; no reliable mapping to a "
-                         f"{adapter.ecosystem} identifier (accuracy limit — verify manually).",
+                         f"{adapter.ecosystem} identifier (accuracy limit — verify manually)."
+                         + (_provider_hint(providers) if providers else ""),
                          imp.module)]
     infos = [cand_infos[c] for c in cands if c in cand_infos]
     if any(i.exists for i in infos):
         idx = [i.exists for i in infos].index(True)
         exists_name = [c for c in cands if c in cand_infos][idx]
-        existing = infos[idx]
-        # keep the undeclared FACT (H002) AND surface the package's security
-        # state (quarantine/archive/newness) — undeclared must not hide risk
-        return [_finding("H002", adapter, imp.file, imp.line,
-                         f"{label}: imported but not declared in the manifest "
-                         f"(exists in registry as '{exists_name}').", imp.module)] \
-            + _status_findings(adapter, existing, imp.file, imp.line, label, imp.module)
+        return _judge_import_exists(adapter, imp, label, exists_name, infos[idx],
+                                    trust, providers)
     if any(i.error for i in infos):
         return [_finding("H004", adapter, imp.file, imp.line,
                          f"{label}: {next(i.error for i in infos if i.error)}", imp.module)]
@@ -219,11 +260,19 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
         return [_finding("H010", adapter, imp.file, imp.line,
                          f"{label}: imported but not declared, and not found in the public "
                          f"registry — {reason}; cannot verify.", imp.module)]
+    if trust != "exact" and providers:
+        # TRUST GATE: the candidate name came from a naming CONVENTION and a
+        # declared distribution remains unmatched — a definitive RED
+        # "hallucinated" claim is not justified; degrade to unresolved (H007).
+        return [_finding("H007", adapter, imp.file, imp.line,
+                         f"{label}: imported but not declared, and the conventional "
+                         f"name ({', '.join(cands)}) is absent from the registry."
+                         + _provider_hint(providers), imp.module)]
     return [_finding("H008", adapter, imp.file, imp.line,
                      f"{label}: imported but not declared AND not found in the public "
                      f"{adapter.ecosystem} registry (candidates tried: {', '.join(cands)}). "
                      "Likely an AI-hallucinated import; the unregistered name is claimable "
-                     "(slopsquatting).", imp.module)]
+                     "(slopsquatting).", imp.module, trust=trust)]
 
 
 def _sorted(findings: list[Finding]) -> list[Finding]:
