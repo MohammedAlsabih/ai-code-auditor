@@ -10,10 +10,12 @@ class MiniAdapter:
     """Adapter stub: everything is external; declared-matching by exact name."""
     name = "python"
     ecosystem = "pypi"
+    mapping_precision = "exact"
 
-    def __init__(self, internal=(), private_reason=None):
+    def __init__(self, internal=(), private_reason=None, scoped_hint=False):
         self._internal = set(internal)
         self._private_reason = private_reason
+        self._scoped_hint = scoped_hint
 
     def prepare(self, root, files): ...
     def is_internal(self, imp):
@@ -28,10 +30,15 @@ class MiniAdapter:
         return []
     def private_registry_reason(self, root):
         return self._private_reason
+    def unresolvable_hint(self, identifier):
+        # stands in for an npm-style scoped hint, kept OUT of core
+        if self._scoped_hint and identifier.startswith("@"):
+            return "scoped package (private scopes 404 without auth)"
+        return None
 
 
-def run(declared, imports, registry, internal=(), private_reason=None):
-    a = MiniAdapter(internal, private_reason)
+def run(declared, imports, registry, internal=(), private_reason=None, scoped_hint=False):
+    a = MiniAdapter(internal, private_reason, scoped_hint)
     a._imports = imports
     return audit_hallucinations(a, Path("."), [], declared, registry)
 
@@ -96,11 +103,43 @@ def test_private_registry_downgrades_h001_to_h010():
     assert [(f.rule_id, f.severity) for f in fs] == [("H010", Severity.YELLOW)]
 
 
-def test_scoped_missing_is_h010_not_red():
+def test_scoped_missing_is_h010_via_adapter_hint_not_core():
+    # the scoped/private-source ambiguity now comes from the adapter, not core
     reg = FakeRegistry("npm", {})
     fs = run([DeclaredDep(name="@corp/secret-lib", ecosystem="npm",
-                          source_file="package.json")], [], reg)
+                          source_file="package.json")], [], reg, scoped_hint=True)
     assert [f.rule_id for f in fs] == ["H010"]
+    # without the adapter hint the same missing name is a plain H001 (core is neutral)
+    fs2 = run([DeclaredDep(name="@corp/secret-lib", ecosystem="npm",
+                           source_file="package.json")], [], reg, scoped_hint=False)
+    assert [f.rule_id for f in fs2] == ["H001"]
+
+
+def test_core_has_no_ecosystem_specific_branches():
+    import inspect
+
+    import auditor.core.hallucination as mod
+    src = inspect.getsource(mod)
+    for token in ('"@"', "'@'", "startswith(\"@\")", "npm", "pypi", "maven", "nuget"):
+        assert token not in src, f"core neutrality violated: {token!r} in hallucination.py"
+
+
+def test_distinct_namespace_imports_not_merged():
+    # dedup must not collapse two distributions sharing a namespace top-level
+    reg = FakeRegistry("pypi", {})
+
+    class NS(MiniAdapter):
+        def registry_candidates(self, imp):
+            return []   # shared namespace => no candidate => dedup by full module
+    a = NS()
+    a._imports = [_imp2("google.cloud.storage", "google"),
+                  _imp2("google.cloud.bigquery", "google")]
+    fs = audit_hallucinations(a, Path("."), [], [], reg)
+    assert [f.rule_id for f in fs] == ["H007", "H007"]   # two, not one
+
+
+def _imp2(module, top):
+    return ImportRef(module=module, file="app.py", line=1, top_level=top)
 
 
 def test_npm_alias_checks_registry_name():

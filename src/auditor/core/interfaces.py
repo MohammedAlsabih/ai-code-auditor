@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -113,6 +113,13 @@ class LanguageAdapter(ABC):
     def private_registry_reason(self, root: Path) -> str | None:
         """Non-None when the project configures a custom/private package source
         (=> missing packages become H010, not H001/H008)."""
+        return None
+
+    def unresolvable_hint(self, identifier: str) -> str | None:
+        """Ecosystem-specific reason a not-found identifier might still be valid
+        rather than hallucinated (e.g. an npm private scope `@corp/x` that 404s
+        without auth). Default: none. Keeps scoped/private semantics in the
+        adapter so core/hallucination.py stays registry-neutral."""
         return None
 
     def ensure_grammars(self) -> None:

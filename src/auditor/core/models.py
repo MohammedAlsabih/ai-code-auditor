@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 
 class Severity(str, Enum):
@@ -54,7 +55,8 @@ class SourceFile:
     rel: str             # posix, relative to project root
     language: str        # "python" | "java" | "csharp" | "typescript" | "tsx"
     text: bytes
-    tree: object | None = None   # tree_sitter.Tree, filled lazily
+    tree: Any = None     # tree_sitter.Tree, filled lazily (kept Any to avoid a
+    #                      tree_sitter import in the models module)
 
 
 @dataclass

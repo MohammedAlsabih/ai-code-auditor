@@ -70,7 +70,12 @@ class CachedRegistry:
         key = f"{self.ecosystem}:{self.inner.cache_key(name)}"
         hit = self.cache.get(key)
         if hit is not None:
-            return PackageInfo(**hit)
+            try:
+                return PackageInfo(**hit)
+            except TypeError:
+                # a foreign/older cache value shape (missing/extra/wrong fields)
+                # is a cache MISS, never a registry failure — re-query fresh
+                pass
         info = self.inner.lookup(name)
         if info.error is None:
             ttl = TTL_EXISTS if info.exists else TTL_MISSING

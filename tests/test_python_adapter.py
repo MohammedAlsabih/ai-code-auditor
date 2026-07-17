@@ -288,6 +288,108 @@ def test_source_file_disambiguates_same_named_includes(tmp_path):
     assert by == {"flask": "a/base.txt", "django": "b/base.txt"}
 
 
+def test_known_divergent_import_matches_declared_distribution(tmp_path):
+    # pkg_resources<-setuptools, OpenGL<-pyopengl, cairo<-pycairo, mpl<-matplotlib
+    from auditor.core.hallucination import audit_hallucinations
+    _mk(tmp_path, "requirements.txt",
+        "setuptools\npyopengl\npycairo\nmatplotlib\npywin32\n")
+    _mk(tmp_path, "app.py",
+        "import pkg_resources\nimport OpenGL.GL\nimport cairo\n"
+        "import mpl_toolkits.mplot3d\nimport win32service\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    declared = a.parse_dependencies(tmp_path)
+    for imp in a.extract_imports(files):
+        assert a.match_declared(imp, declared) is not None, imp.module
+
+    class Reg:
+        ecosystem = "pypi"
+        def lookup(self, n): return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    assert audit_hallucinations(a, tmp_path, files, declared, Reg()) == []
+
+
+def test_unmapped_multisegment_import_is_h007_not_red_h008(tmp_path):
+    from auditor.core.hallucination import audit_hallucinations
+    _mk(tmp_path, "requirements.txt", "requests\n")
+    _mk(tmp_path, "app.py", "import totallymadeup.submodule\nimport superhallucinated\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    declared = a.parse_dependencies(tmp_path)
+
+    class Reg:
+        ecosystem = "pypi"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z") if n == "requests" \
+                else PackageInfo(exists=False)
+    ids = sorted(f.rule_id for f in audit_hallucinations(a, tmp_path, files, declared, Reg()))
+    # multi-segment unmapped => H007 (heuristic); single-segment hallucination => H008 red
+    assert ids == ["H007", "H008"]
+
+
+def test_missing_and_outside_includes_produce_diagnostics(tmp_path):
+    from auditor.core.models import Diagnostics
+    root = tmp_path / "repo"
+    root.mkdir()
+    (tmp_path / "outside.txt").write_text("evil\n", encoding="utf-8")
+    _mk(root, "requirements.txt",
+        "-r missing.txt\n--constraint=also-missing.txt\n-r ../outside.txt\nrequests\n")
+    diag = Diagnostics()
+    names = {d.name for d in PythonAdapter().parse_dependencies(root, diag=diag)}
+    assert names == {"requests"}
+    joined = " ".join(diag.notes)
+    assert "missing.txt" in joined and "not found" in joined
+    assert "outside scan root" in joined
+
+
+def test_bad_list_element_is_noted(tmp_path):
+    from auditor.core.models import Diagnostics
+    _mk(tmp_path, "pyproject.toml", '[project]\ndependencies = ["requests", 123]\n')
+    diag = Diagnostics()
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path, diag=diag)}
+    assert names == {"requests"}
+    assert any("non-string" in n for n in diag.notes)
+
+
+def test_uv_sources_local_path_skips_registry(tmp_path):
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\ndependencies = ["internal-lib", "requests"]\n'
+        '[tool.uv.sources]\n'
+        'internal-lib = { path = "../internal-lib" }\n')
+    by = {d.name: d.skip_registry for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert by["internal-lib"] is True     # local uv source => not PyPI-checked
+    assert by["requests"] is False
+
+
+def test_uv_sources_workspace_and_git_skip_registry(tmp_path):
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\ndependencies = ["ws-lib", "git-lib"]\n'
+        '[tool.uv.sources]\n'
+        'ws-lib = { workspace = true }\n'
+        'git-lib = { git = "https://x/y.git" }\n')
+    by = {d.name: d.skip_registry for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert by["ws-lib"] is True and by["git-lib"] is True
+
+
+def test_partial_parse_recorded_in_diagnostics(tmp_path):
+    from auditor.core.hallucination import audit_hallucinations
+    from auditor.core.models import Diagnostics
+    _mk(tmp_path, "requirements.txt", "requests\n")
+    _mk(tmp_path, "broken.py", "def f(:\n    pass\n")   # syntax error
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    declared = a.parse_dependencies(tmp_path)
+
+    class Reg:
+        ecosystem = "pypi"
+        def lookup(self, n): return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    diag = Diagnostics()
+    audit_hallucinations(a, tmp_path, files, declared, Reg(), diag=diag)
+    assert "broken.py" in diag.parse_error_files
+
+
 # ---------- T7: imports, stdlib, locality, mapping ----------
 
 def test_extract_imports_and_locality(tmp_path):

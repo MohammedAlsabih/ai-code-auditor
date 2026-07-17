@@ -16,7 +16,7 @@ _TITLES = {
     "H006": "Recently published package (< fresh threshold)",
     "H007": "Undeclared import — cannot be mapped to a registry identifier",
     "H008": "Undeclared import not found in the public registry",
-    "H009": "Package quarantined by registry (PyPI PEP 792)",
+    "H009": "Package quarantined by the registry (suspected malware)",
     "H010": "Not found in public registry — private source configured or scoped (unverifiable)",
     "H012": "Package archived by its owner (PEP 792 status)",
 }
@@ -61,31 +61,53 @@ def _bulk_lookup(registry, names: list[str]) -> dict[str, PackageInfo]:
     return dict(zip(unique, infos))
 
 
+def _record_parse_errors(files: list[SourceFile], diag) -> None:
+    # partial parses must not read as complete analysis; record once, deduped
+    for sf in files:
+        tree = getattr(sf, "tree", None)
+        if tree is not None and tree.root_node.has_error \
+                and sf.rel not in diag.parse_error_files:
+            diag.parse_error_files.append(sf.rel)
+
+
+def _collect_checkable(declared: list[DeclaredDep]) -> list[DeclaredDep]:
+    out, seen = [], set()
+    for dep in declared:
+        key = dep.name.lower()
+        if key in seen or dep.skip_registry:
+            continue
+        seen.add(key)
+        out.append(dep)
+    return out
+
+
+def _collect_externals(adapter, imports, declared) -> list[ImportRef]:
+    out: list[ImportRef] = []
+    seen: set[str] = set()
+    for imp in imports:
+        if adapter.is_internal(imp) or adapter.match_declared(imp, declared):
+            continue
+        # dedup by registry candidate(s); with no reliable mapping (shared
+        # namespace) fall back to the FULL module so distinct distributions under
+        # one namespace (google.cloud.storage vs .bigquery) are not merged
+        cands = adapter.registry_candidates(imp)
+        key = ("|".join(cands) if cands else imp.module).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(imp)
+    return out
+
+
 def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
                          declared: list[DeclaredDep], registry,
                          diag=None) -> list[Finding]:
     findings: list[Finding] = []
     imports = adapter.extract_imports(files)
-
-    checkable = []
-    seen_declared: set[str] = set()
-    for dep in declared:
-        key = dep.name.lower()
-        if key in seen_declared or dep.skip_registry:
-            continue
-        seen_declared.add(key)
-        checkable.append(dep)
-
-    externals: list[ImportRef] = []
-    seen_imports: set[str] = set()
-    for imp in imports:
-        if adapter.is_internal(imp) or adapter.match_declared(imp, declared):
-            continue
-        key = (imp.top_level or imp.module).lower()
-        if key in seen_imports:
-            continue
-        seen_imports.add(key)
-        externals.append(imp)
+    if diag is not None:
+        _record_parse_errors(files, diag)
+    checkable = _collect_checkable(declared)
+    externals = _collect_externals(adapter, imports, declared)
 
     if registry is None:
         for dep in checkable:
@@ -118,12 +140,10 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     return _sorted(findings)
 
 
-def _ambiguity(dep_or_name: str, private_reason: str | None, scoped: bool) -> str | None:
-    if private_reason:
-        return private_reason
-    if scoped:
-        return "scoped npm package (private scopes return 404 without auth)"
-    return None
+def _ambiguity(adapter, name: str, private_reason: str | None) -> str | None:
+    # registry-neutral: a private-source reason (project config) OR the adapter's
+    # own ecosystem-specific hint — core stays free of per-ecosystem logic
+    return private_reason or adapter.unresolvable_hint(name)
 
 
 def _judge_declared(adapter, dep: DeclaredDep, info: PackageInfo,
@@ -133,7 +153,7 @@ def _judge_declared(adapter, dep: DeclaredDep, info: PackageInfo,
         return [_finding("H004", adapter, dep.source_file, dep.line,
                          f"{name}: {info.error}", dep.raw)]
     if not info.exists:
-        reason = _ambiguity(name, private_reason, name.startswith("@"))
+        reason = _ambiguity(adapter, name, private_reason)
         if reason:
             return [_finding("H010", adapter, dep.source_file, dep.line,
                              f"{name} was not found in the public {adapter.ecosystem} registry, "
@@ -194,7 +214,7 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
     if any(i.error for i in infos):
         return [_finding("H004", adapter, imp.file, imp.line,
                          f"{label}: {next(i.error for i in infos if i.error)}", imp.module)]
-    reason = _ambiguity(label, private_reason, label.startswith("@"))
+    reason = _ambiguity(adapter, label, private_reason)
     if reason:
         return [_finding("H010", adapter, imp.file, imp.line,
                          f"{label}: imported but not declared, and not found in the public "

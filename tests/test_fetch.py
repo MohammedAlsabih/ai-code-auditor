@@ -171,6 +171,72 @@ def test_inherited_smudge_filter_does_not_execute(monkeypatch, tmp_path):
         cleanup()
 
 
+def test_clone_env_strips_git_ssh_command_and_friends(monkeypatch, tmp_path):
+    # deterministic: command-executing env vars must NOT survive into git's env
+    for k in ("GIT_SSH_COMMAND", "GIT_SSH", "GIT_ASKPASS", "GIT_PROXY_COMMAND",
+              "GIT_TEMPLATE_DIR", "GIT_EXTERNAL_DIFF", "SSH_ASKPASS"):
+        monkeypatch.setenv(k, "sh -c 'touch owned'")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")  # benign, kept
+    recorded = {}
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(fetch.subprocess, "run",
+                        lambda cmd, **kw: (recorded.update(env=kw.get("env", {})), Ok())[1])
+    _, cleanup = resolve_target("ssh://example.invalid/x.git")
+    try:
+        env = recorded["env"]
+        leaked = [k for k in env if k.startswith("GIT_")
+                  and k not in ("GIT_TERMINAL_PROMPT", "GIT_LFS_SKIP_SMUDGE",
+                                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                                "GIT_ALLOW_PROTOCOL")]
+        assert leaked == []                          # every hostile GIT_* dropped
+        assert "SSH_ASKPASS" not in env
+        assert env.get("SSH_AUTH_SOCK") == "/tmp/agent.sock"  # agent key auth kept
+    finally:
+        cleanup()
+
+
+def test_git_ssh_command_does_not_execute_end_to_end(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    _make_source_repo(src)
+    marker = tmp_path / "SSH_MARKER"
+    attacker = f"sh -c 'printf hooked > \"{marker.as_posix()}\"; exit 1'"
+
+    # positive control: a raw clone honoring GIT_SSH_COMMAND fires the marker
+    subprocess.run(["git", "clone", "-q", "--depth", "1",
+                    "ssh://example.invalid/repo.git", str(tmp_path / "pos")],
+                   env={**os.environ, "GIT_SSH_COMMAND": attacker,
+                        "GIT_TERMINAL_PROMPT": "0"}, capture_output=True)
+    if not marker.exists():
+        pytest.skip("GIT_SSH_COMMAND does not fire on this git build")
+    marker.unlink()
+
+    monkeypatch.setenv("GIT_SSH_COMMAND", attacker)
+    try:
+        resolve_target("ssh://example.invalid/repo.git")
+    except AuditorError:
+        pass
+    assert not marker.exists()                       # GIT_SSH_COMMAND suppressed
+
+
+def test_clone_error_redacts_credentials(monkeypatch):
+    class Fail:
+        returncode = 128
+        stdout = ""
+        stderr = ("fatal: unable to access "
+                  "'https://alice:TOPSECRET@example.invalid/repo.git/': 403")
+    monkeypatch.setattr(fetch.subprocess, "run", lambda *a, **k: Fail())
+    with pytest.raises(AuditorError) as exc:
+        resolve_target("https://alice:TOPSECRET@example.invalid/repo.git")
+    msg = str(exc.value)
+    assert "TOPSECRET" not in msg                    # secret redacted
+    assert "alice:***@example.invalid" in msg        # message still informative
+    assert "403" in msg
+
+
 def test_global_post_checkout_hook_does_not_execute(monkeypatch, tmp_path):
     # end-to-end negative test with a positive control so it can't false-green:
     # if the global-hooksPath mechanism does not fire on THIS machine, skip.

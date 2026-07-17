@@ -99,6 +99,34 @@ def test_cache_key_is_per_client_not_forced_lowercase():
     assert PyPIClient().cache_key("Requests") == "requests"
 
 
+def test_foreign_cache_value_shape_is_miss_not_registry_failure(tmp_path):
+    import json
+    import time
+
+    from auditor.core.models import PackageInfo
+    from auditor.registries.base import CachedRegistry, RegistryClient
+
+    p = tmp_path / "c.json"
+    # structurally valid entry, but the value has an unexpected field
+    p.write_text(json.dumps({"pypi:requests": {
+        "expires": time.time() + 9999,
+        "value": {"exists": True, "unexpected_field": 1}}}), encoding="utf-8")
+
+    calls = []
+
+    class Inner(RegistryClient):
+        ecosystem = "pypi"
+        def cache_key(self, name): return name
+        def lookup(self, name):
+            calls.append(name)
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+
+    reg = CachedRegistry(Inner(), Cache(p))
+    info = reg.lookup("requests")
+    assert info.exists and info.error is None        # NOT an H004-inducing error
+    assert calls == ["requests"]                     # corrupt hit => re-queried
+
+
 @responses.activate
 def test_pypi_cache_key_shares_entry_across_name_forms(tmp_path):
     responses.get(SIMPLE.format("typing-extensions"), json={"files": [

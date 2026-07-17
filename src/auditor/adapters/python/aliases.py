@@ -5,6 +5,12 @@ IMPORT_TO_DIST = {
     "OpenSSL": "pyopenssl", "serial": "pyserial", "docx": "python-docx",
     "pptx": "python-pptx", "fitz": "pymupdf", "nacl": "pynacl", "github": "pygithub",
     "telegram": "python-telegram-bot", "socks": "pysocks", "websocket": "websocket-client",
-    "zmq": "pyzmq", "attr": "attrs", "gi": "pygobject", "win32api": "pywin32",
-    "win32com": "pywin32", "pythoncom": "pywin32",
+    "zmq": "pyzmq", "attr": "attrs", "gi": "pygobject",
+    # well-known import != distribution divergences (a red H008 here would be a
+    # false hallucination; these resolve to their real declaring distribution)
+    "pkg_resources": "setuptools", "setuptools": "setuptools",
+    "OpenGL": "pyopengl", "cairo": "pycairo", "mpl_toolkits": "matplotlib",
+    "win32api": "pywin32", "win32com": "pywin32", "pythoncom": "pywin32",
+    "win32con": "pywin32", "win32file": "pywin32", "win32event": "pywin32",
+    "win32service": "pywin32", "win32serviceutil": "pywin32", "pywintypes": "pywin32",
 }

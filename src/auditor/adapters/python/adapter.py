@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 from auditor.adapters.python.aliases import IMPORT_TO_DIST
@@ -24,6 +25,32 @@ NAMESPACE_PREFIXES = frozenset({
     "google", "azure", "ruamel", "zope", "backports", "sphinxcontrib",
     "oslo", "paste", "repoze", "jaraco", "lazr", "odoo",
 })
+
+
+def _reachable_minors(sset, spec: str, max_minor: int) -> set[int]:
+    """The set of 3.x minors admitted by the specifier: a synthetic patch sweep
+    (0, a large sentinel, spec patch literals ±1) plus explicit version literals
+    and their numeric neighbours (for prerelease-only ranges)."""
+    from packaging.version import Version
+    patches = {0, 10_000}
+    for mt in re.finditer(r"3\.\d+\.(\d+)", spec):
+        p = int(mt.group(1))
+        patches.update({max(0, p - 1), p, p + 1})
+    reachable: set[int] = set()
+    for minor in range(0, max_minor + 1):
+        if any(sset.contains(Version(f"3.{minor}.{c}"), prereleases=True) for c in patches):
+            reachable.add(minor)
+    literals: set[str] = set()
+    for mt in re.finditer(r"3\.\d+(?:\.\w+)*", spec):
+        literals.update(_numeric_neighbours(mt.group(0)))
+    for lit in literals:
+        try:
+            v = Version(lit)
+        except Exception:
+            continue
+        if sset.contains(v, prereleases=True) and len(v.release) >= 2:
+            reachable.add(v.release[1])
+    return reachable
 
 
 def _numeric_neighbours(lit: str) -> set[str]:
@@ -102,13 +129,9 @@ class PythonAdapter(LanguageAdapter):
             line = raw.split(" #", 1)[0].strip() if " #" in raw else raw.strip()
             if not line or line.startswith("#"):
                 continue
-            inc = self._include_target(line, path)
-            if inc is not None:
-                target, is_constraint = inc
-                # constraint context propagates: everything reached from a -c
-                # constrains versions but declares no installation
-                out += self._parse_requirements(target, seen, depth + 1,
-                                                constraint=constraint or is_constraint)
+            is_inc, fname, is_c = self._classify_include(line)
+            if is_inc:
+                out += self._follow_include(fname, is_c, path, rel, seen, depth, constraint)
                 continue
             if constraint:
                 continue     # a constraints file pins versions; it declares nothing
@@ -131,28 +154,41 @@ class PythonAdapter(LanguageAdapter):
         except (ValueError, AttributeError):
             return path.name
 
-    def _include_target(self, line: str, path: Path) -> tuple[Path, bool] | None:
-        """Resolve a -r/-c include to (file, is_constraint) INSIDE the scan root,
-        else None. Handles both `-r file` and pip's attached `-rfile` form."""
-        rest = is_constraint = None
+    @staticmethod
+    def _classify_include(line: str) -> tuple[bool, str | None, bool]:
+        """(is_include_directive, filename_or_None, is_constraint). Handles both
+        `-r file` and pip's attached `-rfile`, and the `--flag=file` form."""
         for flag, con in (("--requirement", False), ("--constraint", True),
                           ("-r", False), ("-c", True)):
             if line == flag:
-                return None                       # flag with no filename
+                return True, None, con
             if line.startswith(flag):
                 after = line[len(flag):]
                 if flag.startswith("--") and after and after[0] not in " =":
                     continue                      # e.g. --requirements != --requirement
-                rest = after.lstrip(" =").strip().strip("'\"")
-                is_constraint = con
-                break
-        if not rest:
-            return None
-        target = (path.parent / rest).resolve()
-        if target.is_file() and (target == self._scan_root
-                                 or self._scan_root in target.parents):
-            return target, is_constraint
-        return None
+                return True, (after.lstrip(" =").strip().strip("'\"") or None), con
+        return False, None, False
+
+    def _follow_include(self, fname, is_c, path, rel, seen, depth, constraint):
+        """Resolve + recurse into a -r/-c include, recording a diagnostic note
+        for a missing file or one escaping the scan root (never silent)."""
+        role = "constraint" if is_c else "requirement"
+        if not fname:
+            self._note(f"{rel}: empty {role} include directive")
+            return []
+        target = (path.parent / fname).resolve()
+        if not target.is_file():
+            self._note(f"{rel}: {role} include not found: {fname}")
+            return []
+        if not (target == self._scan_root or self._scan_root in target.parents):
+            self._note(f"{rel}: {role} include outside scan root, NOT read: {fname}")
+            return []
+        return self._parse_requirements(target, seen, depth + 1,
+                                        constraint=constraint or is_c)
+
+    def _note(self, message: str) -> None:
+        if self._diag is not None:
+            self._diag.notes.append(message)
 
     def _req_dep(self, line: str, rel: str, lineno: int) -> DeclaredDep | None:
         head = line.split(";", 1)[0].strip()   # drop environment marker
@@ -183,11 +219,16 @@ class PythonAdapter(LanguageAdapter):
 
     def _dep_string_list(self, value, path: Path, what: str) -> list[str]:
         """A list of PEP 508 strings, or [] + one diagnostic on a wrong type.
-        Never str()->list-of-chars and never crash."""
+        Never str()->list-of-chars and never crash. Non-string list entries are
+        dropped WITH a note (a bare 123 is not silently ignored)."""
         if value is None:
             return []
         if isinstance(value, list):
-            return [s for s in value if isinstance(s, str)]
+            strings = [s for s in value if isinstance(s, str)]
+            if len(strings) != len(value):
+                self._note(f"{path.name}: {len(value) - len(strings)} non-string "
+                           f"entr(ies) in {what} ignored")
+            return strings
         self._schema_note(path, what)
         return []
 
@@ -200,10 +241,22 @@ class PythonAdapter(LanguageAdapter):
         if not isinstance(data, dict):
             self._schema_note(path, "top-level document")
             return []
+        uv_local = self._uv_local_names(data)
+        out: list[DeclaredDep] = []
+        for spec in self._pep621_specs(data, path):
+            dep = self._from_pep508(spec, path.name)
+            if dep is None:
+                continue
+            if canonical(dep.name) in uv_local:
+                dep = replace(dep, skip_registry=True)   # local/vcs/workspace uv source
+            out.append(dep)
+        out += self._poetry_deps(data, path)
+        return out
+
+    def _pep621_specs(self, data: dict, path: Path) -> list[str]:
         proj = data.get("project")
         proj = proj if isinstance(proj, dict) else {}
-        specs: list[str] = self._dep_string_list(proj.get("dependencies"),
-                                                 path, "project.dependencies")
+        specs = self._dep_string_list(proj.get("dependencies"), path, "project.dependencies")
         opt = proj.get("optional-dependencies")
         if isinstance(opt, dict):
             for name, group in opt.items():
@@ -211,32 +264,31 @@ class PythonAdapter(LanguageAdapter):
                                                f"project.optional-dependencies.{name}")
         elif opt is not None:
             self._schema_note(path, "project.optional-dependencies")
-        # PEP 735 [dependency-groups]: list items are PEP 508 strings or
-        # {include-group=...} tables (the latter reference other groups we also read)
-        dep_groups = data.get("dependency-groups")
-        if isinstance(dep_groups, dict):
-            for name, group in dep_groups.items():
-                specs += self._dep_string_list(group, path,
-                                               f"dependency-groups.{name}")
-        elif dep_groups is not None:
+        groups = data.get("dependency-groups")   # PEP 735
+        if isinstance(groups, dict):
+            for name, group in groups.items():
+                specs += self._dep_string_list(group, path, f"dependency-groups.{name}")
+        elif groups is not None:
             self._schema_note(path, "dependency-groups")
-        out = [self._from_pep508(s, path.name) for s in specs]
-        # Poetry: main + all group tables (Poetry 1.2+ [tool.poetry.group.*])
+        return specs
+
+    def _poetry_deps(self, data: dict, path: Path) -> list[DeclaredDep]:
         tool = data.get("tool")
         poetry = tool.get("poetry") if isinstance(tool, dict) else None
         poetry = poetry if isinstance(poetry, dict) else {}
-        poetry_tables = []
+        tables = []
         main = poetry.get("dependencies")
         if isinstance(main, dict):
-            poetry_tables.append(main)
+            tables.append(main)
         elif main is not None:
             self._schema_note(path, "tool.poetry.dependencies")
         groups = poetry.get("group")
         if isinstance(groups, dict):
             for grp in groups.values():
                 if isinstance(grp, dict) and isinstance(grp.get("dependencies"), dict):
-                    poetry_tables.append(grp["dependencies"])
-        for table in poetry_tables:
+                    tables.append(grp["dependencies"])
+        out = []
+        for table in tables:
             for k, v in table.items():
                 if k.lower() == "python":
                     continue
@@ -245,7 +297,20 @@ class PythonAdapter(LanguageAdapter):
                 out.append(DeclaredDep(name=canonical(k), ecosystem="pypi",
                                        source_file=path.name, raw=f"{k} = {v!r}",
                                        skip_registry=skip))
-        return [d for d in out if d is not None]
+        return out
+
+    @staticmethod
+    def _uv_local_names(data: dict) -> set[str]:
+        """Canonical names declared with a local/vcs/workspace [tool.uv.sources]
+        entry — these resolve off-registry and must NOT be PyPI-checked (H001)."""
+        tool = data.get("tool")
+        uv = tool.get("uv") if isinstance(tool, dict) else None
+        sources = uv.get("sources") if isinstance(uv, dict) else None
+        if not isinstance(sources, dict):
+            return set()
+        local_keys = ("path", "git", "url", "workspace")
+        return {canonical(name) for name, src in sources.items()
+                if isinstance(src, dict) and any(k in src for k in local_keys)}
 
     def _parse_pipfile(self, path: Path) -> list[DeclaredDep]:
         try:
@@ -402,10 +467,21 @@ class PythonAdapter(LanguageAdapter):
         return None
 
     def registry_candidates(self, imp: ImportRef) -> list[str]:
-        if imp.top_level in NAMESPACE_PREFIXES:
+        top = imp.top_level
+        if top in NAMESPACE_PREFIXES:
             return []   # shared namespace => no reliable single registry id
-        alias = IMPORT_TO_DIST.get(imp.top_level)
-        return [canonical(alias)] if alias else [canonical(imp.top_level)]
+        if top.startswith("win32") or top in ("pythoncom", "pywintypes"):
+            return ["pywin32"]
+        alias = IMPORT_TO_DIST.get(top)
+        if alias:
+            return [canonical(alias)]   # curated => reliable mapping
+        # a multi-segment import with no curated mapping is NOT confidently a
+        # single distribution (top-level could be an unknown namespace) — return
+        # no candidate so the engine emits H007 (heuristic) instead of a RED H008.
+        # Map breadth is therefore NOT the only guard against false hallucinations.
+        if "." in imp.module:
+            return []
+        return [canonical(top)]   # single-segment: the import==dist convention
 
     def grammars(self) -> dict[str, object]:
         import tree_sitter_python
@@ -443,8 +519,10 @@ class PythonAdapter(LanguageAdapter):
                 return None
             tool = data.get("tool") if isinstance(data, dict) else None
             tool = tool if isinstance(tool, dict) else {}
-            uv = tool.get("uv") if isinstance(tool.get("uv"), dict) else {}
-            poetry = tool.get("poetry") if isinstance(tool.get("poetry"), dict) else {}
+            uv = tool.get("uv")
+            uv = uv if isinstance(uv, dict) else {}
+            poetry = tool.get("poetry")
+            poetry = poetry if isinstance(poetry, dict) else {}
             if uv.get("index") or poetry.get("source"):
                 return "custom index configured in pyproject.toml"
         return None
@@ -456,7 +534,6 @@ class PythonAdapter(LanguageAdapter):
         allowed = self._allowed_minors(root)
         if not allowed:
             return []
-        floor = min(allowed)
         cached = getattr(self, "_last_declared", None)
         declared = {d.name for d in (cached if cached is not None
                                      else self.parse_dependencies(root))}
@@ -519,7 +596,6 @@ class PythonAdapter(LanguageAdapter):
         would have missed patch numbers above the cap). Returns sorted allowed
         (3, minor) tuples, or None when unspecified/invalid => no P008 claims."""
         from packaging.specifiers import InvalidSpecifier, SpecifierSet
-        from packaging.version import Version
         pyproject = root / "pyproject.toml"
         if not pyproject.is_file():
             return None
@@ -536,27 +612,6 @@ class PythonAdapter(LanguageAdapter):
             sset = SpecifierSet(spec)
         except InvalidSpecifier:
             return None
-        patches = {0, 10_000}
-        for mt in re.finditer(r"3\.\d+\.(\d+)", spec):
-            p = int(mt.group(1))
-            patches.update({max(0, p - 1), p, p + 1})
-        reachable: set[int] = set()
-        for minor in range(0, self._MAX_MINOR + 1):
-            if any(sset.contains(Version(f"3.{minor}.{c}"), prereleases=True)
-                   for c in patches):
-                reachable.add(minor)
-        # explicit version literals in the spec + their nearest neighbours on the
-        # trailing numeric group, so prerelease-only ranges resolve even when the
-        # named bounds are excluded: e.g. >3.13.0rc1,<3.13.0rc3 admits 3.13.0rc2
-        literal_candidates: set[str] = set()
-        for mt in re.finditer(r"3\.\d+(?:\.\w+)*", spec):
-            literal_candidates.update(_numeric_neighbours(mt.group(0)))
-        for lit in literal_candidates:
-            try:
-                v = Version(lit)
-            except Exception:
-                continue
-            if sset.contains(v, prereleases=True) and len(v.release) >= 2:
-                reachable.add(v.release[1])
+        reachable = _reachable_minors(sset, spec, self._MAX_MINOR)
         allowed = sorted((3, m) for m in reachable)
         return allowed or None
