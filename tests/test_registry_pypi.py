@@ -84,3 +84,26 @@ def test_cached_registry_hits_network_once(tmp_path):
     a = reg.lookup("requests")
     b = reg.lookup("requests")
     assert a.exists and b.exists and len(responses.calls) == 1
+
+
+def test_cache_key_is_per_client_not_forced_lowercase():
+    from auditor.registries.base import RegistryClient
+    from auditor.core.models import PackageInfo
+
+    class VerbatimClient(RegistryClient):
+        ecosystem = "maven"
+        def lookup(self, name): return PackageInfo(exists=True)
+    # base default preserves case (Maven coordinates are NOT lowercased)
+    assert VerbatimClient().cache_key("com.Foo:Bar") == "com.Foo:Bar"
+    # PyPI canonicalizes per PEP 503
+    assert PyPIClient().cache_key("Requests") == "requests"
+
+
+@responses.activate
+def test_pypi_cache_key_shares_entry_across_name_forms(tmp_path):
+    responses.get(SIMPLE.format("typing-extensions"), json={"files": [
+        {"filename": "te-1.tar.gz", "upload-time": "2016-01-01T00:00:00Z"}]})
+    reg = CachedRegistry(PyPIClient(), Cache(tmp_path / "c.json"))
+    reg.lookup("Typing_Extensions")
+    reg.lookup("typing-extensions")     # same canonical key => cache hit
+    assert len(responses.calls) == 1

@@ -43,6 +43,14 @@ class RegistryClient(ABC):
         kw.setdefault("timeout", TIMEOUT)
         return self.session.get(url, **kw)
 
+    def cache_key(self, name: str) -> str:
+        """The canonical cache key for a package name in THIS ecosystem. The base
+        default is the verbatim name (case-preserving) — a global .lower() is
+        NOT imposed on every registry. Clients whose ids are case-insensitive
+        (e.g. NuGet, lowercased) or normalized (PyPI PEP 503) override this in
+        their own task; Maven coordinates stay verbatim."""
+        return name
+
     @abstractmethod
     def lookup(self, name: str) -> PackageInfo: ...
 
@@ -57,7 +65,9 @@ class CachedRegistry:
         return self.inner.ecosystem
 
     def lookup(self, name: str) -> PackageInfo:
-        key = f"{self.ecosystem}:{name.lower()}"
+        # each client owns its canonical key — no global .lower() forced on Maven
+        # coordinates or any case-sensitive ecosystem
+        key = f"{self.ecosystem}:{self.inner.cache_key(name)}"
         hit = self.cache.get(key)
         if hit is not None:
             return PackageInfo(**hit)

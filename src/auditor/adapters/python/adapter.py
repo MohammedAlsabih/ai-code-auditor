@@ -16,6 +16,31 @@ _VCS_SCHEMES = ("git+", "hg+", "svn+", "bzr+")
 _URL_START = _VCS_SCHEMES + ("http://", "https://", "file://", "ftp://")
 _EGG = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
 _INCLUDE_FLAGS = ("--requirement", "--constraint", "-r", "-c")
+# Shared PyPI namespaces: the top-level import segment is NOT a distribution
+# name (many dists contribute to google.*/azure.*/...), so an undeclared import
+# under one cannot be mapped to a single registry id — we degrade to H007
+# (unresolved) rather than guess a bogus package for a RED hallucination claim.
+NAMESPACE_PREFIXES = frozenset({
+    "google", "azure", "ruamel", "zope", "backports", "sphinxcontrib",
+    "oslo", "paste", "repoze", "jaraco", "lazr", "odoo",
+})
+
+
+def _numeric_neighbours(lit: str) -> set[str]:
+    """The literal plus variants with its LAST numeric group set to n-1/n/n+1 —
+    turns a strict prerelease bound (3.13.0rc1) into a probe for the admitted
+    value in between (3.13.0rc2). Gated later by SpecifierSet.contains, so
+    over-generation on final versions is harmless."""
+    runs = list(re.finditer(r"\d+", lit))
+    if not runs:
+        return {lit}
+    last = runs[-1]
+    n = int(last.group())
+    out = {lit}
+    for nn in (n - 1, n, n + 1):
+        if nn >= 0:
+            out.add(lit[:last.start()] + str(nn) + lit[last.end():])
+    return out
 
 
 class PythonAdapter(LanguageAdapter):
@@ -39,7 +64,7 @@ class PythonAdapter(LanguageAdapter):
         self._scan_root = root.resolve()   # confines -r/-c include following
         self._req_files_visited: list[Path] = []   # every req/constraint file read
         deps: list[DeclaredDep] = []
-        seen_files: set[Path] = set()
+        seen_files: set[tuple[Path, bool]] = set()   # (resolved path, is_constraint)
         for req in sorted(root.glob("requirements*.txt")):
             deps += self._parse_requirements(req, seen_files)
         pyproject = root / "pyproject.toml"
@@ -60,15 +85,19 @@ class PythonAdapter(LanguageAdapter):
         self._last_declared = out   # cache: project_rules must NOT re-parse
         return out                  # (a bare re-call would reset self._diag)
 
-    def _parse_requirements(self, path: Path, seen: set[Path],
+    def _parse_requirements(self, path: Path, seen: set[tuple[Path, bool]],
                             depth: int = 0, constraint: bool = False) -> list[DeclaredDep]:
         rp = path.resolve()
-        if rp in seen or depth > 10:
+        # the READ ROLE is part of the cycle key: the same file may legitimately
+        # be read once as a constraint (-c, declares nothing) and once as a
+        # requirement (-r, declares) — keying on path alone drops the second read
+        key = (rp, constraint)
+        if key in seen or depth > 10:
             return []
-        seen.add(rp)
+        seen.add(key)
         self._req_files_visited.append(rp)   # still scanned for --index-url later
         out: list[DeclaredDep] = []
-        rel = path.name
+        rel = self._provenance(rp)
         for i, raw in enumerate(self._read(path).splitlines(), 1):
             line = raw.split(" #", 1)[0].strip() if " #" in raw else raw.strip()
             if not line or line.startswith("#"):
@@ -93,6 +122,14 @@ class PythonAdapter(LanguageAdapter):
             if dep is not None:
                 out.append(dep)
         return out
+
+    def _provenance(self, path: Path) -> str:
+        """Full scan-root-relative posix path so reqs/base.txt and a/base.txt vs
+        b/base.txt never share a provenance label (point 4)."""
+        try:
+            return path.resolve().relative_to(self._scan_root).as_posix()
+        except (ValueError, AttributeError):
+            return path.name
 
     def _include_target(self, line: str, path: Path) -> tuple[Path, bool] | None:
         """Resolve a -r/-c include to (file, is_constraint) INSIDE the scan root,
@@ -350,12 +387,23 @@ class PythonAdapter(LanguageAdapter):
         alias = IMPORT_TO_DIST.get(imp.top_level)
         if alias:
             names.add(canonical(alias))
+        mod = imp.module
         for dep in declared:
-            if canonical(dep.name) in names:
+            cn = canonical(dep.name)
+            if cn in names:
+                return dep
+            # dash->dot distribution heuristic: a declared google-cloud-storage
+            # provides google.cloud.storage; requests provides requests.sessions.
+            # This confirms the KNOWN declared package against a namespace import
+            # before any H002/H008 is emitted (no false "undeclared").
+            dotted = cn.replace("-", ".")
+            if mod == dotted or mod.startswith(dotted + "."):
                 return dep
         return None
 
     def registry_candidates(self, imp: ImportRef) -> list[str]:
+        if imp.top_level in NAMESPACE_PREFIXES:
+            return []   # shared namespace => no reliable single registry id
         alias = IMPORT_TO_DIST.get(imp.top_level)
         return [canonical(alias)] if alias else [canonical(imp.top_level)]
 
@@ -497,11 +545,15 @@ class PythonAdapter(LanguageAdapter):
             if any(sset.contains(Version(f"3.{minor}.{c}"), prereleases=True)
                    for c in patches):
                 reachable.add(minor)
-        # explicit version literals in the spec (handles prerelease-only ranges
-        # like ==3.13.0rc1 that no final 3.x.y candidate would satisfy)
+        # explicit version literals in the spec + their nearest neighbours on the
+        # trailing numeric group, so prerelease-only ranges resolve even when the
+        # named bounds are excluded: e.g. >3.13.0rc1,<3.13.0rc3 admits 3.13.0rc2
+        literal_candidates: set[str] = set()
         for mt in re.finditer(r"3\.\d+(?:\.\w+)*", spec):
+            literal_candidates.update(_numeric_neighbours(mt.group(0)))
+        for lit in literal_candidates:
             try:
-                v = Version(mt.group(0))
+                v = Version(lit)
             except Exception:
                 continue
             if sset.contains(v, prereleases=True) and len(v.release) >= 2:

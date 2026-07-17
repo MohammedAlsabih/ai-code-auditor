@@ -22,6 +22,9 @@ def canonical(name: str) -> str:
 class PyPIClient(RegistryClient):
     ecosystem = "pypi"
 
+    def cache_key(self, name: str) -> str:
+        return canonical(name)   # PEP 503: Requests / requests / requests_x share a key
+
     def lookup(self, name: str) -> PackageInfo:
         cname = canonical(name)
         try:

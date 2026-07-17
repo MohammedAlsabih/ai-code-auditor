@@ -31,8 +31,12 @@ _MAPPING_RULES = {"H002", "H007", "H008"}
 
 
 def _finding(rule_id: str, adapter, file: str, line: int, detail: str, snippet: str = "") -> Finding:
-    precision = getattr(adapter, "mapping_precision", "exact") \
-        if rule_id in _MAPPING_RULES else "exact"
+    if rule_id == "H007":
+        precision = "heuristic"   # H007 == "could not map reliably" => never exact
+    elif rule_id in _MAPPING_RULES:
+        precision = getattr(adapter, "mapping_precision", "exact")
+    else:
+        precision = "exact"
     return Finding(rule_id=rule_id, severity=_SEV[rule_id], title=_TITLES[rule_id],
                    file=file, line=line, snippet=snippet, detail=detail,
                    language=adapter.name, engine="auditor", precision=precision)

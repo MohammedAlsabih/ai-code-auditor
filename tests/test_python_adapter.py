@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from auditor.adapters.python.adapter import PythonAdapter
-from auditor.core.models import DeclaredDep, ImportRef
+from auditor.core.models import DeclaredDep, ImportRef, PackageInfo
 from auditor.core.treesitter import parse_source
 from auditor.core.walk import collect_source_files
 
@@ -214,11 +214,78 @@ def test_partial_namespace_does_not_make_sibling_internal(tmp_path):
 
 
 def test_allowed_minors_handles_prerelease_specs(tmp_path):
-    for spec in ("==3.13.0rc1", ">=3.13.0rc1,<3.13.0rc3"):
+    for spec in ("==3.13.0rc1", ">=3.13.0rc1,<3.13.0rc3", ">3.13.0rc1,<3.13.0rc3"):
         _mk(tmp_path, "pyproject.toml",
             f'[project]\nname = "x"\nrequires-python = "{spec}"\n')
         allowed = PythonAdapter()._allowed_minors(tmp_path)
         assert allowed == [(3, 13)], spec
+
+
+def test_declared_namespace_package_matches_dotted_import(tmp_path):
+    # google-cloud-storage / azure-storage-blob DECLARED must match the
+    # namespace imports (no false H002/H008)
+    from auditor.core.hallucination import audit_hallucinations
+    _mk(tmp_path, "requirements.txt", "google-cloud-storage\nazure-storage-blob\n")
+    _mk(tmp_path, "app.py",
+        "import google.cloud.storage\nimport azure.storage.blob\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    declared = a.parse_dependencies(tmp_path)
+    for imp in a.extract_imports(files):
+        assert a.match_declared(imp, declared) is not None, imp.module
+    # end-to-end: no finding at all for the two declared namespace imports
+
+    class Reg:
+        ecosystem = "pypi"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    assert audit_hallucinations(a, tmp_path, files, declared, Reg()) == []
+
+
+def test_undeclared_namespace_import_is_h007_not_red(tmp_path):
+    # an UNDECLARED namespace import must not become a RED H008 or a misleading
+    # H002 — it degrades to H007 (unresolved, heuristic)
+    from auditor.core.hallucination import audit_hallucinations
+    _mk(tmp_path, "requirements.txt", "requests\n")
+    _mk(tmp_path, "app.py", "import google.cloud.storage\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    declared = a.parse_dependencies(tmp_path)
+
+    class Reg:  # requests exists (declared, fine); google never looked up ([] cands)
+        ecosystem = "pypi"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, tmp_path, files, declared, Reg())
+    assert [f.rule_id for f in fs] == ["H007"]     # only the unmappable google import
+    assert fs[0].precision == "heuristic"
+
+
+def test_same_file_read_as_constraint_then_requirement(tmp_path):
+    # the same file used once as -c and once as -r: the -r read must still
+    # declare (cycle key includes the read role)
+    for order in ("-c common.txt\n-r common.txt\n", "-r common.txt\n-c common.txt\n"):
+        _mk(tmp_path, "requirements.txt", order)
+        _mk(tmp_path, "common.txt", "flask\n")
+        names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+        assert names == {"flask"}, order
+
+
+def test_source_file_keeps_full_relative_path(tmp_path):
+    _mk(tmp_path, "requirements.txt", "-r reqs/base.txt\n")
+    _mk(tmp_path, "reqs/base.txt", "flask\n")
+    dep = next(d for d in PythonAdapter().parse_dependencies(tmp_path) if d.name == "flask")
+    assert dep.source_file == "reqs/base.txt"   # not just "base.txt"
+
+
+def test_source_file_disambiguates_same_named_includes(tmp_path):
+    _mk(tmp_path, "requirements.txt", "-r a/base.txt\n-r b/base.txt\n")
+    _mk(tmp_path, "a/base.txt", "flask\n")
+    _mk(tmp_path, "b/base.txt", "django\n")
+    by = {d.name: d.source_file for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert by == {"flask": "a/base.txt", "django": "b/base.txt"}
 
 
 # ---------- T7: imports, stdlib, locality, mapping ----------
