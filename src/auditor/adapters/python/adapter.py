@@ -18,22 +18,6 @@ _EGG = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
 _INCLUDE_FLAGS = ("--requirement", "--constraint", "-r", "-c")
 
 
-def _dir_has_py(d: Path, max_depth: int = 3) -> bool:
-    """True if the directory tree (bounded) contains any .py file — treats the
-    dir as the project's own package even without __init__.py (PEP 420)."""
-    from auditor.core.walk import IGNORE_DIRS
-    import os
-    base_depth = len(d.parts)
-    for dirpath, dirnames, filenames in os.walk(d):
-        dirnames[:] = [n for n in dirnames if n not in IGNORE_DIRS]
-        if len(Path(dirpath).parts) - base_depth > max_depth:
-            dirnames[:] = []
-            continue
-        if any(f.endswith(".py") for f in filenames):
-            return True
-    return False
-
-
 class PythonAdapter(LanguageAdapter):
     name = "python"
     ecosystem = "pypi"
@@ -41,6 +25,8 @@ class PythonAdapter(LanguageAdapter):
 
     def __init__(self) -> None:
         self._internal_roots: set[str] = set()
+        self._local_regular: set[str] = set()
+        self._local_namespace: set[str] = set()
 
     def detect(self, root: Path) -> bool:
         if (root / "pyproject.toml").is_file() or (root / "setup.py").is_file() \
@@ -51,6 +37,7 @@ class PythonAdapter(LanguageAdapter):
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
         self._diag = diag
         self._scan_root = root.resolve()   # confines -r/-c include following
+        self._req_files_visited: list[Path] = []   # every req/constraint file read
         deps: list[DeclaredDep] = []
         seen_files: set[Path] = set()
         for req in sorted(root.glob("requirements*.txt")):
@@ -74,11 +61,12 @@ class PythonAdapter(LanguageAdapter):
         return out                  # (a bare re-call would reset self._diag)
 
     def _parse_requirements(self, path: Path, seen: set[Path],
-                            depth: int = 0) -> list[DeclaredDep]:
+                            depth: int = 0, constraint: bool = False) -> list[DeclaredDep]:
         rp = path.resolve()
         if rp in seen or depth > 10:
             return []
         seen.add(rp)
+        self._req_files_visited.append(rp)   # still scanned for --index-url later
         out: list[DeclaredDep] = []
         rel = path.name
         for i, raw in enumerate(self._read(path).splitlines(), 1):
@@ -87,8 +75,14 @@ class PythonAdapter(LanguageAdapter):
                 continue
             inc = self._include_target(line, path)
             if inc is not None:
-                out += self._parse_requirements(inc, seen, depth + 1)
+                target, is_constraint = inc
+                # constraint context propagates: everything reached from a -c
+                # constrains versions but declares no installation
+                out += self._parse_requirements(target, seen, depth + 1,
+                                                constraint=constraint or is_constraint)
                 continue
+            if constraint:
+                continue     # a constraints file pins versions; it declares nothing
             if line.startswith(("-e", "--editable")):
                 line = line.split(None, 1)[1].strip() if " " in line else ""
                 if not line:
@@ -100,18 +94,27 @@ class PythonAdapter(LanguageAdapter):
                 out.append(dep)
         return out
 
-    def _include_target(self, line: str, path: Path) -> Path | None:
-        """Resolve a -r/-c include to a file INSIDE the scan root, else None."""
-        for flag in _INCLUDE_FLAGS:
-            if line == flag or line.startswith(flag + " ") or line.startswith(flag + "="):
-                rest = line[len(flag):].lstrip(" =").strip().strip("'\"")
-                if not rest:
-                    return None
-                target = (path.parent / rest).resolve()
-                if target.is_file() and (target == self._scan_root
-                                         or self._scan_root in target.parents):
-                    return target
-                return None
+    def _include_target(self, line: str, path: Path) -> tuple[Path, bool] | None:
+        """Resolve a -r/-c include to (file, is_constraint) INSIDE the scan root,
+        else None. Handles both `-r file` and pip's attached `-rfile` form."""
+        rest = is_constraint = None
+        for flag, con in (("--requirement", False), ("--constraint", True),
+                          ("-r", False), ("-c", True)):
+            if line == flag:
+                return None                       # flag with no filename
+            if line.startswith(flag):
+                after = line[len(flag):]
+                if flag.startswith("--") and after and after[0] not in " =":
+                    continue                      # e.g. --requirements != --requirement
+                rest = after.lstrip(" =").strip().strip("'\"")
+                is_constraint = con
+                break
+        if not rest:
+            return None
+        target = (path.parent / rest).resolve()
+        if target.is_file() and (target == self._scan_root
+                                 or self._scan_root in target.parents):
+            return target, is_constraint
         return None
 
     def _req_dep(self, line: str, rel: str, lineno: int) -> DeclaredDep | None:
@@ -136,27 +139,66 @@ class PythonAdapter(LanguageAdapter):
         return DeclaredDep(name=canonical(m.group(1)), ecosystem="pypi",
                            source_file=rel, line=lineno, raw=line, skip_registry=False)
 
+    def _schema_note(self, path: Path, what: str) -> None:
+        if self._diag is not None:
+            self._diag.notes.append(
+                f"{path.name}: unexpected schema for {what} — section skipped")
+
+    def _dep_string_list(self, value, path: Path, what: str) -> list[str]:
+        """A list of PEP 508 strings, or [] + one diagnostic on a wrong type.
+        Never str()->list-of-chars and never crash."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [s for s in value if isinstance(s, str)]
+        self._schema_note(path, what)
+        return []
+
     def _parse_pyproject(self, path: Path) -> list[DeclaredDep]:
         try:
             data = tomllib.loads(self._read(path))
         except tomllib.TOMLDecodeError as e:
             self._manifest_error(path, e)
             return []
-        specs: list[str] = list(data.get("project", {}).get("dependencies", []))
-        for group in data.get("project", {}).get("optional-dependencies", {}).values():
-            specs += list(group)
+        if not isinstance(data, dict):
+            self._schema_note(path, "top-level document")
+            return []
+        proj = data.get("project")
+        proj = proj if isinstance(proj, dict) else {}
+        specs: list[str] = self._dep_string_list(proj.get("dependencies"),
+                                                 path, "project.dependencies")
+        opt = proj.get("optional-dependencies")
+        if isinstance(opt, dict):
+            for name, group in opt.items():
+                specs += self._dep_string_list(group, path,
+                                               f"project.optional-dependencies.{name}")
+        elif opt is not None:
+            self._schema_note(path, "project.optional-dependencies")
         # PEP 735 [dependency-groups]: list items are PEP 508 strings or
         # {include-group=...} tables (the latter reference other groups we also read)
-        for group in data.get("dependency-groups", {}).values():
-            if isinstance(group, list):
-                specs += [s for s in group if isinstance(s, str)]
+        dep_groups = data.get("dependency-groups")
+        if isinstance(dep_groups, dict):
+            for name, group in dep_groups.items():
+                specs += self._dep_string_list(group, path,
+                                               f"dependency-groups.{name}")
+        elif dep_groups is not None:
+            self._schema_note(path, "dependency-groups")
         out = [self._from_pep508(s, path.name) for s in specs]
         # Poetry: main + all group tables (Poetry 1.2+ [tool.poetry.group.*])
-        poetry = data.get("tool", {}).get("poetry", {})
-        poetry_tables = [poetry.get("dependencies", {})]
-        for grp in poetry.get("group", {}).values():
-            if isinstance(grp, dict):
-                poetry_tables.append(grp.get("dependencies", {}))
+        tool = data.get("tool")
+        poetry = tool.get("poetry") if isinstance(tool, dict) else None
+        poetry = poetry if isinstance(poetry, dict) else {}
+        poetry_tables = []
+        main = poetry.get("dependencies")
+        if isinstance(main, dict):
+            poetry_tables.append(main)
+        elif main is not None:
+            self._schema_note(path, "tool.poetry.dependencies")
+        groups = poetry.get("group")
+        if isinstance(groups, dict):
+            for grp in groups.values():
+                if isinstance(grp, dict) and isinstance(grp.get("dependencies"), dict):
+                    poetry_tables.append(grp["dependencies"])
         for table in poetry_tables:
             for k, v in table.items():
                 if k.lower() == "python":
@@ -174,9 +216,18 @@ class PythonAdapter(LanguageAdapter):
         except tomllib.TOMLDecodeError as e:
             self._manifest_error(path, e)
             return []
+        if not isinstance(data, dict):
+            self._schema_note(path, "top-level document")
+            return []
         out = []
         for section in ("packages", "dev-packages"):
-            for name, spec in (data.get(section) or {}).items():
+            table = data.get(section)
+            if table is None:
+                continue
+            if not isinstance(table, dict):
+                self._schema_note(path, section)
+                continue
+            for name, spec in table.items():
                 out.append(DeclaredDep(name=canonical(name), ecosystem="pypi",
                                        source_file=path.name, raw=f"{section}: {name} = {spec!r}",
                                        skip_registry=isinstance(spec, dict) and
@@ -202,27 +253,34 @@ class PythonAdapter(LanguageAdapter):
     def prepare(self, root: Path, files: list[SourceFile]) -> None:
         self.ensure_grammars()
         self._last_files = files   # reused by project_rules (P008)
-        roots: set[str] = set()
+        regular: set[str] = set()      # regular packages / .py file modules (claim subtree)
+        namespace: set[str] = set()    # PEP 420 namespace dirs (claim only exact + children)
         for base in (root, root / "src", root / "lib"):
             if base.is_dir():
-                self._collect_roots(base, roots)
-        self._internal_roots = roots
+                self._scan_local(base, regular, namespace)
+        self._local_regular = regular
+        self._local_namespace = namespace
+        self._internal_roots = {m.split(".")[0] for m in (regular | namespace)}
 
     @staticmethod
-    def _collect_roots(base: Path, roots: set[str]) -> None:
+    def _scan_local(base: Path, regular: set[str], namespace: set[str],
+                    max_depth: int = 6) -> None:
+        import os
         from auditor.core.walk import IGNORE_DIRS
-        try:
-            children = list(base.iterdir())
-        except OSError:
-            return
-        for child in children:
-            if child.suffix == ".py":
-                roots.add(child.stem)
-            elif child.is_dir() and child.name not in IGNORE_DIRS \
-                    and _dir_has_py(child):
-                # regular package (__init__.py) OR PEP 420 namespace package OR
-                # any repo-local source dir — all are the project's own code
-                roots.add(child.name)
+        base_len = len(base.parts)
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+            rel = Path(dirpath).parts[base_len:]
+            if len(rel) > max_depth:
+                dirnames[:] = []
+                continue
+            if rel:   # a subdirectory of base: a package (regular if __init__.py)
+                dotted = ".".join(rel)
+                (regular if "__init__.py" in filenames else namespace).add(dotted)
+            for f in filenames:
+                if f.endswith(".py") and f != "__init__.py":
+                    stem = f[:-3]
+                    regular.add(".".join(rel + (stem,)) if rel else stem)
 
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]:
         from auditor.core.treesitter import captures, parse_source
@@ -275,8 +333,17 @@ class PythonAdapter(LanguageAdapter):
     def is_internal(self, imp: ImportRef) -> bool:
         import sys
         top = imp.top_level
-        return top in sys.stdlib_module_names or top == "__future__" \
-            or top in self.REMOVED_STDLIB or top in self._internal_roots
+        if top in sys.stdlib_module_names or top == "__future__" \
+                or top in self.REMOVED_STDLIB:
+            return True
+        mod = imp.module
+        if mod in self._local_regular or mod in self._local_namespace:
+            return True
+        # a regular local module (package with __init__ or a .py file) claims its
+        # whole dotted subtree; a namespace dir claims ONLY itself and existing
+        # children (so a local `google.myapp` does NOT make `google.cloud.X`
+        # internal — that resolves to the external google-cloud package)
+        return any(mod == m or mod.startswith(m + ".") for m in self._local_regular)
 
     def match_declared(self, imp: ImportRef, declared: list[DeclaredDep]) -> DeclaredDep | None:
         names = {canonical(imp.top_level)}
@@ -310,18 +377,27 @@ class PythonAdapter(LanguageAdapter):
 
     def private_registry_reason(self, root: Path) -> str | None:
         markers = ("--index-url", "-i ", "--extra-index-url", "--no-index", "--find-links")
-        for req in root.glob("requirements*.txt"):
-            text = self._read(req)
+        # every requirement/constraint file actually read (incl. -r/-c includes),
+        # not just a root glob that misses reqs/private.txt
+        candidates = list(getattr(self, "_req_files_visited", [])) \
+            or list(root.glob("requirements*.txt"))
+        for req in candidates:
+            if not Path(req).is_file():
+                continue
+            text = self._read(Path(req))
             if any(line.strip().startswith(markers) for line in text.splitlines()):
-                return f"custom index configured in {req.name}"
+                return f"custom index configured in {Path(req).name}"
         pyproject = root / "pyproject.toml"
         if pyproject.is_file():
             try:
                 data = tomllib.loads(self._read(pyproject))
             except tomllib.TOMLDecodeError:
                 return None
-            tool = data.get("tool", {})
-            if tool.get("uv", {}).get("index") or tool.get("poetry", {}).get("source"):
+            tool = data.get("tool") if isinstance(data, dict) else None
+            tool = tool if isinstance(tool, dict) else {}
+            uv = tool.get("uv") if isinstance(tool.get("uv"), dict) else {}
+            poetry = tool.get("poetry") if isinstance(tool.get("poetry"), dict) else {}
+            if uv.get("index") or poetry.get("source"):
                 return "custom index configured in pyproject.toml"
         return None
 
@@ -403,7 +479,8 @@ class PythonAdapter(LanguageAdapter):
             data = tomllib.loads(self._read(pyproject))
         except tomllib.TOMLDecodeError:
             return None
-        spec = data.get("project", {}).get("requires-python")
+        proj = data.get("project")
+        spec = proj.get("requires-python") if isinstance(proj, dict) else None
         if not isinstance(spec, str) or not spec.strip():
             return None   # absent or malformed (e.g. a list) => no P008 claims
         spec = spec.strip()
@@ -415,7 +492,19 @@ class PythonAdapter(LanguageAdapter):
         for mt in re.finditer(r"3\.\d+\.(\d+)", spec):
             p = int(mt.group(1))
             patches.update({max(0, p - 1), p, p + 1})
-        allowed = [(3, minor) for minor in range(0, self._MAX_MINOR + 1)
-                   if any(sset.contains(Version(f"3.{minor}.{c}"), prereleases=True)
-                          for c in patches)]
+        reachable: set[int] = set()
+        for minor in range(0, self._MAX_MINOR + 1):
+            if any(sset.contains(Version(f"3.{minor}.{c}"), prereleases=True)
+                   for c in patches):
+                reachable.add(minor)
+        # explicit version literals in the spec (handles prerelease-only ranges
+        # like ==3.13.0rc1 that no final 3.x.y candidate would satisfy)
+        for mt in re.finditer(r"3\.\d+(?:\.\w+)*", spec):
+            try:
+                v = Version(mt.group(0))
+            except Exception:
+                continue
+            if sset.contains(v, prereleases=True) and len(v.release) >= 2:
+                reachable.add(v.release[1])
+        allowed = sorted((3, m) for m in reachable)
         return allowed or None

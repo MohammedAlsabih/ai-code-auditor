@@ -141,21 +141,29 @@ def _judge_declared(adapter, dep: DeclaredDep, info: PackageInfo,
                          "Likely causes: AI-hallucinated name (unregistered names are "
                          "claimable — slopsquatting), a registry-removed/quarantined package, "
                          "or a source this scan cannot see.", dep.raw)]
+    return _status_findings(adapter, info, dep.source_file, dep.line, name, dep.raw)
+
+
+def _status_findings(adapter, info: PackageInfo, file: str, line: int,
+                     label: str, raw: str) -> list[Finding]:
+    """Security/freshness state of an EXISTING package — shared by the declared
+    and the undeclared-import paths so an import being undeclared never hides the
+    package's quarantine/archive/newness signal."""
     if info.quarantined:
-        return [_finding("H009", adapter, dep.source_file, dep.line,
-                         f"{name} is quarantined by the registry (suspected malware).", dep.raw)]
+        return [_finding("H009", adapter, file, line,
+                         f"{label} is quarantined by the registry (suspected malware).", raw)]
     if info.archived:
-        return [_finding("H012", adapter, dep.source_file, dep.line,
-                         f"{name} is archived by its owner (no future updates expected).", dep.raw)]
+        return [_finding("H012", adapter, file, line,
+                         f"{label} is archived by its owner (no future updates expected).", raw)]
     if info.created and age_days(info.created) < FRESH_DAYS:
         threshold = LOW_DOWNLOADS.get(info.downloads_period, 500)
         if info.downloads is not None and info.downloads < threshold:
-            return [_finding("H005", adapter, dep.source_file, dep.line,
-                             f"{name} first published {info.created[:10]} with only "
-                             f"{info.downloads} {info.downloads_period} downloads.", dep.raw)]
-        return [_finding("H006", adapter, dep.source_file, dep.line,
-                         f"{name} first published {info.created[:10]} "
-                         f"(younger than {FRESH_DAYS} days).", dep.raw)]
+            return [_finding("H005", adapter, file, line,
+                             f"{label} first published {info.created[:10]} with only "
+                             f"{info.downloads} {info.downloads_period} downloads.", raw)]
+        return [_finding("H006", adapter, file, line,
+                         f"{label} first published {info.created[:10]} "
+                         f"(younger than {FRESH_DAYS} days).", raw)]
     return []
 
 
@@ -170,10 +178,15 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
                          imp.module)]
     infos = [cand_infos[c] for c in cands if c in cand_infos]
     if any(i.exists for i in infos):
-        exists_name = cands[[i.exists for i in infos].index(True)]
+        idx = [i.exists for i in infos].index(True)
+        exists_name = [c for c in cands if c in cand_infos][idx]
+        existing = infos[idx]
+        # keep the undeclared FACT (H002) AND surface the package's security
+        # state (quarantine/archive/newness) — undeclared must not hide risk
         return [_finding("H002", adapter, imp.file, imp.line,
                          f"{label}: imported but not declared in the manifest "
-                         f"(exists in registry as '{exists_name}').", imp.module)]
+                         f"(exists in registry as '{exists_name}').", imp.module)] \
+            + _status_findings(adapter, existing, imp.file, imp.line, label, imp.module)
     if any(i.error for i in infos):
         return [_finding("H004", adapter, imp.file, imp.line,
                          f"{label}: {next(i.error for i in infos if i.error)}", imp.module)]

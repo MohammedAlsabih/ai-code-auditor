@@ -181,3 +181,18 @@ def test_h010_precision_is_exact_on_declared_path():
     fs = run([_dep("corp-lib")], [], reg, private_reason="custom index in requirements.txt")
     assert [f.rule_id for f in fs] == ["H010"]
     assert fs[0].precision == "exact"   # H010 is not a namespace-mapping claim
+
+
+def test_undeclared_import_keeps_package_security_state():
+    # an undeclared import of an existing-but-quarantined/archived/fresh package
+    # must surface BOTH H002 (undeclared fact) AND the security signal
+    reg = FakeRegistry("pypi", {
+        "quar": PackageInfo(True, created=OLD, quarantined=True),
+        "arch": PackageInfo(True, created=OLD, archived=True),
+        "freshlow": PackageInfo(True, created=FRESH, downloads=3),
+        "freshok": PackageInfo(True, created=FRESH, downloads=99999),
+    })
+    assert {f.rule_id for f in run([], [_imp("quar")], reg)} == {"H002", "H009"}
+    assert {f.rule_id for f in run([], [_imp("arch")], reg)} == {"H002", "H012"}
+    assert {f.rule_id for f in run([], [_imp("freshlow")], reg)} == {"H002", "H005"}
+    assert {f.rule_id for f in run([], [_imp("freshok")], reg)} == {"H002", "H006"}

@@ -82,12 +82,14 @@ def test_parse_setup_py_regex_fallback(tmp_path):
 
 # ---------- verification-pass regressions (dep parsing false positives) ----------
 
-def test_requirements_follows_r_and_c_includes(tmp_path):
+def test_requirements_follows_r_includes(tmp_path):
+    # -r includes ARE followed and declare; -c constraints are read but do NOT
+    # declare (asserted separately in test_constraints_c_include_does_not_declare)
     _mk(tmp_path, "requirements.txt", "-r deps/base.txt\n-c deps/constraints.txt\n")
     _mk(tmp_path, "deps/base.txt", "flask==3.0\n")
     _mk(tmp_path, "deps/constraints.txt", "urllib3<2\n")
     names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
-    assert names == {"flask", "urllib3"}
+    assert names == {"flask"}
 
 
 def test_requirements_include_outside_root_is_ignored(tmp_path):
@@ -152,6 +154,71 @@ def test_pep735_dependency_groups_parsed(tmp_path):
     ]))
     names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
     assert {"requests", "pytest", "ruff"} <= names
+
+
+def test_constraints_c_include_does_not_declare(tmp_path):
+    # `-c` pins versions; it must NOT create a DeclaredDep (pip semantics)
+    _mk(tmp_path, "requirements.txt", "-r base.txt\n-c constraints.txt\n")
+    _mk(tmp_path, "base.txt", "flask\n")
+    _mk(tmp_path, "constraints.txt", "claimed-ai-name==1\n")
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert names == {"flask"}                 # claimed-ai-name is a constraint, not declared
+
+
+def test_private_registry_detected_in_included_requirements(tmp_path):
+    _mk(tmp_path, "requirements.txt", "-r reqs/private.txt\n")
+    _mk(tmp_path, "reqs/private.txt",
+        "--index-url https://packages.example/simple\ncorp-lib\n")
+    a = PythonAdapter()
+    a.parse_dependencies(tmp_path)
+    assert a.private_registry_reason(tmp_path) is not None
+
+
+def test_rfile_attached_form_no_space(tmp_path):
+    _mk(tmp_path, "requirements.txt", "-rmore.txt\n")
+    _mk(tmp_path, "more.txt", "flask\n")
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert names == {"flask"}
+
+
+def test_pyproject_wrong_schema_does_not_crash_or_explode(tmp_path):
+    from auditor.core.models import Diagnostics
+    # optional-dependencies as a LIST (not a table) previously crashed
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\noptional-dependencies = ["requests"]\n')
+    diag = Diagnostics()
+    deps = PythonAdapter().parse_dependencies(tmp_path, diag=diag)
+    assert deps == [] and any("optional-dependencies" in n for n in diag.notes)
+
+
+def test_pyproject_dependencies_string_is_not_char_exploded(tmp_path):
+    from auditor.core.models import Diagnostics
+    _mk(tmp_path, "pyproject.toml", '[project]\ndependencies = "requests"\n')
+    diag = Diagnostics()
+    deps = PythonAdapter().parse_dependencies(tmp_path, diag=diag)
+    assert deps == []                          # NOT ['r','e','q',...]
+    assert any("project.dependencies" in n for n in diag.notes)
+
+
+def test_partial_namespace_does_not_make_sibling_internal(tmp_path):
+    # a local google.myapp namespace part must NOT make google.cloud.storage internal
+    _mk(tmp_path, "requirements.txt", "google-cloud-storage\n")
+    _mk(tmp_path, "google/myapp/mod.py", "x=1")   # no __init__ anywhere
+    _mk(tmp_path, "app.py", "import google.cloud.storage\nfrom google.myapp import mod\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    by = {i.module: i for i in a.extract_imports(files)}
+    assert a.is_internal(by["google.myapp"])           # the local part IS internal
+    assert not a.is_internal(by["google.cloud.storage"])  # the external sibling is NOT
+
+
+def test_allowed_minors_handles_prerelease_specs(tmp_path):
+    for spec in ("==3.13.0rc1", ">=3.13.0rc1,<3.13.0rc3"):
+        _mk(tmp_path, "pyproject.toml",
+            f'[project]\nname = "x"\nrequires-python = "{spec}"\n')
+        allowed = PythonAdapter()._allowed_minors(tmp_path)
+        assert allowed == [(3, 13)], spec
 
 
 # ---------- T7: imports, stdlib, locality, mapping ----------
