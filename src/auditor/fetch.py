@@ -28,20 +28,24 @@ def _force_remove(path: Path) -> None:
 def _clone_env(empty_cfg: Path) -> dict[str, str]:
     """Environment that neutralizes config-based code execution during clone.
 
-    Pointing GIT_CONFIG_GLOBAL/SYSTEM at an empty file makes git ignore the
-    user's global and system config entirely, so a globally-configured
-    `core.hooksPath`, `filter.*.smudge`/`.process`, or `core.fsmonitor` cannot
-    run commands on a hostile repo. GIT_ALLOW_PROTOCOL drops the `ext::`
-    (arbitrary-command) transport. LFS smudge stays off; prompts are disabled."""
-    return {
-        **os.environ,
+    Every inherited `GIT_CONFIG_*` variable is DROPPED first — otherwise an
+    inherited `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` or
+    `GIT_CONFIG_PARAMETERS` injects arbitrary config (e.g. a `filter.*.smudge`
+    command a hostile repo's `.gitattributes` triggers on checkout). Only the
+    tool's OWN empty GIT_CONFIG_GLOBAL/SYSTEM are then re-added, which also makes
+    git ignore user global/system config (global `core.hooksPath`, filters,
+    `core.fsmonitor`). GIT_ALLOW_PROTOCOL drops the `ext::` (arbitrary-command)
+    transport. LFS smudge stays off; prompts are disabled."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_")}
+    env.update({
         "GIT_TERMINAL_PROMPT": "0",
         "GCM_INTERACTIVE": "never",
         "GIT_LFS_SKIP_SMUDGE": "1",
         "GIT_CONFIG_GLOBAL": str(empty_cfg),
         "GIT_CONFIG_SYSTEM": str(empty_cfg),
         "GIT_ALLOW_PROTOCOL": "http:https:ssh:git:file",
-    }
+    })
+    return env
 
 
 def _clone_cmd(hooks_dir: Path, target: str, dest: Path) -> list[str]:

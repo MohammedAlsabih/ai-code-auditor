@@ -105,6 +105,72 @@ def test_clone_neutralizes_hooks_and_config(monkeypatch, tmp_path):
         cleanup()
 
 
+def test_inherited_git_config_env_is_stripped(monkeypatch, tmp_path):
+    # deterministic: an inherited inline GIT_CONFIG_* injection must NOT survive
+    # into the env passed to git; only the tool's own GLOBAL/SYSTEM remain
+    recorded = {}
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    for k, v in {"GIT_CONFIG_COUNT": "1",
+                 "GIT_CONFIG_KEY_0": "filter.x.smudge",
+                 "GIT_CONFIG_VALUE_0": "sh -c 'touch owned'",
+                 "GIT_CONFIG_PARAMETERS": "'filter.x.smudge=sh -c owned'"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(fetch.subprocess, "run",
+                        lambda cmd, **kw: (recorded.update(env=kw.get("env", {})), Ok())[1])
+    _, cleanup = resolve_target("https://example.invalid/x.git")
+    try:
+        env = recorded["env"]
+        leaked = [k for k in env if k.startswith("GIT_CONFIG_")
+                  and k not in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")]
+        assert leaked == []                                   # COUNT/KEY_n/VALUE_n/PARAMETERS gone
+        assert env["GIT_CONFIG_GLOBAL"].endswith("empty.gitconfig")
+        assert env["GIT_CONFIG_GLOBAL"] == env["GIT_CONFIG_SYSTEM"]
+    finally:
+        cleanup()
+
+
+def test_inherited_smudge_filter_does_not_execute(monkeypatch, tmp_path):
+    # e2e with positive control: a .gitattributes-bound smudge filter defined via
+    # inherited inline GIT_CONFIG_* runs in a raw clone but NOT via resolve_target
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / ".gitattributes").write_text("*.txt filter=reviewprobe\n", encoding="utf-8")
+    (src / "a.txt").write_text("hi\n", encoding="utf-8")
+    for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"]):
+        subprocess.run(cmd, cwd=src, check=True, capture_output=True)
+
+    marker = tmp_path / "SMUDGE_MARKER"
+    attacker = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "filter.reviewprobe.smudge",
+        "GIT_CONFIG_VALUE_0": f"sh -c 'printf hooked > \"{marker.as_posix()}\"; cat'",
+    }
+
+    # positive control: raw clone inheriting the attacker inline config
+    pos = tmp_path / "pos_clone"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", src.as_uri(), str(pos)],
+                   env={**os.environ, **attacker, "GIT_TERMINAL_PROMPT": "0"},
+                   capture_output=True)
+    if not marker.exists():
+        pytest.skip("inline GIT_CONFIG smudge does not fire on this git build")
+    marker.unlink()
+
+    # the defense: resolve_target inherits the same attacker env yet must not run it
+    for k, v in attacker.items():
+        monkeypatch.setenv(k, v)
+    path, cleanup = resolve_target(src.as_uri())
+    try:
+        assert not marker.exists()   # smudge filter suppressed
+    finally:
+        cleanup()
+
+
 def test_global_post_checkout_hook_does_not_execute(monkeypatch, tmp_path):
     # end-to-end negative test with a positive control so it can't false-green:
     # if the global-hooksPath mechanism does not fire on THIS machine, skip.
