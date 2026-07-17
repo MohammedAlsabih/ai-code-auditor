@@ -1,0 +1,33 @@
+{
+  "versions": {
+    "python": "3.12.4",
+    "tree_sitter": "0.26.0",
+    "tree_sitter_typescript": "unknown"
+  },
+  "rules": [
+    "R001",
+    "R002",
+    "R003",
+    "R004",
+    "N003"
+  ],
+  "adaptation_log": [],
+  "results": {
+    "app/page.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "components/ClientParent.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "components/Hooky.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "components/Leaf.tsx": {
+      "parse_error": false,
+      "findings": []
+    }
+  }
+}

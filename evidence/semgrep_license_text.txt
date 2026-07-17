@@ -1,0 +1,219 @@
+Semgrep Rules License v. 1.0 | Semgrep
+At RSA, we launched Semgrep Multimodal to combine AI reasoning with rule-based detection
+Learn More →
+Sign in
+Product support
+Contact us
+Products
+Products
+Code
+Find and fix the issues that matter in your code (SAST)
+Supply Chain
+Fix vulnerabilities in open source  dependencies and block malware
+Secrets
+Find and fix hardcoded secrets with semantic analysis
+Semgrep Guardian
+Scan and fix AI-generated code the moment it's written
+Platform
+Multimodal
+Combine AI reasoning with rule-based analysis for detection, triage, and remediation
+AppSec Platform
+Automate, manage, and enforce security across your organization
+Workflows
+Build and deploy security pipelines that combine static analysis with AI at scale
+Featured
+Registry
+Find rules written by Semgrep and the community
+Playground
+Write and share rules using our online interactive tool
+Product Updates
+Stay up to date on changes to the Semgrep platform, big and small
+Solutions
+Solutions
+Open-Source Malware Protection
+Protect against software supply chain attacks
+Static Application Security Testing
+Increase security while accelerating development
+OWASP Top 10
+Prevent the most critical web application security risks
+Secure Guardrails
+Protect Your Code with Secure Guardrails
+Industries
+Fintech
+Ship faster, without compromising on security.
+SaaS & Cloud
+Secure SAST. Innovate Fast.
+Why Semgrep?
+vs. Snyk
+vs. Checkmarx
+vs. GitHub
+Community Edition
+Semgrep for developers
+Semgrep for Startups
+Resources
+Docs
+Want the docs? Start here
+Blog
+Get the latest news about Semgrep
+ROI Calculator
+See how Semgrep can save you time and money
+Community Slack
+Join the friendly Slack group to ask questions or share feedback
+Events
+Join us at a Semgrep Event!
+Case Studies
+See why users love Semgrep
+Customer Success
+Get help from Semgrep’s Customer Success team
+Video Library
+View our library of on-demand webinars
+Featured
+Report
+Remediation at Scale: What High-Performing AppSec Teams Do Differently
+An analysis of code security remediation patterns across tens of thousands of actively developed repositories.
+Comparison
+Semgrep vs. Snyk
+Learn how Semgrep improves accuracy, saves time, and delivers a superior developer experience.
+Blog
+Getting ready for Mythos
+Mythos is poised to give attackers an unprecedented advantage, but Semgrep can help you restore the balance in your favor.
+Company
+About
+The Semgrep story & values
+Careers
+Join the team!
+Partners
+Become a Semgrep partner
+Pricing
+Book demo
+Try for free
+Book demo
+Try for free
+Products
+Semgrep Code
+Find and fix the issues that matter in your code (SAST)
+Semgrep Supply Chain
+Fix vulnerabilities in open source  dependencies and block malware
+Semgrep Secrets
+Find and fix hardcoded secrets with semantic analysis
+Semgrep Guardian
+Scan and fix AI-generated code the moment it's written
+Multimodal
+Combine AI reasoning with rule-based analysis for detection, triage, and remediation
+Semgrep AppSec Platform
+Automate, manage, and enforce security across your organization
+Semgrep Workflows
+Build and deploy security pipelines that combine static analysis with AI at scale
+Product Updates
+Stay up to date on changes to the Semgrep platform, big and small
+Solutions
+Open-Source Malware Protection
+Protect against software supply chain attacks
+Static application security testing
+Increase security while accelerating development
+OWASP Top 10
+Prevent the most critical web application security risks
+Secure Guardrails
+Protect Your Code with Secure Guardrails
+Fintech
+Mitigate software supply chain risks
+SaaS & Cloud
+Increase security while accelerating development
+Resources
+Docs
+Want to read all the docs? Start here
+Blog
+Get the latest news about Semgrep
+ROI Calculator
+See how Semgrep can save you time and money
+Community Slack
+Join the friendly Slack group to ask questions or share feedback
+Events
+Join us at a Semgrep Event!
+Case Studies
+See why users love Semgrep
+Video Library
+View our library of on-demand webinars
+Community Edition
+Company
+About
+The Semgrep story & values
+Careers
+Join the team!
+Partners
+Become a Semgrep partner
+Pricing
+Sign in
+Product support
+Contact us
+Book demo
+Try for free
+Last updated: December 13th, 2024
+Semgrep Rules License v. 1.0
+Table of Contents
+Semgrep Rules License v. 1.0
+semgrep.dev/legal/rules-license
+Acceptance
+By using the rules, you agree to all of the terms and conditions below.
+Copyright License
+The licensor grants you a non-exclusive, royalty-free, worldwide, non-sublicensable, non-transferable license to use the rules, subject to the limitations and conditions below.
+Limitations
+You may use the rules only for your own internal business purposes. This license does not allow you to distribute the rules, or to make them available to others as a service.
+You may not alter, remove, or obscure any licensing, copyright, or other notices of the licensor in the rules. If you copy any of the rules, you must also include the notices of the licensor in that copy. Any use of the licensor’s trademarks is subject to applicable law.
+Patents
+The licensor grants you a license, under any patent claims the licensor can license, or becomes able to license, to make, have made, use, sell, offer for sale, import and have imported the rules, in each case subject to the limitations and conditions in this license. This license does not cover any patent claims that you cause to be infringed by modifications or additions to the rules. If you or your company make any written claim that the rules or any Semgrep product or service infringes or contributes to infringement of any patent, your patent license for the rules granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+Notices
+If you modify the rules, you must include in any modified copies of the rules prominent notices stating that you have modified the rules.
+No Other Rights
+These terms do not imply any licenses other than those expressly granted in these terms.
+Termination
+If you use the rules in violation of these terms, such use is not licensed, and your licenses will automatically terminate.
+No Liability
+As far as the law allows, the rules come as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the rules, under any kind of legal claim.  If this provision is unenforceable under applicable law, your licenses are void.
+Definitions
+The licensor is Semgrep, Inc..
+The rules are the rules for the Semgrep analysis tool that the licensor makes available under these terms, including any portion of those rules.
+You refers to the individual or entity agreeing to these terms.
+Your company is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. Control means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.
+Your licenses are all the licenses granted to you for the rules under these terms.
+Use means anything you do with the rules requiring one of your licenses.
+Trademark means trademarks, service marks, rights in logos, and similar rights.
+Static analysis at ludicrous speed
+Find Bugs and Enforce Code Standards
+Get started
+Learn more
+Code security for builders
+Products
+Semgrep Code
+Semgrep Supply Chain
+Semgrep Secrets
+Semgrep Multimodal
+Semgrep AppSec Platform
+Semgrep Pro Engine
+Solutions
+Secure Vibe Coding
+Open-Source Malware Protection
+Static Application Security Testing
+OWASP Top 10
+Secure Guardrails
+Resources
+Docs
+Pricing
+Blog
+Getting started with Semgrep
+Registry
+Playground
+ROI Calculator
+Book a demo
+Help Center
+Company
+About
+Careers
+Contact
+Press
+Stay up to date
+Subscribe to our newsletter
+© 2026 Semgrep, Inc. Semgrep is a registered trademark of Semgrep, Inc.
+Website terms
+·
+Privacy

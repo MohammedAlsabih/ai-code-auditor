@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-code-auditor"
+version = "0.1.0"
+description = "Deterministic auditor for AI-generated code: hallucinated dependencies and risky patterns across Python, Java, .NET and TypeScript/React/Next.js"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "tree-sitter>=0.26,<0.27",
+    "tree-sitter-python>=0.25,<0.26",
+    "tree-sitter-java>=0.23.5,<0.24",
+    "tree-sitter-c-sharp>=0.23.5,<0.24",
+    "tree-sitter-typescript>=0.23.2,<0.24",
+    "requests>=2.32",
+    "platformdirs>=4.0",
+    "lizard>=1.23",
+    "defusedxml>=0.7",
+    "packaging>=24.0",
+]
+
+[project.scripts]
+auditor = "auditor.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "responses>=0.25"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auditor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

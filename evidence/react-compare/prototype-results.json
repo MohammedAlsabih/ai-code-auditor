@@ -1,0 +1,164 @@
+{
+  "versions": {
+    "python": "3.12.4",
+    "tree_sitter": "0.26.0",
+    "tree_sitter_typescript": "unknown"
+  },
+  "rules": [
+    "R001",
+    "R002",
+    "R003",
+    "R004"
+  ],
+  "adaptation_log": [],
+  "results": {
+    "arrow_component_ok.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "clean_component.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "custom_hook_ok.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "effect_deps_complete.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "effect_missing_dep.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R005",
+          "line": 6,
+          "snippet": "useEffect(() => {\n    console.log(q, n);\n  }, [q])",
+          "detail": "useEffect reads n but its dependency array only lists [q]."
+        }
+      ]
+    },
+    "effect_no_deps.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R004",
+          "line": 5,
+          "snippet": "useEffect(() => {\n    document.title = 'x';\n  })",
+          "detail": "useEffect has no dependency array; it re-runs after every render."
+        }
+      ]
+    },
+    "effect_reads_setter.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "hook_after_early_return.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "hook_in_class_method.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R003",
+          "line": 7,
+          "snippet": "useState(0)",
+          "detail": "useState is called from 'render', which is neither a component (Capitalized) nor a custom hook (use*)."
+        }
+      ]
+    },
+    "hook_in_event_handler.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "hook_in_for.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R001",
+          "line": 7,
+          "snippet": "useState(items[i])",
+          "detail": "useState is called inside a for statement; hooks must run unconditionally at the top level."
+        }
+      ]
+    },
+    "hook_in_if.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R001",
+          "line": 6,
+          "snippet": "useState(1)",
+          "detail": "useState is called inside a if statement; hooks must run unconditionally at the top level."
+        }
+      ]
+    },
+    "hook_in_logical_and.tsx": {
+      "parse_error": false,
+      "findings": []
+    },
+    "hook_in_plain_function.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R003",
+          "line": 5,
+          "snippet": "useState<string | null>(null)",
+          "detail": "useState is called from 'loadData', which is neither a component (Capitalized) nor a custom hook (use*)."
+        }
+      ]
+    },
+    "hook_in_ternary.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R001",
+          "line": 5,
+          "snippet": "useMemo(() => 1, [])",
+          "detail": "useMemo is called inside a ternary expression; hooks must run unconditionally at the top level."
+        }
+      ]
+    },
+    "hook_in_try_catch.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R001",
+          "line": 6,
+          "snippet": "useState(0)",
+          "detail": "useState is called inside a try statement; hooks must run unconditionally at the top level."
+        }
+      ]
+    },
+    "hook_in_useeffect_cb.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R005",
+          "line": 5,
+          "snippet": "useEffect(() => {\n    const [x] = useState(0);\n    console.log(x);\n  }, [])",
+          "detail": "useEffect reads x but its dependency array only lists []."
+        },
+        {
+          "rule_id": "R002",
+          "line": 6,
+          "snippet": "useState(0)",
+          "detail": "useState runs inside the callback of useEffect; move it to component top level."
+        }
+      ]
+    },
+    "hook_in_usememo_cb.tsx": {
+      "parse_error": false,
+      "findings": [
+        {
+          "rule_id": "R002",
+          "line": 6,
+          "snippet": "useState(1)",
+          "detail": "useState runs inside the callback of useMemo; move it to component top level."
+        }
+      ]
+    }
+  }
+}
