@@ -213,4 +213,174 @@ class HookOutsideComponent(Rule):
         return node_text(callee) if callee is not None else None
 
 
-REACT_RULES: list[Rule] = [HookInConditional(), HookInNestedCallback(), HookOutsideComponent()]
+_EFFECT_NAMES = frozenset({"useEffect", "useLayoutEffect"})
+_IDENT_QUERY = "(identifier) @id"
+_JSX_ATTR_QUERY = "(jsx_attribute (property_identifier) @name)"
+_GLOBALS = frozenset({
+    "console", "window", "document", "Math", "JSON", "Object", "Array",
+    "Promise", "fetch", "localStorage", "setTimeout", "setInterval",
+    "clearTimeout", "clearInterval", "undefined", "NaN", "Infinity",
+})
+
+
+def _component_reactive_names(fn_node, lang: str, exclude=None) -> set[str]:
+    """useState firsts + destructured props of the component function.
+    `exclude`: subtree to ignore (the effect callback itself) — corpus-proven FP:
+    a useState declared INSIDE the callback is not a missing dependency."""
+    def _inside_exclude(node) -> bool:
+        return exclude is not None and \
+            node.start_byte >= exclude.start_byte and node.end_byte <= exclude.end_byte
+
+    names: set[str] = set()
+    params = fn_node.child_by_field_name("parameters")
+    if params is not None:
+        for pat in captures(lang, params, "(shorthand_property_identifier_pattern) @p").get("p", []):
+            names.add(node_text(pat))
+    for decl in captures(lang, fn_node, "(variable_declarator) @d").get("d", []):
+        if _inside_exclude(decl):
+            continue
+        value = decl.child_by_field_name("value")
+        name = decl.child_by_field_name("name")
+        if value is None or name is None or value.type != "call_expression":
+            continue
+        callee = value.child_by_field_name("function")
+        if callee is not None and node_text(callee) == "useState" and name.type == "array_pattern":
+            idents = [c for c in name.named_children if c.type == "identifier"]
+            if idents:
+                names.add(node_text(idents[0]))
+    return names
+
+
+class EffectDeps(Rule):
+    id = "R004"  # emits R004 and R005
+    severity = Severity.YELLOW
+    title = "useEffect dependency-array problems"
+    frameworks = ("react",)
+    precision = "heuristic"
+    # R004 intentionally diverges from exhaustive-deps (which ignores a missing
+    # deps argument BY DESIGN): the project spec explicitly requires flagging
+    # useEffect without a dependency array. Yellow, never red.
+
+    def check(self, sf: SourceFile) -> list[Finding]:
+        out = []
+        for call, name in hook_calls(sf):
+            if name not in _EFFECT_NAMES:
+                continue
+            args = call.child_by_field_name("arguments")
+            arg_nodes = [] if args is None else args.named_children
+            if not arg_nodes:
+                continue
+            callback = arg_nodes[0]
+            if len(arg_nodes) < 2:
+                f = _finding(self, sf, call,
+                             f"{name} has no dependency array; it re-runs after every render.")
+                out.append(Finding(**{**f.__dict__, "rule_id": "R004",
+                                      "title": "useEffect without dependency array"}))
+                continue
+            deps_node = arg_nodes[1]
+            if deps_node.type != "array":
+                continue
+            deps = {node_text(c) for c in deps_node.named_children if c.type == "identifier"}
+            fns = enclosing_functions(call)
+            component = fns[-1] if fns else None
+            if component is None:
+                continue
+            reactive = _component_reactive_names(component, sf.language, exclude=callback)
+            used = {node_text(n) for n in
+                    captures(sf.language, callback, _IDENT_QUERY).get("id", [])}
+            missing = sorted((used & reactive) - deps - _GLOBALS)
+            if missing:
+                f = _finding(self, sf, call,
+                             f"{name} reads {', '.join(missing)} but its dependency array "
+                             f"only lists [{', '.join(sorted(deps))}].")
+                out.append(Finding(**{**f.__dict__, "rule_id": "R005",
+                                      "title": "useEffect with obviously missing dependencies"}))
+        return out
+
+
+class IndexAsKey(Rule):
+    id = "R006"
+    severity = Severity.YELLOW
+    title = "List key uses array index"
+    frameworks = ("react",)
+
+    def check(self, sf: SourceFile) -> list[Finding]:
+        out = []
+        for attr_name in captures(sf.language, sf.tree.root_node, _JSX_ATTR_QUERY).get("name", []):
+            if node_text(attr_name) != "key":
+                continue
+            attr = attr_name.parent
+            expr = next((c for c in attr.named_children if c.type == "jsx_expression"), None)
+            if expr is None or not expr.named_children:
+                continue
+            value = expr.named_children[0]
+            if value.type != "identifier":
+                continue
+            key_name = node_text(value)
+            map_param = self._second_map_param(attr)
+            if key_name == map_param or (map_param is None and key_name in ("index", "i", "idx")):
+                out.append(_finding(self, sf, attr,
+                                    f"key={{{key_name}}} is the .map() index; reordering or "
+                                    "deleting items will confuse React reconciliation."))
+        return out
+
+    @staticmethod
+    def _second_map_param(node) -> str | None:
+        cur = node.parent
+        while cur is not None:
+            if cur.type in ("arrow_function", "function_expression"):
+                call = cur.parent
+                if call is not None and call.type == "arguments":
+                    call = call.parent
+                if call is not None and call.type == "call_expression":
+                    callee = call.child_by_field_name("function")
+                    if callee is not None and callee.type == "member_expression":
+                        prop = callee.child_by_field_name("property")
+                        if prop is not None and node_text(prop) == "map":
+                            params = cur.child_by_field_name("parameters")
+                            if params is not None:
+                                idents = [c for c in params.named_children
+                                          if c.type in ("identifier", "required_parameter")]
+                                names = []
+                                for p in idents:
+                                    names.append(node_text(p.child_by_field_name("pattern"))
+                                                 if p.type == "required_parameter" else node_text(p))
+                                if len(names) >= 2:
+                                    return names[1]
+            cur = cur.parent
+        return None
+
+
+class DangerousInnerHtml(Rule):
+    id = "R007"
+    severity = Severity.RED
+    title = "dangerouslySetInnerHTML with non-literal value"
+    frameworks = ("react",)
+
+    _LITERAL_TYPES = frozenset({"string", "template_string", "number"})
+
+    def check(self, sf: SourceFile) -> list[Finding]:
+        out = []
+        for attr_name in captures(sf.language, sf.tree.root_node, _JSX_ATTR_QUERY).get("name", []):
+            if node_text(attr_name) != "dangerouslySetInnerHTML":
+                continue
+            attr = attr_name.parent
+            html_value = None
+            for pair in captures(sf.language, attr, "(pair) @p").get("p", []):
+                key = pair.child_by_field_name("key")
+                if key is not None and node_text(key) == "__html":
+                    html_value = pair.child_by_field_name("value")
+            if html_value is None:
+                continue
+            if html_value.type in self._LITERAL_TYPES and \
+                    not captures(sf.language, html_value, "(template_substitution) @s").get("s"):
+                continue  # constant string — not an injection vector
+            out.append(_finding(self, sf, attr,
+                                "__html receives a non-literal value; any user-influenced "
+                                "content here is an XSS vector."))
+        return out
+
+
+REACT_RULES: list[Rule] = [HookInConditional(), HookInNestedCallback(),
+                           HookOutsideComponent(), EffectDeps(), IndexAsKey(),
+                           DangerousInnerHtml()]

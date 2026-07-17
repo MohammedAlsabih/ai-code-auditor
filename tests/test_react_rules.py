@@ -1,8 +1,12 @@
 from pathlib import Path
 
-from auditor.adapters.typescript.react_rules import (HookInConditional,
+from auditor.adapters.typescript.react_rules import (REACT_RULES,
+                                                     DangerousInnerHtml,
+                                                     EffectDeps,
+                                                     HookInConditional,
                                                      HookInNestedCallback,
-                                                     HookOutsideComponent)
+                                                     HookOutsideComponent,
+                                                     IndexAsKey)
 from auditor.core.models import SourceFile
 from auditor.core.treesitter import parse_source
 
@@ -140,3 +144,90 @@ function useThing() {
 }
 """)
     assert HookOutsideComponent().check(sf) == []
+
+
+def test_r004_useeffect_without_deps_array():
+    sf = _sf("""
+export function C() {
+  useEffect(() => { document.title = 'x'; });
+  return null;
+}
+""")
+    fs = EffectDeps().check(sf)
+    assert [f.rule_id for f in fs] == ["R004"]
+
+
+def test_r005_obviously_missing_dep():
+    sf = _sf("""
+export function C({q}: {q: string}) {
+  const [n, setN] = useState(0);
+  useEffect(() => { console.log(q, n); }, [q]);
+  return null;
+}
+""")
+    fs = EffectDeps().check(sf)
+    assert [f.rule_id for f in fs] == ["R005"]
+    assert "n" in fs[0].detail
+
+
+def test_r005_complete_deps_are_clean():
+    sf = _sf("""
+export function C({q}: {q: string}) {
+  const [n] = useState(0);
+  useEffect(() => { console.log(q, n); }, [q, n]);
+  return null;
+}
+""")
+    assert EffectDeps().check(sf) == []
+
+
+def test_r006_index_key():
+    sf = _sf("""
+export function L({items}: {items: string[]}) {
+  return <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul>;
+}
+""")
+    fs = IndexAsKey().check(sf)
+    assert [f.rule_id for f in fs] == ["R006"]
+
+
+def test_r006_stable_key_clean():
+    sf = _sf("""
+export function L({items}: {items: {id: string}[]}) {
+  return <ul>{items.map((item) => <li key={item.id}>x</li>)}</ul>;
+}
+""")
+    assert IndexAsKey().check(sf) == []
+
+
+def test_r007_dangerous_html():
+    sf = _sf("""
+export function D({html}: {html: string}) {
+  return <div dangerouslySetInnerHTML={{__html: html}} />;
+}
+""")
+    fs = DangerousInnerHtml().check(sf)
+    assert [f.rule_id for f in fs] == ["R007"]
+
+
+def test_r007_literal_html_clean():
+    sf = _sf("""
+export function D() {
+  return <div dangerouslySetInnerHTML={{__html: "<b>hi</b>"}} />;
+}
+""")
+    assert DangerousInnerHtml().check(sf) == []
+
+
+def test_r005_ignores_state_declared_inside_callback():
+    sf = _sf("""
+export function C() {
+  useEffect(() => { const [x] = useState(0); console.log(x); }, []);
+  return null;
+}
+""")
+    assert [f.rule_id for f in EffectDeps().check(sf)] == []
+
+
+def test_react_rules_registry_has_six():
+    assert len(REACT_RULES) == 6
