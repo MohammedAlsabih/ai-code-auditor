@@ -12,6 +12,26 @@ from auditor.registries.pypi import canonical
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 _SETUP_LIST = re.compile(r"install_requires\s*=\s*\[(.*?)\]", re.S)
 _QUOTED = re.compile(r"""["']([^"']+)["']""")
+_VCS_SCHEMES = ("git+", "hg+", "svn+", "bzr+")
+_URL_START = _VCS_SCHEMES + ("http://", "https://", "file://", "ftp://")
+_EGG = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
+_INCLUDE_FLAGS = ("--requirement", "--constraint", "-r", "-c")
+
+
+def _dir_has_py(d: Path, max_depth: int = 3) -> bool:
+    """True if the directory tree (bounded) contains any .py file — treats the
+    dir as the project's own package even without __init__.py (PEP 420)."""
+    from auditor.core.walk import IGNORE_DIRS
+    import os
+    base_depth = len(d.parts)
+    for dirpath, dirnames, filenames in os.walk(d):
+        dirnames[:] = [n for n in dirnames if n not in IGNORE_DIRS]
+        if len(Path(dirpath).parts) - base_depth > max_depth:
+            dirnames[:] = []
+            continue
+        if any(f.endswith(".py") for f in filenames):
+            return True
+    return False
 
 
 class PythonAdapter(LanguageAdapter):
@@ -30,9 +50,11 @@ class PythonAdapter(LanguageAdapter):
 
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
         self._diag = diag
+        self._scan_root = root.resolve()   # confines -r/-c include following
         deps: list[DeclaredDep] = []
+        seen_files: set[Path] = set()
         for req in sorted(root.glob("requirements*.txt")):
-            deps += self._parse_requirements(req)
+            deps += self._parse_requirements(req, seen_files)
         pyproject = root / "pyproject.toml"
         if pyproject.is_file():
             deps += self._parse_pyproject(pyproject)
@@ -51,21 +73,68 @@ class PythonAdapter(LanguageAdapter):
         self._last_declared = out   # cache: project_rules must NOT re-parse
         return out                  # (a bare re-call would reset self._diag)
 
-    def _parse_requirements(self, path: Path) -> list[DeclaredDep]:
-        out = []
+    def _parse_requirements(self, path: Path, seen: set[Path],
+                            depth: int = 0) -> list[DeclaredDep]:
+        rp = path.resolve()
+        if rp in seen or depth > 10:
+            return []
+        seen.add(rp)
+        out: list[DeclaredDep] = []
         rel = path.name
         for i, raw in enumerate(self._read(path).splitlines(), 1):
-            line = raw.strip()
-            if not line or line.startswith(("#", "-")):
+            line = raw.split(" #", 1)[0].strip() if " #" in raw else raw.strip()
+            if not line or line.startswith("#"):
                 continue
-            m = _REQ_NAME.match(line)
-            if not m:
+            inc = self._include_target(line, path)
+            if inc is not None:
+                out += self._parse_requirements(inc, seen, depth + 1)
                 continue
-            out.append(DeclaredDep(
-                name=canonical(m.group(1)), ecosystem="pypi", source_file=rel,
-                line=i, raw=line, skip_registry="@" in line.split("#", 1)[0],
-            ))
+            if line.startswith(("-e", "--editable")):
+                line = line.split(None, 1)[1].strip() if " " in line else ""
+                if not line:
+                    continue
+            elif line.startswith("-"):
+                continue                      # other pip options
+            dep = self._req_dep(line, rel, i)
+            if dep is not None:
+                out.append(dep)
         return out
+
+    def _include_target(self, line: str, path: Path) -> Path | None:
+        """Resolve a -r/-c include to a file INSIDE the scan root, else None."""
+        for flag in _INCLUDE_FLAGS:
+            if line == flag or line.startswith(flag + " ") or line.startswith(flag + "="):
+                rest = line[len(flag):].lstrip(" =").strip().strip("'\"")
+                if not rest:
+                    return None
+                target = (path.parent / rest).resolve()
+                if target.is_file() and (target == self._scan_root
+                                         or self._scan_root in target.parents):
+                    return target
+                return None
+        return None
+
+    def _req_dep(self, line: str, rel: str, lineno: int) -> DeclaredDep | None:
+        head = line.split(";", 1)[0].strip()   # drop environment marker
+        # bare URL / VCS ref (checked FIRST so `https://...@host` is not mistaken
+        # for a PEP 508 `name @ url`): never a PyPI name — use #egg or drop
+        if head.startswith(_URL_START):
+            egg = _EGG.search(line)
+            if not egg:
+                return None
+            return DeclaredDep(name=canonical(egg.group(1)), ecosystem="pypi",
+                               source_file=rel, line=lineno, raw=line, skip_registry=True)
+        if "@" in head:                        # PEP 508 `name @ url`
+            m = _REQ_NAME.match(head)
+            if not m:
+                return None
+            return DeclaredDep(name=canonical(m.group(1)), ecosystem="pypi",
+                               source_file=rel, line=lineno, raw=line, skip_registry=True)
+        m = _REQ_NAME.match(head)
+        if not m:
+            return None
+        return DeclaredDep(name=canonical(m.group(1)), ecosystem="pypi",
+                           source_file=rel, line=lineno, raw=line, skip_registry=False)
 
     def _parse_pyproject(self, path: Path) -> list[DeclaredDep]:
         try:
@@ -76,12 +145,27 @@ class PythonAdapter(LanguageAdapter):
         specs: list[str] = list(data.get("project", {}).get("dependencies", []))
         for group in data.get("project", {}).get("optional-dependencies", {}).values():
             specs += list(group)
+        # PEP 735 [dependency-groups]: list items are PEP 508 strings or
+        # {include-group=...} tables (the latter reference other groups we also read)
+        for group in data.get("dependency-groups", {}).values():
+            if isinstance(group, list):
+                specs += [s for s in group if isinstance(s, str)]
         out = [self._from_pep508(s, path.name) for s in specs]
-        poetry = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
-        out += [
-            DeclaredDep(name=canonical(k), ecosystem="pypi", source_file=path.name, raw=f"{k} = {v!r}")
-            for k, v in poetry.items() if k.lower() != "python"
-        ]
+        # Poetry: main + all group tables (Poetry 1.2+ [tool.poetry.group.*])
+        poetry = data.get("tool", {}).get("poetry", {})
+        poetry_tables = [poetry.get("dependencies", {})]
+        for grp in poetry.get("group", {}).values():
+            if isinstance(grp, dict):
+                poetry_tables.append(grp.get("dependencies", {}))
+        for table in poetry_tables:
+            for k, v in table.items():
+                if k.lower() == "python":
+                    continue
+                skip = isinstance(v, dict) and any(
+                    key in v for key in ("path", "git", "url", "file"))
+                out.append(DeclaredDep(name=canonical(k), ecosystem="pypi",
+                                       source_file=path.name, raw=f"{k} = {v!r}",
+                                       skip_registry=skip))
         return [d for d in out if d is not None]
 
     def _parse_pipfile(self, path: Path) -> list[DeclaredDep]:
@@ -119,22 +203,30 @@ class PythonAdapter(LanguageAdapter):
         self.ensure_grammars()
         self._last_files = files   # reused by project_rules (P008)
         roots: set[str] = set()
-        for child in root.iterdir():
+        for base in (root, root / "src", root / "lib"):
+            if base.is_dir():
+                self._collect_roots(base, roots)
+        self._internal_roots = roots
+
+    @staticmethod
+    def _collect_roots(base: Path, roots: set[str]) -> None:
+        from auditor.core.walk import IGNORE_DIRS
+        try:
+            children = list(base.iterdir())
+        except OSError:
+            return
+        for child in children:
             if child.suffix == ".py":
                 roots.add(child.stem)
-            elif child.is_dir() and (child / "__init__.py").is_file():
+            elif child.is_dir() and child.name not in IGNORE_DIRS \
+                    and _dir_has_py(child):
+                # regular package (__init__.py) OR PEP 420 namespace package OR
+                # any repo-local source dir — all are the project's own code
                 roots.add(child.name)
-        for src_dir in (root / "src", root / "lib"):
-            if src_dir.is_dir():
-                for child in src_dir.iterdir():
-                    if child.suffix == ".py":
-                        roots.add(child.stem)
-                    elif child.is_dir() and (child / "__init__.py").is_file():
-                        roots.add(child.name)
-        self._internal_roots = roots
 
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]:
         from auditor.core.treesitter import captures, parse_source
+        self.ensure_grammars()   # contract: safe for standalone callers (no prepare)
         out: list[ImportRef] = []
         for sf in files:
             parse_source(sf)
@@ -248,6 +340,8 @@ class PythonAdapter(LanguageAdapter):
         files = getattr(self, "_last_files", [])
         for imp in self.extract_imports(files):
             top = imp.top_level
+            if top in self._internal_roots:
+                continue   # a local module shadows the stdlib name => not stdlib
             removed_in = self.REMOVED_STDLIB.get(top)
             if removed_in and self.REMOVED_BACKPORTS.get(top) not in declared:
                 msg = self._judge_removed(allowed, removed_in, top)
@@ -309,9 +403,10 @@ class PythonAdapter(LanguageAdapter):
             data = tomllib.loads(self._read(pyproject))
         except tomllib.TOMLDecodeError:
             return None
-        spec = (data.get("project", {}).get("requires-python") or "").strip()
-        if not spec:
-            return None
+        spec = data.get("project", {}).get("requires-python")
+        if not isinstance(spec, str) or not spec.strip():
+            return None   # absent or malformed (e.g. a list) => no P008 claims
+        spec = spec.strip()
         try:
             sset = SpecifierSet(spec)
         except InvalidSpecifier:

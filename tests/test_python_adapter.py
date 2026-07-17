@@ -80,6 +80,80 @@ def test_parse_setup_py_regex_fallback(tmp_path):
     assert names == {"numpy", "pandas"}
 
 
+# ---------- verification-pass regressions (dep parsing false positives) ----------
+
+def test_requirements_follows_r_and_c_includes(tmp_path):
+    _mk(tmp_path, "requirements.txt", "-r deps/base.txt\n-c deps/constraints.txt\n")
+    _mk(tmp_path, "deps/base.txt", "flask==3.0\n")
+    _mk(tmp_path, "deps/constraints.txt", "urllib3<2\n")
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert names == {"flask", "urllib3"}
+
+
+def test_requirements_include_outside_root_is_ignored(tmp_path):
+    root = tmp_path / "repo"
+    (root / "sub").mkdir(parents=True)
+    (tmp_path / "outside.txt").write_text("evil-pkg\n", encoding="utf-8")
+    _mk(root, "requirements.txt", "-r ../outside.txt\nrequests\n")
+    names = {d.name for d in PythonAdapter().parse_dependencies(root)}
+    assert names == {"requests"}   # the escaping include was not followed
+
+
+def test_requirements_vcs_url_line_not_mislabeled_as_git(tmp_path):
+    _mk(tmp_path, "requirements.txt",
+        "git+https://github.com/org/foo.git#egg=foo\n"
+        "https://example.com/x-1.0.whl\n")
+    deps = PythonAdapter().parse_dependencies(tmp_path)
+    by = {d.name: d for d in deps}
+    assert "git" not in by                          # scheme not captured as a name
+    assert by["foo"].skip_registry is True          # VCS ref => not PyPI-checked
+    # the bare wheel URL without #egg contributes no bogus dep
+    assert set(by) == {"foo"}
+
+
+def test_editable_vcs_egg_recorded_skip_registry(tmp_path):
+    _mk(tmp_path, "requirements.txt", "-e git+https://x/y.git#egg=mylib\n-e .\n")
+    deps = PythonAdapter().parse_dependencies(tmp_path)
+    by = {d.name: d for d in deps}
+    assert set(by) == {"mylib"} and by["mylib"].skip_registry is True
+
+
+def test_poetry_table_local_deps_skip_registry(tmp_path):
+    _mk(tmp_path, "pyproject.toml", "\n".join([
+        "[tool.poetry.dependencies]",
+        'python = "^3.11"',
+        'localpkg = {path = "../localpkg"}',
+        'fromgit = {git = "https://x/y.git"}',
+        'normal = "^1.0"',
+    ]))
+    by = {d.name: d for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert by["localpkg"].skip_registry is True
+    assert by["fromgit"].skip_registry is True
+    assert by["normal"].skip_registry is False
+
+
+def test_poetry_group_dependencies_parsed(tmp_path):
+    _mk(tmp_path, "pyproject.toml", "\n".join([
+        "[tool.poetry.dependencies]",
+        'python = "^3.11"',
+        "[tool.poetry.group.dev.dependencies]",
+        'pytest = "^8"',
+    ]))
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert "pytest" in names
+
+
+def test_pep735_dependency_groups_parsed(tmp_path):
+    _mk(tmp_path, "pyproject.toml", "\n".join([
+        "[project]", 'name = "x"', 'dependencies = ["requests"]',
+        "[dependency-groups]",
+        'test = ["pytest>=8", {include-group = "lint"}]',
+        'lint = ["ruff"]',
+    ]))
+    names = {d.name for d in PythonAdapter().parse_dependencies(tmp_path)}
+    assert {"requests", "pytest", "ruff"} <= names
+
+
 # ---------- T7: imports, stdlib, locality, mapping ----------
 
 def test_extract_imports_and_locality(tmp_path):
@@ -185,3 +259,59 @@ def test_p008_unknown_range_makes_no_claim(tmp_path):
     files = _files(tmp_path, a)
     a.prepare(tmp_path, files)
     assert a.project_rules(tmp_path, []) == []
+
+
+def test_p008_local_module_shadowing_stdlib_name_is_not_flagged(tmp_path):
+    # a repo-local package named `tomllib` means `import tomllib` is local, not
+    # the backport-needing stdlib module => no P008
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\nname = "x"\nrequires-python = ">=3.8"\n')
+    _mk(tmp_path, "tomllib/__init__.py", "")
+    _mk(tmp_path, "m.py", "import tomllib\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    assert a.project_rules(tmp_path, []) == []
+
+
+def test_p008_non_string_requires_python_does_not_crash(tmp_path):
+    _mk(tmp_path, "pyproject.toml",
+        '[project]\nname = "x"\nrequires-python = ["oops-a-list"]\n')
+    _mk(tmp_path, "m.py", "import distutils\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    assert a.project_rules(tmp_path, []) == []   # returns [], no AttributeError
+
+
+def test_namespace_package_import_is_internal(tmp_path):
+    # PEP 420 namespace package (no __init__.py) is the project's own code
+    _mk(tmp_path, "requirements.txt", "requests\n")
+    _mk(tmp_path, "mypkg/sub/mod.py", "VALUE = 1")   # no __init__.py anywhere
+    _mk(tmp_path, "app.py", "from mypkg.sub import mod\nimport requests\n")
+    a = PythonAdapter()
+    files = _files(tmp_path, a)
+    a.prepare(tmp_path, files)
+    imps = {i.top_level: i for i in a.extract_imports(files)}
+    assert a.is_internal(imps["mypkg"])
+    assert not a.is_internal(imps["requests"])
+
+
+def test_extract_imports_registers_grammar_without_prepare():
+    # contract: extract_imports must be safe standalone (no prior prepare)
+    from auditor.core import treesitter as ts
+    from auditor.core.models import SourceFile
+    ts.reset_registry()
+    try:
+        sf = SourceFile(path=Path("a.py"), rel="a.py", language="python",
+                        text=b"import requests\n")
+        imps = PythonAdapter().extract_imports([sf])
+        assert any(i.top_level == "requests" for i in imps)
+    finally:
+        # restore the conftest registrations for the rest of the session
+        import tree_sitter_c_sharp, tree_sitter_java, tree_sitter_python, tree_sitter_typescript
+        ts.register_language("python", tree_sitter_python.language())
+        ts.register_language("java", tree_sitter_java.language())
+        ts.register_language("csharp", tree_sitter_c_sharp.language())
+        ts.register_language("typescript", tree_sitter_typescript.language_typescript())
+        ts.register_language("tsx", tree_sitter_typescript.language_tsx())

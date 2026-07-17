@@ -148,3 +148,36 @@ def test_each_package_reported_once():
     reg = FakeRegistry("pypi", {})
     fs = run([], [_imp("ghost", 1), _imp("ghost", 9)], reg)
     assert len(fs) == 1 and fs[0].line == 1
+
+
+def test_registry_failures_never_exceed_attempted():
+    from auditor.core.models import Diagnostics
+    reg = FakeRegistry("pypi", {"requests": PackageInfo(True, created=OLD)})
+    a = MiniAdapter()
+    a._imports = []
+    diag = Diagnostics()
+    # two declared names, one existing one missing (missing => not an error)
+    audit_hallucinations(a, Path("."), [], [_dep("requests"), _dep("ghostpkg")], reg, diag=diag)
+    assert diag.registry_failures <= diag.registry_attempted
+    assert diag.registry_failures == 0        # 404 is not a lookup FAILURE
+
+
+def test_registry_failures_count_unique_errors_not_findings():
+    from auditor.core.models import Diagnostics
+
+    class ErrReg:
+        ecosystem = "pypi"
+        def lookup(self, name):
+            return PackageInfo(exists=False, error="boom")
+    a = MiniAdapter()
+    a._imports = []
+    diag = Diagnostics()
+    audit_hallucinations(a, Path("."), [], [_dep("a"), _dep("b")], ErrReg(), diag=diag)
+    assert diag.registry_attempted == 2 and diag.registry_failures == 2
+
+
+def test_h010_precision_is_exact_on_declared_path():
+    reg = FakeRegistry("pypi", {})
+    fs = run([_dep("corp-lib")], [], reg, private_reason="custom index in requirements.txt")
+    assert [f.rule_id for f in fs] == ["H010"]
+    assert fs[0].precision == "exact"   # H010 is not a namespace-mapping claim

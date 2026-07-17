@@ -52,3 +52,10 @@ def test_diagnostics_merge_dedups_manifest_but_sums_counters():
     assert set(a.manifest_files) == {"/r/pyproject.toml", "/s/pom.xml"}
     assert len(a.manifest_errors) == 2
     assert a.rule_attempted == 5 and a.rule_failures == 2
+
+
+def test_diagnostics_merge_carries_semgrep_status():
+    a = Diagnostics()  # default "not attempted"
+    b = Diagnostics(semgrep_status="opengrep 1.25.0: success")
+    a.merge(b)
+    assert a.semgrep_status == "opengrep 1.25.0: success"  # not silently dropped

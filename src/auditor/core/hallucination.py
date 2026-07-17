@@ -24,7 +24,10 @@ _SEV = {"H001": Severity.RED, "H002": Severity.YELLOW, "H003": Severity.BLUE,
         "H004": Severity.BLUE, "H005": Severity.YELLOW, "H006": Severity.YELLOW,
         "H007": Severity.YELLOW, "H008": Severity.RED, "H009": Severity.RED,
         "H010": Severity.YELLOW, "H012": Severity.BLUE}
-_MAPPING_RULES = {"H002", "H007", "H008", "H010"}   # import→identifier mapping involved
+# import→identifier mapping involved (H010 excluded: it is an "unverifiable /
+# private-source" fact emitted on BOTH the declared and import paths, not a
+# namespace-mapping confidence claim, so it stays precision=exact everywhere)
+_MAPPING_RULES = {"H002", "H007", "H008"}
 
 
 def _finding(rule_id: str, adapter, file: str, line: int, detail: str, snippet: str = "") -> Finding:
@@ -102,8 +105,12 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     for imp in externals:
         findings += _judge_import(adapter, imp, cand_infos, private_reason)
     if diag is not None:
-        diag.registry_attempted += len(dep_infos) + len(cand_infos)
-        diag.registry_failures += sum(1 for f in findings if f.rule_id == "H004")
+        # count UNIQUE lookups and their failures, not H004 findings — a single
+        # crashed candidate shared by N imports must not inflate the failure
+        # count past attempted (which would drive rule_health/confidence wrong)
+        unique = {**dep_infos, **cand_infos}
+        diag.registry_attempted += len(unique)
+        diag.registry_failures += sum(1 for i in unique.values() if i.error)
     return _sorted(findings)
 
 

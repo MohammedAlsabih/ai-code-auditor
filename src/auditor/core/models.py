@@ -98,3 +98,6 @@ class Diagnostics:
         self.registry_attempted += other.registry_attempted
         self.registry_failures += other.registry_failures
         self.notes += other.notes
+        # carry a non-default engine status forward instead of silently dropping it
+        if other.semgrep_status != "not attempted" and self.semgrep_status == "not attempted":
+            self.semgrep_status = other.semgrep_status
