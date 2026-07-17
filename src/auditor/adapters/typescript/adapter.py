@@ -37,6 +37,11 @@ class TypeScriptAdapter(LanguageAdapter):
     def __init__(self) -> None:
         self._self_name = ""
         self._alias_prefixes: tuple[str, ...] = ()
+        # (import-prefix, project-relative target base) — graph resolution needs
+        # the TARGET, not just the prefix: "@/*":["./src/*"] maps @/x to src/x
+        self._alias_map: tuple[tuple[str, str], ...] = ()
+        self._graph_findings: list = []
+        self._graph_active = False
 
     def file_language(self, path: Path) -> str:
         return "tsx" if path.suffix.lower() in (".tsx", ".jsx") else "typescript"
@@ -94,9 +99,24 @@ class TypeScriptAdapter(LanguageAdapter):
         self.ensure_grammars()
         self._scan_root = root.resolve()
         self._self_name = str(self._load_pkg(root / "package.json").get("name") or "")
-        self._alias_prefixes = self._tsconfig_alias_prefixes(root)
+        self._load_tsconfig_aliases(root)
+        # N006 module-graph pass: built here because prepare has files + cached
+        # declared deps; per-file N003 is superseded when the graph is active
+        self._graph_notes: list[str] = []
+        self._graph_findings, self._graph_active = [], False
+        names = {d.name for d in getattr(self, "_last_declared", []) or []}
+        if "next" in names and ((root / "app").is_dir() or (root / "src" / "app").is_dir()):
+            from auditor.adapters.typescript.next_graph import analyze
+            from auditor.core.treesitter import parse_source
+            for sf in files:
+                parse_source(sf)
+            self._graph_findings, self._graph_notes = analyze(files, self._alias_map)
+            self._graph_active = True
+            if self._diag is not None:
+                for n in self._graph_notes:
+                    self._note(n)
 
-    def _tsconfig_alias_prefixes(self, root: Path) -> tuple[str, ...]:
+    def _load_tsconfig_aliases(self, root: Path) -> None:
         paths: dict = {}
         cfg = root / "tsconfig.json"
         for _ in range(2):  # follow local `extends` one level only (documented limit)
@@ -113,14 +133,30 @@ class TypeScriptAdapter(LanguageAdapter):
             cfg_paths = opts.get("paths")
             if isinstance(cfg_paths, dict):
                 paths = {**cfg_paths, **paths}   # child config wins
+            if isinstance(opts.get("baseUrl"), str) and "__baseUrl__" not in paths:
+                paths["__baseUrl__"] = opts["baseUrl"]
             ext = data.get("extends")
             if isinstance(ext, str) and ext.startswith("."):
                 cfg = (cfg.parent / ext).with_suffix(".json") \
                     if not ext.endswith(".json") else cfg.parent / ext
             else:
                 break
-        return tuple(p for p in (key.removesuffix("*").rstrip("/")
-                                 for key in paths) if p)
+        base_url = paths.pop("__baseUrl__", ".")
+        self._alias_prefixes = tuple(
+            p for p in (key.removesuffix("*").rstrip("/") for key in paths) if p)
+        amap: list[tuple[str, str]] = []
+        for key, targets in paths.items():
+            prefix = key.removesuffix("*").rstrip("/")
+            if not prefix or not targets:
+                continue
+            target = targets[0] if isinstance(targets, list) else targets
+            if not isinstance(target, str):
+                continue
+            target_base = target.removesuffix("*").lstrip("./").rstrip("/")
+            if base_url not in (".", "", None):
+                target_base = f"{base_url.strip('./').rstrip('/')}/{target_base}".strip("/")
+            amap.append((prefix, target_base))
+        self._alias_map = tuple(amap)
 
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]:
         from auditor.core.treesitter import captures, node_text, parse_source
@@ -172,6 +208,21 @@ class TypeScriptAdapter(LanguageAdapter):
         if identifier.startswith("@"):
             return "scoped npm package (private scopes return 404 without auth)"
         return None
+
+    def language_rules(self):
+        from auditor.adapters.typescript.next_rules import NEXT_RULES
+        from auditor.adapters.typescript.react_rules import REACT_RULES
+        rules = [*REACT_RULES, *NEXT_RULES]
+        if getattr(self, "_graph_active", False):
+            rules = [r for r in rules if r.id != "N003"]   # graph classification supersedes
+        return rules
+
+    def project_rules(self, root: Path, frameworks: list[str]) -> list:
+        out = list(getattr(self, "_graph_findings", []))
+        if "next" in frameworks:
+            from auditor.adapters.typescript.next_rules import scan_env_files
+            out += scan_env_files(root)
+        return out
 
     def frameworks(self, root: Path, declared: list[DeclaredDep]) -> list[str]:
         names = {d.name for d in declared}

@@ -143,3 +143,56 @@ def test_private_registry_reason_npmrc(tmp_path):
     a = TypeScriptAdapter()
     a.parse_dependencies(tmp_path)
     assert a.private_registry_reason(tmp_path) is not None
+
+
+def test_ts_repo_e2e_hallucinations(fixtures_dir):
+    from auditor.core.hallucination import audit_hallucinations
+    from auditor.core.models import PackageInfo
+    from tests.conftest import FakeRegistry
+
+    root = fixtures_dir / "ts_repo"
+    a = TypeScriptAdapter()
+    files = collect_source_files(root, a)
+    for f in files:
+        parse_source(f)
+    declared = a.parse_dependencies(root)
+    a.prepare(root, files)
+    reg = FakeRegistry("npm", {
+        "react": PackageInfo(True, created="2013-05-24T00:00:00Z"),
+        "next": PackageInfo(True, created="2016-10-05T00:00:00Z"),
+        "@types/node": PackageInfo(True, created="2016-03-01T00:00:00Z"),
+        "pg": PackageInfo(True, created="2010-10-25T00:00:00Z"),
+    })
+    findings = audit_hallucinations(a, root, files, declared, reg)
+    ids = sorted(f.rule_id for f in findings)
+    assert ids == ["H001", "H002", "H008"]   # left-pad-ai-super / pg / axios-retry-ai
+    files_by_rule = {f.rule_id: f.file for f in findings}
+    assert files_by_rule == {"H001": "package.json", "H002": "lib/db.ts", "H008": "lib/db.ts"}
+
+
+def test_ts_repo_e2e_rules(fixtures_dir):
+    root = fixtures_dir / "ts_repo"
+    a = TypeScriptAdapter()
+    files = collect_source_files(root, a)
+    for f in files:
+        parse_source(f)
+    declared = a.parse_dependencies(root)
+    a.prepare(root, files)
+    frameworks = a.frameworks(root, declared)
+    assert set(frameworks) == {"react", "next"}
+    findings = []
+    for rule in a.language_rules():
+        if rule.frameworks and not set(rule.frameworks) & set(frameworks):
+            continue
+        for sf in files:
+            findings += rule.check(sf)
+    findings += a.project_rules(root, frameworks)
+    ids = {f.rule_id for f in findings}
+    # planted: R001 (conditional hook), R004 (no deps array), R006 (index key),
+    # R007 (dynamic __html) in Widget.tsx; N001 in .env.local; N006 via the
+    # graph for app/page.tsx (useState + onClick in a server path)
+    assert {"R001", "R004", "R006", "R007", "N001", "N006"} <= ids
+    assert "N003" not in ids               # graph supersedes the per-file fallback
+    n001 = [f for f in findings if f.rule_id == "N001"]
+    assert any(f.file == ".env.local" for f in n001)
+    assert all("sk-fixture-not-real" not in f.snippet + f.detail for f in n001)

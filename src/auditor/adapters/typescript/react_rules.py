@@ -305,6 +305,8 @@ class IndexAsKey(Rule):
     frameworks = ("react",)
 
     def check(self, sf: SourceFile) -> list[Finding]:
+        if sf.language != "tsx":
+            return []   # jsx_attribute exists only in the tsx grammar
         out = []
         for attr_name in captures(sf.language, sf.tree.root_node, _JSX_ATTR_QUERY).get("name", []):
             if node_text(attr_name) != "key":
@@ -360,6 +362,8 @@ class DangerousInnerHtml(Rule):
     _LITERAL_TYPES = frozenset({"string", "template_string", "number"})
 
     def check(self, sf: SourceFile) -> list[Finding]:
+        if sf.language != "tsx":
+            return []   # jsx_attribute exists only in the tsx grammar
         out = []
         for attr_name in captures(sf.language, sf.tree.root_node, _JSX_ATTR_QUERY).get("name", []):
             if node_text(attr_name) != "dangerouslySetInnerHTML":
