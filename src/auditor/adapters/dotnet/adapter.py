@@ -143,16 +143,26 @@ class DotnetAdapter(LanguageAdapter):
             anc, _ = self._nearest_ancestor_file(root, name)
             if anc is not None and anc not in manifests:
                 manifests.append(anc)
-        # MSBuild EVALUATION ORDER: Directory.*.props imports are applied BEFORE
-        # the csproj body, so an ancestor props' Include can be cancelled by a
-        # csproj Remove — fold Include/Remove events across files in that order
-        # (CP-8b round 6). props first, then csproj(s).
-        props = [m for m in manifests if m.name.endswith(".props")]
-        csprojs = [m for m in manifests if m.name.endswith(".csproj")]
-        declared: dict[str, DeclaredDep] = {}
-        for proj in props + csprojs:
-            if proj.is_file():
-                self._apply_msbuild_events(proj, declared)
+        # MSBuild EVALUATION ORDER per PROJECT (CP-8b round 7): every csproj is
+        # evaluated INDEPENDENTLY on top of the inherited props baseline — a
+        # Remove in project B must not delete project A's dependency. The
+        # directory's declarations are the UNION of the projects' final states
+        # (definite wins over possible on collision).
+        props = [m for m in manifests if m.name.endswith(".props") and m.is_file()]
+        csprojs = [m for m in manifests if m.name.endswith(".csproj") and m.is_file()]
+        baseline: dict[str, tuple[DeclaredDep, str]] = {}
+        for p in props:
+            self._apply_msbuild_events(p, baseline)
+        # each csproj is evaluated INDEPENDENTLY on the props baseline; with no
+        # csproj the baseline itself is the state
+        per_project = [self._project_state(baseline, cs) for cs in csprojs] \
+            or [dict(baseline)]
+        merged: dict[str, tuple[DeclaredDep, str]] = {}
+        for state in per_project:
+            for key, (dep, kind) in state.items():
+                if key not in merged or kind == "definite":
+                    merged[key] = (dep, kind)
+        declared = {k: dep for k, (dep, _) in merged.items()}
         pkgcfg = root / "packages.config"
         if pkgcfg.is_file():
             for d in self._parse_packages_config(pkgcfg):
@@ -165,18 +175,28 @@ class DotnetAdapter(LanguageAdapter):
         # a literal always-false condition (Condition="false", "'a'!='a'")
         return c in ("false", "'false'") or c in ("'a'!='a'", "'x'!='x'")
 
-    def _apply_msbuild_events(self, path: Path, declared: dict) -> None:
-        """Fold this file's PackageReference Include/Remove into `declared`
-        (shared across files, in MSBuild evaluation order). Only Include
-        DECLARES; Remove cancels an earlier Include; Update alone declares
-        nothing. Statically-false conditions (element OR enclosing ItemGroup)
-        are skipped; a non-constant condition marks the manifest incomplete."""
+    def _project_state(self, baseline: dict, csproj: Path) -> dict:
+        state = dict(baseline)
+        self._apply_msbuild_events(csproj, state)
+        return state
+
+    def _apply_msbuild_events(self, path: Path, state: dict) -> None:
+        """Fold this file's PackageReference Include/Remove into `state`
+        (name -> (DeclaredDep, "definite"|"possible")). Only Include DECLARES;
+        Update alone declares nothing; statically-false conditions (element OR
+        enclosing ItemGroup) are skipped. An UNRESOLVED condition never mutates
+        the definite state as if it were a fact (CP-8b round 7):
+        - conditional Include  => the package is POSSIBLE (kept in declarations
+          so no false H002, but flagged incomplete + a visible note — never a
+          silent exact claim);
+        - conditional Remove of a definite package => the package downgrades to
+          POSSIBLE (never silently absent, which produced false H002)."""
         try:
             root = ET.fromstring(self._read(path))   # defused + 2MB-capped
         except (ET.ParseError, DefusedXmlException) as e:
             self._manifest_error(path, e)
             return
-        incomplete = False
+        possible_names: list[str] = []
         for group in root.iter():
             if group.tag.rsplit("}", 1)[-1] != "ItemGroup":
                 continue
@@ -189,20 +209,33 @@ class DotnetAdapter(LanguageAdapter):
                 if self._const_false_condition(el):
                     continue                          # this reference disabled
                 inc, rem = el.get("Include"), el.get("Remove")
-                el_dynamic = bool((el.get("Condition") or "").strip())
+                dynamic = group_dynamic or bool((el.get("Condition") or "").strip())
                 if rem:
-                    declared.pop(rem.lower(), None)   # Remove cancels an earlier Include
+                    key = rem.lower()
+                    if not dynamic:
+                        state.pop(key, None)          # unconditional Remove cancels
+                    elif key in state:
+                        dep, _ = state[key]
+                        state[key] = (dep, "possible")   # unproven removal
+                        possible_names.append(rem)
                 elif inc:
-                    declared[inc.lower()] = DeclaredDep(
-                        name=inc, ecosystem="nuget", source_file=path.name, raw=inc,
-                        skip_registry="$(" in inc)
-                    if group_dynamic or el_dynamic:
-                        incomplete = True             # kept, but presence unproven
+                    dep = DeclaredDep(name=inc, ecosystem="nuget",
+                                      source_file=path.name, raw=inc,
+                                      skip_registry="$(" in inc)
+                    if dynamic:
+                        # do not overwrite an existing DEFINITE entry with a
+                        # conditional one
+                        if state.get(inc.lower(), (None, ""))[1] != "definite":
+                            state[inc.lower()] = (dep, "possible")
+                        possible_names.append(inc)
+                    else:
+                        state[inc.lower()] = (dep, "definite")
                 # Update="X" alone modifies an existing reference — declares nothing
-        if incomplete:
+        if possible_names:
             self._mark_incomplete(path)
-            self._note(f"{path.name}: PackageReference under an unresolved Condition — "
-                       "presence not statically provable")
+            self._note(f"{path.name}: conditional PackageReference "
+                       f"({', '.join(sorted(set(possible_names)))}) — presence not "
+                       "statically provable; treated as POSSIBLE, not exact")
 
     def _parse_packages_config(self, path: Path) -> list[DeclaredDep]:
         try:

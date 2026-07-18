@@ -503,6 +503,153 @@ def test_r6_dotnet_dynamic_condition_is_incomplete(tmp_path):
     assert diag.manifest_incomplete                    # ...but its presence is unproven
 
 
+# ── Round 7 ──────────────────────────────────────────────────────────────────
+def test_r7_sibling_csproj_remove_does_not_leak(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    head = ('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+            "</TargetFramework></PropertyGroup>")
+    _mk(tmp_path, "A.csproj",
+        head + '<ItemGroup><PackageReference Include="Only.A"/></ItemGroup></Project>')
+    _mk(tmp_path, "B.csproj",
+        head + '<ItemGroup><PackageReference Remove="Only.A"/></ItemGroup></Project>')
+    # each csproj evaluates independently over the props baseline; union kept
+    assert {d.name for d in DotnetAdapter().parse_dependencies(tmp_path)} == {"Only.A"}
+
+
+def test_r7_conditional_include_pipeline(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    # conditional Include => POSSIBLE: kept (so `using Dapper` yields no false
+    # H002) but NEVER silently — manifest_incomplete + a visible note name it
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup><ItemGroup>"
+        "<PackageReference Include=\"Dapper\" Condition=\"'$(Cfg)'=='Debug'\"/>"
+        "</ItemGroup></Project>")
+    _mk(tmp_path, "P.cs", "using Dapper;\nnamespace X {}")
+    a = DotnetAdapter()
+    files = collect_source_files(tmp_path, a)
+    for f in files:
+        parse_source(f)
+    diag = Diagnostics()
+    declared = a.parse_dependencies(tmp_path, diag=diag)
+    a.prepare(tmp_path, files)
+
+    class Reg:
+        ecosystem = "nuget"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, tmp_path, files, declared, Reg())
+    assert not any(f.rule_id == "H002" for f in fs)          # not a false undeclared
+    assert diag.manifest_incomplete                          # ...but not silent either
+    assert any("Dapper" in n and "POSSIBLE" in n for n in diag.notes)
+    from auditor.core.scoring import verdict
+    assert verdict({"red": 0, "yellow": 0}, 100,
+                   {"manifest_incomplete": diag.manifest_incomplete}) == "review"
+
+
+def test_r7_while_false_else_pipeline(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    # `while False: ... else: import setup` — the else always runs, so `requests`
+    # IS declared and `import requests` in app.py must NOT be a false H002
+    _mk(tmp_path, "setup.py",
+        "while False:\n    pass\nelse:\n    from setuptools import setup\n"
+        "setup(install_requires=['requests'])\n")
+    _mk(tmp_path, "app.py", "import requests\n")
+    a = PythonAdapter()
+    files = collect_source_files(tmp_path, a)
+    for f in files:
+        parse_source(f)
+    declared = a.parse_dependencies(tmp_path)
+    a.prepare(tmp_path, files)
+    assert "requests" in {d.name for d in declared}   # while-else always runs
+
+    class Reg:
+        ecosystem = "pypi"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, tmp_path, files, declared, Reg())
+    assert not any(f.rule_id == "H002" and "requests" in f.detail for f in fs)
+
+
+def test_r7_two_csproj_remove_does_not_delete_other_project(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    # A.csproj Includes Only.A; B.csproj Removes Only.A. Each project is
+    # evaluated independently => Only.A survives (B's Remove touches only B)
+    _mk(tmp_path, "A.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        '</TargetFramework></PropertyGroup><ItemGroup>'
+        '<PackageReference Include="Only.A"/></ItemGroup></Project>')
+    _mk(tmp_path, "B.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        '</TargetFramework></PropertyGroup><ItemGroup>'
+        '<PackageReference Remove="Only.A"/></ItemGroup></Project>')
+    names = {d.name for d in DotnetAdapter().parse_dependencies(tmp_path)}
+    assert names == {"Only.A"}
+
+
+def test_r7_conditional_remove_pipeline(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    # conditional Remove of an inherited DEFINITE dep => POSSIBLE, never absent:
+    # `using Dapper` must NOT produce a false H002, and the manifest is flagged
+    repo = tmp_path / "repo"
+    _mk(repo, "Directory.Build.props",
+        '<Project><ItemGroup><PackageReference Include="Dapper" Version="2.0"/></ItemGroup></Project>')
+    _mk(repo, "src/App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup><ItemGroup>"
+        "<PackageReference Remove=\"Dapper\" Condition=\"'$(Cfg)'=='Debug'\"/>"
+        "</ItemGroup></Project>")
+    _mk(repo, "src/P.cs", "using Dapper;\nnamespace X {}")
+    a = DotnetAdapter()
+    a.set_repo_root(repo)
+    files = collect_source_files(repo / "src", a)
+    for f in files:
+        parse_source(f)
+    diag = Diagnostics()
+    declared = a.parse_dependencies(repo / "src", diag=diag)
+    a.prepare(repo / "src", files)
+    assert "Dapper" in {d.name for d in declared}     # conditional Remove => still present
+    assert diag.manifest_incomplete                    # but flagged as unproven
+
+    class Reg:
+        ecosystem = "nuget"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, repo / "src", files, declared, Reg())
+    assert not any(f.rule_id == "H002" for f in fs)   # `using Dapper` NOT a false H002
+
+
+def test_r7_conditional_include_does_not_suppress_pipeline(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    # a CONDITIONAL Include is POSSIBLE — it is kept (so `using Dapper` is not a
+    # false hallucination) but the manifest is flagged incomplete
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup><ItemGroup>"
+        "<PackageReference Include=\"Dapper\" Condition=\"'$(Cfg)'=='Debug'\"/>"
+        "</ItemGroup></Project>")
+    _mk(tmp_path, "P.cs", "using Dapper;\nnamespace X {}")
+    a = DotnetAdapter()
+    files = collect_source_files(tmp_path, a)
+    for f in files:
+        parse_source(f)
+    diag = Diagnostics()
+    declared = a.parse_dependencies(tmp_path, diag=diag)
+    a.prepare(tmp_path, files)
+    assert diag.manifest_incomplete                    # unproven presence flagged
+
+    class Reg:
+        ecosystem = "nuget"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, tmp_path, files, declared, Reg())
+    assert not any(f.rule_id in ("H007", "H008") for f in fs)  # not a false hallucination
+
+
 def test_p7_n006_uses_same_predicate():
     from auditor.adapters.typescript.next_graph import analyze
     from auditor.core.models import SourceFile

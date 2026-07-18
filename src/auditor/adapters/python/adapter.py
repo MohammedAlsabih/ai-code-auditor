@@ -567,7 +567,13 @@ class PythonAdapter(LanguageAdapter):
             bodies, exhaustive = [stmt.body], True     # a with-body always runs
         elif isinstance(stmt, _ast.While):
             if _const_bool(stmt.test) is False:
-                return                                 # `while False:` body is DEAD code
+                # `while False:` body is DEAD, but its ELSE always runs (python
+                # while-else semantics: else runs when the loop exits normally —
+                # including zero iterations). CP-8b round 7.
+                if stmt.orelse:
+                    self._merge_branch_bodies([stmt.orelse], ctx, rel, path,
+                                              exhaustive=True)
+                return
             bodies, exhaustive = [stmt.body], False    # may run 0 times otherwise
         else:                                          # For: body may run 0 times
             bodies = [stmt.body] + ([stmt.orelse] if getattr(stmt, "orelse", None) else [])
