@@ -23,17 +23,34 @@ export function FindingsTable({
   reviews,
   selected,
   onSelect,
+  isRowSelected,
+  onTogglePick,
+  onTogglePage,
 }: {
   rows: Finding[]
   reviews: Record<string, Review>
   selected: Finding | null
   onSelect: (f: Finding) => void
+  isRowSelected: (rid: string) => boolean
+  onTogglePick: (rid: string) => void
+  onTogglePage: (ids: string[], on: boolean) => void
 }) {
+  const pageIds = rows.filter((r) => r.review_id).map((r) => r.review_id as string)
+  const pageAllPicked = pageIds.length > 0 && pageIds.every((id) => isRowSelected(id))
+
   return (
     <div className="table-wrap">
       <table className="findings">
         <thead>
           <tr>
+            <th className="c-check">
+              <input
+                type="checkbox"
+                checked={pageAllPicked}
+                onChange={(e) => onTogglePage(pageIds, e.target.checked)}
+                title="Select current page"
+              />
+            </th>
             <th>Severity</th>
             <th>Rule</th>
             <th>Precision</th>
@@ -48,12 +65,27 @@ export function FindingsTable({
           {rows.map((f, i) => {
             const review = f.review_id ? reviews[f.review_id] : undefined
             const badge = review ? REVIEW_BADGE[review.status] : undefined
+            const checked = Boolean(f.review_id && isRowSelected(f.review_id))
             return (
               <tr
-                key={i}
+                key={f.review_id ?? `${f.file}:${f.line}:${i}`}
                 className={`sev-${f.severity} ${selected === f ? 'selected' : ''}`}
                 onClick={() => onSelect(f)}
               >
+                <td className="c-check" onClick={(e) => e.stopPropagation()}>
+                  {f.review_id ? (
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => onTogglePick(f.review_id as string)}
+                      title="Select finding"
+                    />
+                  ) : (
+                    <span className="cov-muted" title="No stable identity — not selectable">
+                      —
+                    </span>
+                  )}
+                </td>
                 <td className="c-sev">
                   <span className={`sev sev-${f.severity}`}>
                     {sevIcon(f.severity)} {f.severity}
@@ -87,7 +119,7 @@ export function FindingsTable({
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={8} className="empty">
+              <td colSpan={9} className="empty">
                 No findings match the current filters.
               </td>
             </tr>
