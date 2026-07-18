@@ -72,3 +72,40 @@ Clean-install verification **passed** (build → install → run, online + offli
 no blocker). The engine is usable on a real polyglot repo; the main accuracy
 gap observed is the non-npm-`.js` false-positive class above. Next: pick the
 user's first real target and run.
+
+## Correction (2026-07-18) — NuGet service-index init race fixed
+*(The metrics above are the historical field-trial record and are left
+unchanged. This section documents a run-blocker fixed afterward, before the
+user's first real target.)*
+
+**Symptom in the run above.** The online run reported 4 `H004` findings tagged
+`lookup crashed: KeyError` (`registry_failures=4`) for `Grpc.Tools`,
+`Microsoft.VisualStudio.Azure.Containers.Tools.Targets`,
+`Npgsql.EntityFrameworkCore.PostgreSQL`, and `OpenTelemetry.AutoInstrumentation`
+— the .NET packages, which the engine looks up concurrently.
+
+**Root cause.** `NuGetClient._resource` published `self._resources = {}` and
+*then* filled it while fetching the service index. A second thread entering the
+window saw a non-`None` **empty** dict, skipped initialisation, and indexed it
+— `KeyError('flat')`. Deterministically reproduced with two threads + Events
+(one parked mid-fetch, the other racing in).
+
+**Fix.** `src/auditor/registries/nuget.py`: the endpoint map is now built into a
+**local** dict and published to `self._resources` **only once complete**, under
+a double-checked `threading.Lock`. `_resources` therefore transitions
+`None → complete`, never `None → partial`. Endpoint-resolution behaviour is
+unchanged; no rules were added and no findings were altered.
+
+**Verification.** Deterministic regression
+`tests/test_registry_nuget.py::test_service_index_init_is_atomic_under_race`
+(Events, no sleeps) — asserts the map is still `None` while a thread is parked
+mid-build, and that both racing callers return the correct `flat` endpoint with
+zero `KeyError`; plus
+`test_parallel_lookup_four_packages_zero_keyerror` (the four packages above,
+looked up in parallel, all resolve). A 6 400-call barrier-synchronised stress
+race produced **zero** `KeyError`. Full suite **353 passed / 1 skipped on Python
+3.11 and 3.12**; `ruff check src`, `mypy src`, and `git diff --check` clean.
+
+A fresh online run would no longer crash on these four lookups
+(`registry_failures` drops by 4); the historical numbers above are kept as the
+as-observed record and were **not** re-generated.

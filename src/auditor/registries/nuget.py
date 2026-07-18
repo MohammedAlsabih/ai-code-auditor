@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import requests
 
 from auditor.core.models import PackageInfo
@@ -18,6 +20,10 @@ class NuGetClient(RegistryClient):
     def __init__(self, session=None):
         super().__init__(session)
         self._resources: dict[str, str] | None = None
+        # guards the one-time service-index resolution: _resources must go from
+        # None straight to a COMPLETE dict, never a half-filled one, or a racing
+        # thread indexes it mid-build and gets KeyError.
+        self._resources_lock = threading.Lock()
         self.degraded = False   # True => service index unreachable, hardcoded fallbacks in use
 
     def cache_key(self, name: str) -> str:
@@ -36,27 +42,46 @@ class NuGetClient(RegistryClient):
     def _resource(self, kind: str) -> str:
         """Resolve ALL used endpoints from the service index (docs mandate),
         highest compatible version first; hardcoded values are a visible
-        degraded mode (self.degraded => diagnostics note in the CLI)."""
-        if self._resources is None:
-            self._resources = {}
-            try:
-                r = self._get(INDEX_URL)
-                body = r.json() if r.status_code == 200 else {}
-                resources = body.get("resources", []) if isinstance(body, dict) else []
-            except (requests.RequestException, ValueError):
-                resources = []
-            if not resources:
-                self.degraded = True
-            for name, (types, fallback) in self._WANTED.items():
-                hit = next((x["@id"] for t in types for x in resources
-                            if isinstance(x, dict) and x.get("@type") == t), None)
-                if hit is None:
-                    self._resources[name] = fallback
-                    self.degraded = self.degraded or bool(resources)
-                else:
-                    self._resources[name] = hit if name == "search" else \
-                        (hit if hit.endswith("/") else hit + "/")
-        return self._resources[kind]
+        degraded mode (self.degraded => diagnostics note in the CLI).
+
+        Thread-safe (double-checked lock): self._resources is published only
+        after it is FULLY built, so a concurrent caller either waits on the
+        lock or reads the finished map — never a partial one. self._resources[
+        kind] therefore cannot KeyError mid-initialisation."""
+        resources = self._resources
+        if resources is None:
+            with self._resources_lock:
+                resources = self._resources
+                if resources is None:
+                    resources, degraded = self._build_resources()
+                    self.degraded = degraded
+                    self._resources = resources   # atomic publish of a complete map
+        return resources[kind]
+
+    def _build_resources(self) -> tuple[dict[str, str], bool]:
+        """Build the endpoint map into a LOCAL dict and return it with the
+        degraded flag. Never touches self._resources, so a partial map is never
+        observable by another thread."""
+        built: dict[str, str] = {}
+        degraded = False
+        try:
+            r = self._get(INDEX_URL)
+            body = r.json() if r.status_code == 200 else {}
+            resources = body.get("resources", []) if isinstance(body, dict) else []
+        except (requests.RequestException, ValueError):
+            resources = []
+        if not resources:
+            degraded = True
+        for name, (types, fallback) in self._WANTED.items():
+            hit = next((x["@id"] for t in types for x in resources
+                        if isinstance(x, dict) and x.get("@type") == t), None)
+            if hit is None:
+                built[name] = fallback
+                degraded = degraded or bool(resources)
+            else:
+                built[name] = hit if name == "search" else \
+                    (hit if hit.endswith("/") else hit + "/")
+        return built, degraded
 
     def lookup(self, name: str) -> PackageInfo:
         lid = name.lower()
