@@ -26,6 +26,15 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--strict", action="store_true",
                       help="exit non-zero on 'review' verdicts too (incomplete analysis never passes)")
     scan.add_argument("--verbose", "-v", action="store_true")
+
+    srv = sub.add_parser("serve",
+                         help="open a report.json in a local web explorer (127.0.0.1 only)")
+    srv.add_argument("report", help="path to a report.json produced by 'auditor scan'")
+    srv.add_argument("--repo", default=None,
+                     help="repository root (optional; reserved for the W2 source view)")
+    srv.add_argument("--port", type=int, default=8765)
+    # NOTE: deliberately NO --host. W1 binds to loopback only; a public bind is
+    # not selectable from the CLI.
     return p
 
 
@@ -42,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 pass
     args = build_parser().parse_args(argv)
+    if args.command == "serve":
+        return _serve(args)
     if args.command != "scan":
         build_parser().print_help()
         return 0
@@ -50,6 +61,48 @@ def main(argv: list[str] | None = None) -> int:
     except AuditorError as e:
         print(f"error | خطأ: {e}", file=sys.stderr)
         return 2
+
+
+# W1 binds to loopback only. This is a module constant (not a CLI flag) so a
+# public bind cannot be requested; tests assert serve() passes exactly this.
+SERVE_HOST = "127.0.0.1"
+
+
+# the optional web stack (pip install ".[web]"). A missing member of THIS set
+# is a "you didn't install the extra" case; any other missing module is a real
+# import bug and must not be masked by the friendly message.
+_WEB_DEPS = {"fastapi", "uvicorn", "starlette"}
+
+
+def _serve(args) -> int:
+    """Load the report ONCE, then hand a read-only app to uvicorn on
+    127.0.0.1. A bad report prints a clear one-line error and exits 2 — the
+    server is never started, so the browser never sees a traceback. No scan,
+    build, or install of the repository is performed."""
+    try:
+        import uvicorn
+
+        from auditor.web.app import ReportError, create_app
+    except ModuleNotFoundError as e:
+        # only the optional web extra is handled here — re-raise anything else so
+        # a genuine import bug is not swallowed as a missing-dependency message.
+        if (e.name or "").split(".")[0] in _WEB_DEPS:
+            print('Web explorer dependencies are not installed.\n'
+                  'Install with: pip install "ai-code-auditor[web]"', file=sys.stderr)
+            return 2
+        raise
+
+    repo = Path(args.repo) if args.repo else None
+    try:
+        app = create_app(Path(args.report), repo_root=repo)
+    except ReportError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 2
+
+    url = f"http://{SERVE_HOST}:{args.port}"
+    print(f"AI Code Auditor Report Explorer | {url}  (report: {args.report})")
+    uvicorn.run(app, host=SERVE_HOST, port=args.port, log_level="warning")
+    return 0
 
 
 def _relativize_diag(diag_dict: dict, root) -> dict:

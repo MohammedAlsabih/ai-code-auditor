@@ -11,3 +11,10 @@ trial-*/
 .cache/
 field-*/
 .venv-field/
+
+# W1 web UI build artifacts.
+# NOTE: src/auditor/web/static/ is intentionally NOT ignored — the built SPA is
+# committed so the wheel and a clean checkout work with no Node. Only
+# node_modules and TypeScript scratch files are ignored.
+web/node_modules/
+web/*.tsbuildinfo

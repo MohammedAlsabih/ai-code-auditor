@@ -26,6 +26,12 @@ dependencies = [
 auditor = "auditor.cli:main"
 
 [project.optional-dependencies]
+# the local Report Explorer backend (W1). Kept optional so the core scanner
+# stays dependency-light; `auditor serve` requires `pip install .[web]`.
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
 # pinned so `pip install -e .[dev]` reproduces the CI toolchain exactly, incl.
 # the defusedxml stubs mypy needs (CP-8.12: bare `mypy src` was not reproducible)
 dev = [
@@ -35,10 +41,14 @@ dev = [
     "ruff>=0.8,<0.9",
     "types-defusedxml>=0.7,<0.8",
     "types-requests>=2.32,<3",
+    "httpx>=0.26",             # FastAPI TestClient transport for the web tests
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auditor"]
+# the Vite build output lands here (gitignored) — re-include it so the SPA
+# ships inside the wheel and is served by `auditor serve` from any install.
+artifacts = ["src/auditor/web/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
