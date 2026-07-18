@@ -119,6 +119,12 @@ def test_dotnet_repo_e2e(fixtures_dir):
     })
     findings = audit_hallucinations(a, root, files, declared, reg)
     ids = sorted(f.rule_id for f in findings)
-    assert ids == ["H001", "H002", "H008"]  # FastJsonAI.Helpers / Dapper / HyperSql.Client
+    # CP-8.3: HyperSql.Client is absent, but the .NET namespace->NuGet candidate
+    # is a GENERIC GUESS (no curated map), so it degrades to H007 — never a red
+    # H008. FastJsonAI.Helpers is a DECLARED name absent from the registry, so it
+    # is a legitimate red H001.
+    assert ids == ["H001", "H002", "H007"]  # FastJsonAI.Helpers / Dapper / HyperSql.Client
     assert all(f.precision == "heuristic" for f in findings
-               if f.rule_id in ("H002", "H008"))   # namespace guessing is never "exact"
+               if f.rule_id in ("H002", "H007", "H008"))   # namespace guessing is never "exact"
+    assert all(f.severity.value != "red" for f in findings
+               if f.rule_id in ("H007", "H008"))            # no red from a namespace guess

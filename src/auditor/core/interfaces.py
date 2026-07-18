@@ -46,6 +46,31 @@ class LanguageAdapter(ABC):
     mapping_precision: str = "exact"
 
     _diag = None   # set by parse_dependencies(diag=...); manifest helpers report into it
+    _repo_root = None   # repository root; the confinement boundary. A shared file
+    #                     elsewhere in the SAME repo is legitimate — only paths
+    #                     resolving OUTSIDE the repo are refused (CP-8.2). Falls
+    #                     back to the per-project scan_root when unset.
+
+    def set_repo_root(self, path: Path) -> None:
+        self._repo_root = path.resolve()
+
+    def _confinement_root(self):
+        return getattr(self, "_repo_root", None) or getattr(self, "_scan_root", None)
+
+    def _config_search_dirs(self, root: Path):
+        """The project dir plus every ancestor up to (and including) the
+        repository root — so a repo-level .npmrc/settings above the project is
+        found (CP-8.2). Without a repo root, only the project dir."""
+        root = root.resolve()
+        yield root
+        repo = getattr(self, "_repo_root", None)
+        if repo and repo != root and repo in root.parents:
+            cur = root.parent
+            while True:
+                yield cur
+                if cur == repo:
+                    break
+                cur = cur.parent
 
     @abstractmethod
     def detect(self, root: Path) -> bool: ...
@@ -60,19 +85,19 @@ class LanguageAdapter(ABC):
     def _read(self, path: Path) -> str:
         from auditor.core.walk import read_text_capped
         # CENTRAL symlink-escape guard (verified empirically under WSL): a
-        # manifest whose RESOLVED location is outside the scan root (a symlink
-        # planted inside the repo) is refused, with a ledger entry — adapters
-        # that set self._scan_root get this for free on every manifest read.
-        scan_root = getattr(self, "_scan_root", None)
-        if scan_root is not None:
+        # manifest whose RESOLVED location is outside the REPOSITORY root (a
+        # symlink escaping the repo) is refused, with a ledger entry. A shared
+        # file elsewhere in the same repo is allowed (CP-8.2).
+        root = self._confinement_root()
+        if root is not None:
             try:
                 rp = path.resolve()
             except OSError:
                 rp = path
-            if rp != scan_root and scan_root not in rp.parents:
+            if rp != root and root not in rp.parents:
                 if self._diag is not None:
-                    msg = (f"{path.as_posix()}: resolves outside the scan root "
-                           "(symlink?) — NOT read")
+                    msg = (f"{path.as_posix()}: resolves outside the repository "
+                           "root (symlink?) — NOT read")
                     if msg not in self._diag.manifest_errors:
                         self._diag.manifest_errors.append(msg)
                 return ""
@@ -115,6 +140,16 @@ class LanguageAdapter(ABC):
         manifest counts as partially extracted."""
         self._note(f"{path.name}: unexpected schema for {what} — section skipped")
         self._mark_incomplete(path)
+
+    def _include_gap(self, including: Path, message: str) -> None:
+        """A manifest referenced an include that was missing or escaped the
+        repository — an INCOMPLETELY-read manifest. Recorded in include_gaps
+        (named in the report) AND folded into manifest_incomplete so the numeric
+        confidence drops and the verdict cannot PASS (CP-8.1)."""
+        self._note(message)
+        if self._diag is not None and message not in self._diag.include_gaps:
+            self._diag.include_gaps.append(message)
+        self._mark_incomplete(including)
 
     @abstractmethod
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]: ...

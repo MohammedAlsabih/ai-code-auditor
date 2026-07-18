@@ -102,12 +102,21 @@ def _n(rule_id: str, sev: Severity, title: str, sf: SourceFile, node, detail: st
 
 def _server_violations(sf: SourceFile) -> list[Finding]:
     out = []
-    for callee in captures(sf.language, sf.tree.root_node,
-                           "(call_expression function: (identifier) @c)").get("c", []):
+    # bare useX(...) and member React.useX(...) — CP-8.4: member callees were missed
+    hook_query = """
+    [
+      (call_expression function: (identifier) @c)
+      (call_expression function: (member_expression property: (property_identifier) @c))
+    ]
+    """
+    for callee in captures(sf.language, sf.tree.root_node, hook_query).get("c", []):
         if node_text(callee) in _KNOWN_HOOKS:
+            call = callee
+            while call is not None and call.type != "call_expression":
+                call = call.parent
             out.append(_n("N006", Severity.RED,
                           "Client-only API in a module reachable from a Server Component",
-                          sf, callee.parent,
+                          sf, call if call is not None else callee,
                           f"{node_text(callee)} runs in a SERVER import path (module-graph); "
                           "add \"use client\" at the boundary that should own this file."))
     if sf.language == "tsx":   # jsx_attribute exists only in the tsx grammar

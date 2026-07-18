@@ -17,7 +17,14 @@ _CONTROL_TYPES = frozenset({
     "catch_clause",
 })
 _LOGICAL_OPS = frozenset({"&&", "||", "??"})
-_CALL_QUERY = "(call_expression function: (identifier) @callee)"
+# both a bare `useState(...)` and a member `React.useState(...)` / `hooks.useX(...)`
+# — CP-8.4: member-expression hook callees were previously invisible
+_CALL_QUERY = """
+[
+  (call_expression function: (identifier) @callee)
+  (call_expression function: (member_expression property: (property_identifier) @callee))
+]
+"""
 
 
 def _is_conditional_ancestor(node) -> bool:
@@ -93,13 +100,21 @@ def function_name(fn_node) -> str:
 
 
 def hook_calls(sf: SourceFile) -> list[tuple]:
-    """(call_expression node, hook name) pairs. Typed loosely: tree_sitter.Node
-    is deliberately not imported at module level (grammar wheels load lazily)."""
+    """(call_expression node, hook name) pairs. Handles both bare `useX(...)` and
+    member `React.useX(...)` — the captured callee is the identifier or the
+    member's property_identifier; we walk up to the enclosing call_expression
+    (its parent is a member_expression for the member form). Typed loosely:
+    tree_sitter.Node is deliberately not imported at module level."""
     out = []
     for callee in captures(sf.language, sf.tree.root_node, _CALL_QUERY).get("callee", []):
         name = node_text(callee)
-        if is_hook_name(name):
-            out.append((callee.parent, name))  # call_expression node
+        if not is_hook_name(name):
+            continue
+        call = callee
+        while call is not None and call.type != "call_expression":
+            call = call.parent
+        if call is not None:
+            out.append((call, name))
     return out
 
 
@@ -244,7 +259,8 @@ def _component_reactive_names(fn_node, lang: str, exclude=None) -> set[str]:
         if value is None or name is None or value.type != "call_expression":
             continue
         callee = value.child_by_field_name("function")
-        if callee is not None and node_text(callee) == "useState" and name.type == "array_pattern":
+        if callee is not None and node_text(callee).split(".")[-1] == "useState" \
+                and name.type == "array_pattern":
             idents = [c for c in name.named_children if c.type == "identifier"]
             if idents:
                 names.add(node_text(idents[0]))
@@ -356,8 +372,9 @@ class IndexAsKey(Rule):
 class DangerousInnerHtml(Rule):
     id = "R007"
     severity = Severity.RED
-    title = "dangerouslySetInnerHTML with non-literal value"
+    title = "dangerouslySetInnerHTML with a non-literal value"
     frameworks = ("react",)
+    precision = "heuristic"   # CP-8.5: syntactic only — no taint/sanitizer analysis
 
     _LITERAL_TYPES = frozenset({"string", "template_string", "number"})
 
@@ -369,20 +386,40 @@ class DangerousInnerHtml(Rule):
             if node_text(attr_name) != "dangerouslySetInnerHTML":
                 continue
             attr = attr_name.parent
-            html_value = None
-            for pair in captures(sf.language, attr, "(pair) @p").get("p", []):
-                key = pair.child_by_field_name("key")
-                if key is not None and node_text(key) == "__html":
-                    html_value = pair.child_by_field_name("value")
-            if html_value is None:
-                continue
-            if html_value.type in self._LITERAL_TYPES and \
-                    not captures(sf.language, html_value, "(template_substitution) @s").get("s"):
-                continue  # constant string — not an injection vector
-            out.append(_finding(self, sf, attr,
-                                "__html receives a non-literal value; any user-influenced "
-                                "content here is an XSS vector."))
+            # CP-8.5: flag UNLESS the value is PROVABLY { __html: <string/number
+            # literal without interpolation> }. So `={expr}` (an identifier),
+            # `={{__html: x}}` (non-literal), and `={{...spread}}` (spread —
+            # contents unknown) are all flagged; only the proven literal is clean.
+            if not self._is_provably_literal(sf, attr):
+                out.append(_finding(self, sf, attr,
+                                    "__html is not a proven string literal; any user-influenced "
+                                    "content here is an XSS vector (heuristic — no taint analysis)."))
         return out
+
+    def _is_provably_literal(self, sf: SourceFile, attr) -> bool:
+        expr = next((c for c in attr.named_children if c.type == "jsx_expression"), None)
+        if expr is None:
+            return False
+        obj = next((c for c in expr.named_children), None)   # the {__html: ...} object
+        if obj is None or obj.type != "object":
+            return False   # `={identifier}`, ternary, call, etc. — not provable
+        members = [c for c in obj.named_children]
+        if not members or any(m.type == "spread_element" for m in members):
+            return False   # a spread hides whether __html is a literal
+        html_seen = False
+        for pair in members:
+            if pair.type != "pair":
+                return False
+            key = pair.child_by_field_name("key")
+            if key is None or node_text(key).strip("'\"") != "__html":
+                return False   # only a lone __html key is provable
+            val = pair.child_by_field_name("value")
+            if val is None or val.type not in self._LITERAL_TYPES:
+                return False
+            if captures(sf.language, val, "(template_substitution) @s").get("s"):
+                return False   # `${...}` interpolation is dynamic
+            html_seen = True
+        return html_seen
 
 
 REACT_RULES: list[Rule] = [HookInConditional(), HookInNestedCallback(),

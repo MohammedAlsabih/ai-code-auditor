@@ -33,16 +33,32 @@ def overall_score(parts: list[tuple[int, int]]) -> int | None:
     return round(sum(score * n for score, n in parts) / total_files)
 
 
+def _manifest_error_files(errors: list[str]) -> set[str]:
+    """The set of manifest FILES that errored — one file may raise several
+    distinct error strings, and counting messages (CP-8.1) overstated failure.
+    Messages are '<path>: <reason>'; path.as_posix() only contains ':' in a
+    drive letter (always ':/', never ': '), so splitting on ': ' recovers the
+    file path cleanly on every platform."""
+    return {e.split(": ", 1)[0] for e in errors}
+
+
 def analysis_confidence(diag: Diagnostics, offline: bool, files_read: int) -> int:
     """Coverage-v2 (experimental, ratio-based): skipping 5 of 5 files is NOT the
-    same as 5 of 50,000 — every deduction is a denominator-aware ratio, and the
-    fourth-round counterexamples are closed: 100% parse failure or 100% rule
-    failure drives confidence to 0 (uncapped ratios), never a silent 70/80."""
+    same as 5 of 50,000 — every deduction is a denominator-aware ratio. 100%
+    parse failure or 100% rule failure drives confidence to 0 (uncapped ratios),
+    never a silent 70/80. CP-8.1: manifest coverage counts affected FILES (not
+    error messages), and a partially-extracted manifest (manifest_incomplete:
+    dynamic setup.py, skipped schema sections, missing/outside includes) lowers
+    it too — an incomplete analysis can never read as fully covered."""
     seen = files_read + len(diag.skipped_files)
     file_cov = files_read / seen if seen else 1.0
     m_files = len(set(diag.manifest_files))
-    m_err = len(set(diag.manifest_errors))
-    manifest_cov = 1.0 - m_err / max(1, m_files, m_err)
+    err_files = _manifest_error_files(diag.manifest_errors)
+    incomplete = set(diag.manifest_incomplete)
+    # affected manifest files: errored (unread) OR partially-extracted. Disjoint
+    # in practice — a parse error returns [] and is never also marked incomplete.
+    affected = len(err_files) + len(incomplete)
+    manifest_cov = 1.0 - affected / max(1, m_files, affected)
     if offline:
         registry_cov = 0.0
     elif diag.registry_attempted:
@@ -77,6 +93,9 @@ def verdict(counts: dict, confidence: int, diag: dict) -> str:
     if counts.get("yellow", 0) > 0 or confidence < 70 \
             or diag.get("manifest_errors") or failures \
             or diag.get("rule_errors") \
+            or diag.get("manifest_incomplete") or diag.get("include_gaps") \
             or diag.get("parse_error_files") or sg_degraded:
-        return "review"   # ANY recorded rule error forbids pass, counters aside
+        # ANY recorded rule error, partial manifest extraction, or missing/
+        # outside include forbids pass — an incomplete analysis is never clean
+        return "review"
     return "pass"

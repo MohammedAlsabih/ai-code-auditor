@@ -63,13 +63,17 @@ def _note(diag: Diagnostics | None, field_name: str, message: str) -> None:
 
 
 def dedupe(findings: list[Finding]) -> list[Finding]:
-    """v2 policy: engines are complementary by design, so a semgrep finding is
-    NEVER dropped just for sharing a line with a builtin one (that silently ate
-    real, different findings). Only exact duplicates collapse."""
-    seen: set[tuple[str, str, int]] = set()
+    """v2 policy: engines are complementary by design, so a finding is NEVER
+    dropped just for sharing a (rule, file, line) with another. Only findings
+    that are IDENTICAL in every field collapse — two different secrets on one
+    line, or two SQL fragments with distinct detail/snippet, are BOTH kept
+    (CP-8: keying on (rule_id,file,line) alone silently ate real findings)."""
+    seen: set[tuple] = set()
     out: list[Finding] = []
-    for f in sorted(findings, key=lambda f: (f.file, f.line, f.rule_id, f.engine)):
-        key = (f.rule_id, f.file, f.line)
+    for f in sorted(findings, key=lambda f: (f.file, f.line, f.rule_id, f.engine,
+                                             f.snippet, f.detail)):
+        key = (f.rule_id, f.severity, f.title, f.file, f.line, f.snippet,
+               f.detail, f.language, f.engine, f.precision)
         if key in seen:
             continue
         seen.add(key)

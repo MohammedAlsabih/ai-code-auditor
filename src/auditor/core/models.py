@@ -89,18 +89,15 @@ class Diagnostics:
     registry_failures: int = 0                                 # lookups ending in H004
     semgrep_status: str = "not attempted"
     notes: list[str] = field(default_factory=list)
+    # includes (a manifest's -r/-c target) that were missing or escaped the
+    # repository root — an incompletely-read manifest, folded into the numeric
+    # confidence via manifest_incomplete (CP-8.1). Kept distinct so the report
+    # can name them.
+    include_gaps: list[str] = field(default_factory=list)
 
-    def analysis_confidence(self) -> str:
-        """The report's headline trust level, DERIVED from the ledger — not a
-        cosmetic note. "degraded": the analysis machinery itself failed (rules
-        crashed / registry unreachable). "partial": inputs were not fully
-        read or extracted. "full": everything attempted succeeded."""
-        if self.rule_failures or self.registry_failures:
-            return "degraded"
-        if (self.manifest_errors or self.manifest_incomplete
-                or self.parse_error_files or self.skipped_files):
-            return "partial"
-        return "full"
+    # NOTE: the SINGLE source of the report's confidence is
+    # scoring.analysis_confidence (numeric). There is deliberately no string
+    # "confidence" method here — two competing sources caused CP-8.1.
 
     def merge(self, other: "Diagnostics") -> None:
         self.manifest_errors += [e for e in other.manifest_errors
@@ -109,6 +106,8 @@ class Diagnostics:
                                 if f not in self.manifest_files]
         self.manifest_incomplete += [p for p in other.manifest_incomplete
                                      if p not in self.manifest_incomplete]
+        self.include_gaps += [g for g in other.include_gaps
+                              if g not in self.include_gaps]
         self.skipped_files += other.skipped_files
         self.parse_error_files += other.parse_error_files
         self.rule_errors += other.rule_errors

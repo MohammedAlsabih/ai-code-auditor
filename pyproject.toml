@@ -26,10 +26,24 @@ dependencies = [
 auditor = "auditor.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "responses>=0.25"]
+# pinned so `pip install -e .[dev]` reproduces the CI toolchain exactly, incl.
+# the defusedxml stubs mypy needs (CP-8.12: bare `mypy src` was not reproducible)
+dev = [
+    "pytest>=8.0,<9",
+    "responses>=0.25,<0.26",
+    "mypy>=1.13,<2",
+    "ruff>=0.8,<0.9",
+    "types-defusedxml>=0.7,<0.8",
+    "types-requests>=2.32,<3",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auditor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+# the project's canonical mypy config — `mypy src` reproduces without extra
+# flags. Third-party libs without stubs are ignored here, not on the CLI.
+ignore_missing_imports = true

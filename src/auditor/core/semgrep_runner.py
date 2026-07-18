@@ -87,13 +87,25 @@ def run_semgrep(binary: str, project_root: Path, extra_configs: list[str],
         missing = exp - scanned if scanned else exp
         if missing:
             reasons.append(f"{len(missing)}/{len(exp)} expected files not scanned")
-    status = "success" if not reasons else "partial (" + ", ".join(reasons) + ")"
+    root = project_root.resolve()
     out: list[Finding] = []
+    escaped = 0
     for res in data.get("results", []):
+        raw = res.get("path", "")
+        p = Path(raw)
+        if not p.is_absolute():
+            p = project_root / raw          # relative result paths are anchored to root
         try:
-            rel = Path(res["path"]).resolve().relative_to(project_root.resolve()).as_posix()
+            rp = p.resolve()
+        except OSError:
+            rp = p
+        try:
+            rel = rp.relative_to(root).as_posix()
         except ValueError:
-            rel = Path(res.get("path", "?")).name
+            # a result path OUTSIDE the scan root is DROPPED, never reduced to a
+            # bare basename that would masquerade as an in-repo finding (CP-8.6)
+            escaped += 1
+            continue
         extra = res.get("extra", {})
         out.append(Finding(
             rule_id="S:" + res.get("check_id", "unknown"),
@@ -102,4 +114,7 @@ def run_semgrep(binary: str, project_root: Path, extra_configs: list[str],
             file=rel, line=int(res.get("start", {}).get("line", 0)),
             snippet="", detail=extra.get("message", ""), language="",
             engine="semgrep"))
+    if escaped:
+        reasons.append(f"{escaped} result(s) outside scan root dropped")
+    status = "success" if not reasons else "partial (" + ", ".join(reasons) + ")"
     return out, status

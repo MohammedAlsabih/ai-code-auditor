@@ -25,7 +25,17 @@ _NS_QUERY = "[(namespace_declaration) (file_scoped_namespace_declaration)] @ns"
 
 
 def _is_old_tfm(tfm: str) -> bool:
-    t = tfm.strip().lower()
+    """A TFM on which System.Text.Json etc. ship as NuGet packages, not in-box:
+    .NET Framework (net4x / old MSBuild vXY / TargetFrameworkVersion), all
+    netstandard, and netcoreapp1.x/2.x. netcoreapp3.0+ and net5+ ship them
+    in-box. CP-8.3: netcoreapp1/2 were missed by the naive net2/net3 prefix."""
+    t = tfm.strip().lower().lstrip("v")   # TargetFrameworkVersion is 'v4.7.2'
+    if t.startswith(("netcoreapp1", "netcoreapp2")):
+        return True
+    if t.startswith("netcoreapp"):
+        return False                      # 3.0+ ships System.Text.Json in-box
+    if t[:2] in ("4.", "3.", "2."):       # bare .NET Framework version (from v4.7.2)
+        return True
     return t.startswith(("net4", "netstandard", "net3", "net2")) and not t.startswith("net10")
 
 
@@ -52,18 +62,22 @@ class DotnetAdapter(LanguageAdapter):
             except (ET.ParseError, DefusedXmlException) as e:
                 self._manifest_error(proj, e)
                 continue
-            plural = singular = None
+            plural = singular = legacy = None
             for el in doc.iter():
                 tag = el.tag.rsplit("}", 1)[-1]
                 if tag == "TargetFrameworks":
                     plural = el.text or ""
                 elif tag == "TargetFramework":
                     singular = el.text or ""
+                elif tag == "TargetFrameworkVersion":   # old-style csproj (v4.7.2)
+                    legacy = el.text or ""
             # msbuild-props docs: TargetFrameworks (plural) overrides singular
             if plural:
                 tfms += [t for t in plural.split(";") if t.strip()]
             elif singular:
                 tfms.append(singular)
+            elif legacy:
+                tfms.append(legacy)
         return tfms
 
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
@@ -119,7 +133,13 @@ class DotnetAdapter(LanguageAdapter):
     def prepare(self, root: Path, files: list[SourceFile]) -> None:
         from auditor.core.treesitter import captures, node_text, parse_source
         self.ensure_grammars()
-        self._old_tfm = any(_is_old_tfm(t) for t in self._read_target_frameworks(root))
+        tfms = self._read_target_frameworks(root)
+        # CP-8.3: an old TFM (net4x/netstandard/netcoreapp1-2/TargetFrameworkVersion)
+        # OR a packages.config project — the classic .NET Framework dependency
+        # format, which carries no TFM in the csproj — treats System.* extras as
+        # package-delivered. An SDK-style csproj without a TFM is left as modern.
+        self._old_tfm = (any(_is_old_tfm(t) for t in tfms)
+                         or (root / "packages.config").is_file())
         ns: set[str] = set()
         for sf in files:
             parse_source(sf)
@@ -175,6 +195,13 @@ class DotnetAdapter(LanguageAdapter):
             cands.append(".".join(parts[:2]))
         return [_NUGET_ALIASES.get(c.lower(), c) for c in cands]
 
+    def import_mapping_trust(self, imp: ImportRef) -> str:
+        # CP-8.3: the .NET namespace -> package-id candidate is ALWAYS a generic
+        # structural guess (there is no curated/authoritative map). So an absent
+        # candidate degrades to H007, never a RED H008 — red requires a
+        # documented mapping, which .NET does not have.
+        return "guess"
+
     def language_rules(self):
         from auditor.adapters.dotnet.rules import (AsyncVoidMethod, BlockingTaskWait,
                                                    RawSqlInterpolation)
@@ -194,16 +221,18 @@ class DotnetAdapter(LanguageAdapter):
         )
 
     def private_registry_reason(self, root: Path) -> str | None:
-        for cfg_name in ("nuget.config", "NuGet.Config", "NuGet.config"):
-            cfg = root / cfg_name
-            if not cfg.is_file():
-                continue
-            text = self._read(cfg)
-            if "<packageSources>" in text and "nuget.org" not in text.split("<packageSources>")[-1]:
-                return f"custom <packageSources> configured in {cfg_name}"
-            if "<packageSources>" in text and "<add" in text and \
-                    text.count("<add") > text.count("api.nuget.org"):
-                return f"additional package sources configured in {cfg_name}"
+        # a solution-level NuGet.config above the project also configures sources
+        for d in self._config_search_dirs(root):
+            for cfg_name in ("nuget.config", "NuGet.Config", "NuGet.config"):
+                cfg = d / cfg_name
+                if not cfg.is_file():
+                    continue
+                text = self._read(cfg)
+                if "<packageSources>" in text and "nuget.org" not in text.split("<packageSources>")[-1]:
+                    return f"custom <packageSources> configured in {cfg.as_posix()}"
+                if "<packageSources>" in text and "<add" in text and \
+                        text.count("<add") > text.count("api.nuget.org"):
+                    return f"additional package sources configured in {cfg.as_posix()}"
         return None
 
     def file_language(self, path: Path) -> str:

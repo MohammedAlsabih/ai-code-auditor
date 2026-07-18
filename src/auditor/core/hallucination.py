@@ -35,8 +35,12 @@ def _finding(rule_id: str, adapter, file: str, line: int, detail: str,
     if rule_id == "H007":
         precision = "heuristic"   # H007 == "could not map reliably" => never exact
     elif rule_id in _MAPPING_RULES:
-        # per-import trust (when the caller knows it) beats the adapter-wide level
-        precision = trust or str(getattr(adapter, "mapping_precision", "exact"))
+        # per-import trust (when the caller knows it) beats the adapter-wide
+        # level; only a literal "exact" mapping prints exact — "heuristic" and
+        # the weaker "guess" both serialize as heuristic (precision is a 2-value
+        # field). The gating logic in _judge_import keys on the raw trust.
+        raw = trust or str(getattr(adapter, "mapping_precision", "exact"))
+        precision = "exact" if raw == "exact" else "heuristic"
     else:
         precision = "exact"
     return Finding(rule_id=rule_id, severity=_SEV[rule_id], title=_TITLES[rule_id],
@@ -89,19 +93,17 @@ def _collect_checkable(declared: list[DeclaredDep]) -> list[DeclaredDep]:
 
 
 def _collect_externals(adapter, imports, declared) -> tuple[list[ImportRef], list[str]]:
-    """(unmatched external imports, POTENTIAL PROVIDERS). Providers are declared
-    deps no import matched — a distribution can provide modules under any name
-    (biopython->Bio), so an unmatched declared dep may be the true source of an
-    unmatched import, and that possibility must temper H002/H008 verdicts."""
+    """(unmatched external imports, POTENTIAL PROVIDERS). A distribution can
+    provide modules under any name (biopython->Bio), so any declared dep may be
+    the true source of an unmatched import, and that possibility must temper
+    H008 verdicts (CP-8.9)."""
     out: list[ImportRef] = []
     seen: set[str] = set()
-    matched_names: set[str] = set()
     for imp in imports:
         if adapter.is_internal(imp):
             continue
         dep = adapter.match_declared(imp, declared)
         if dep is not None:
-            matched_names.add(dep.name)
             continue
         # dedup by registry candidate(s); with no reliable mapping (shared
         # namespace) fall back to the FULL module so distinct distributions under
@@ -112,7 +114,12 @@ def _collect_externals(adapter, imports, declared) -> tuple[list[ImportRef], lis
             continue
         seen.add(key)
         out.append(imp)
-    providers = sorted({d.name for d in declared} - matched_names)
+    # CP-8.9: a declared distribution matched by ONE import may ALSO provide
+    # OTHER top-level modules (biopython -> Bio AND Bio.SeqIO; a single wheel,
+    # many modules). So matching one import must NOT remove it from the provider
+    # pool for a sibling import — EVERY declared dep is a potential provider
+    # (registry-dead ghosts are filtered later by audit_hallucinations).
+    providers = sorted({d.name for d in declared})
     return out, providers
 
 
@@ -260,10 +267,20 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
         return [_finding("H010", adapter, imp.file, imp.line,
                          f"{label}: imported but not declared, and not found in the public "
                          f"registry — {reason}; cannot verify.", imp.module)]
+    if trust == "guess":
+        # CP-8.3: the candidate came from a GENERIC structural guess (e.g. a
+        # .NET namespace -> first-two-segments), with no curated/authoritative
+        # map behind it. A definitive RED is never justified — a red H008
+        # requires an authoritative mapping.
+        return [_finding("H007", adapter, imp.file, imp.line,
+                         f"{label}: imported but not declared; the registry id was only "
+                         f"guessed from the namespace ({', '.join(cands)}) and is absent "
+                         "(accuracy limit — verify manually)."
+                         + (_provider_hint(providers) if providers else ""), imp.module)]
     if trust != "exact" and providers:
         # TRUST GATE: the candidate name came from a naming CONVENTION and a
-        # declared distribution remains unmatched — a definitive RED
-        # "hallucinated" claim is not justified; degrade to unresolved (H007).
+        # declared distribution could be its real provider (CP-8.9) — a
+        # definitive RED "hallucinated" claim is not justified; degrade to H007.
         return [_finding("H007", adapter, imp.file, imp.line,
                          f"{label}: imported but not declared, and the conventional "
                          f"name ({', '.join(cands)}) is absent from the registry."

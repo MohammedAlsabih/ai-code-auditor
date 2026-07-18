@@ -121,9 +121,10 @@ See `examples/report.md` + `examples/report.json` for real output.
 ## Development
 
 ```powershell
-.venv\Scripts\python -m pytest -q          # 275+ tests, offline, both 3.11/3.12
+python -m pip install -e ".[dev]"          # pins pytest/mypy/ruff/type-stubs
+.venv\Scripts\python -m pytest -q          # offline, both 3.11/3.12
 .venv\Scripts\python -m ruff check src
-.venv\Scripts\python -m mypy src --ignore-missing-imports
+.venv\Scripts\python -m mypy src           # config in [tool.mypy]; no flags needed
 ```
 
 Deterministic by design: same input ⇒ same findings. No telemetry. No LLM.

@@ -394,7 +394,13 @@ def test_missing_and_outside_includes_produce_diagnostics(tmp_path):
     assert names == {"requests"}
     joined = " ".join(diag.notes)
     assert "missing.txt" in joined and "not found" in joined
-    assert "outside scan root" in joined
+    assert "outside the repository" in joined
+    # CP-8.1/8.2: a missing/outside include is an incompletely-read manifest —
+    # it is recorded, folds into manifest_incomplete, and forbids PASS
+    assert diag.include_gaps and "requirements.txt" in diag.manifest_incomplete
+    from auditor.core.scoring import verdict
+    assert verdict({"red": 0, "yellow": 0}, 100,
+                   {"include_gaps": diag.include_gaps}) == "review"
 
 
 def test_bad_list_element_is_noted(tmp_path):
@@ -446,7 +452,11 @@ def test_setup_py_dynamic_install_requires_is_recorded_limitation(tmp_path):
     assert deps == []
     assert any("dynamic" in n and "install_requires" in n for n in diag.notes)
     assert "setup.py" in diag.manifest_incomplete
-    assert diag.analysis_confidence() == "partial"   # not a cosmetic note
+    # CP-8.1: the single numeric confidence source reflects the incompleteness
+    from auditor.core.scoring import analysis_confidence, verdict
+    assert analysis_confidence(diag, offline=False, files_read=1) < 100
+    assert verdict({"red": 0, "yellow": 0}, 100,
+                   {"manifest_incomplete": diag.manifest_incomplete}) == "review"
 
 
 def test_setup_py_extras_and_line_numbers(tmp_path):
@@ -501,7 +511,9 @@ def test_silent_schema_cases_now_produce_diagnostics(tmp_path):
         PythonAdapter().parse_dependencies(root, diag=diag)
         assert any(expect in n for n in diag.notes), (expect, diag.notes)
         assert "pyproject.toml" in diag.manifest_incomplete, expect
-        assert diag.analysis_confidence() == "partial", expect
+        from auditor.core.scoring import verdict
+        assert verdict({"red": 0, "yellow": 0}, 100,
+                       {"manifest_incomplete": diag.manifest_incomplete}) == "review", expect
 
 
 def test_oversized_pyproject_double_read_dedups_ledger(tmp_path):
@@ -515,7 +527,8 @@ def test_oversized_pyproject_double_read_dedups_ledger(tmp_path):
     oversize = [e for e in diag.manifest_errors if "exceeds" in e]
     assert len(oversize) == 1                    # deduped by entry
     assert len(diag.manifest_files) == 1
-    assert diag.analysis_confidence() == "partial"
+    from auditor.core.scoring import analysis_confidence
+    assert analysis_confidence(diag, offline=False, files_read=1) < 100
 
 
 def test_uv_conditional_source_list_is_local(tmp_path):

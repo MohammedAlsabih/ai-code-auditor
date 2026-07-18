@@ -74,6 +74,19 @@ def _valid_hit(hit: object) -> bool:
             return False           # bool IS an int — reject True where int expected
         if not isinstance(value, types):
             return False
+    # CP-8.10: VALUE semantics, not just types. A type-valid but garbage date
+    # (created="not-a-date" / "2021-13-45...") would pass the type check and
+    # then crash age_days downstream — reject it as a cold miss instead.
+    for date_field in ("created", "latest"):
+        val = hit[date_field]
+        if isinstance(val, str):
+            try:
+                parse_iso(val)
+            except (ValueError, TypeError):
+                return False
+    downloads = hit["downloads"]
+    if isinstance(downloads, int) and downloads < 0:   # a negative count is nonsense
+        return False
     return True
 
 

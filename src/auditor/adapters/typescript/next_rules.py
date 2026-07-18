@@ -26,11 +26,19 @@ _SAFE_CLIENT_ENVS = frozenset({"NODE_ENV", "NEXT_RUNTIME"})
 
 
 def has_use_client(sf: SourceFile) -> bool:
-    for child in sf.tree.root_node.named_children[:3]:
+    """A real directive prologue (CP-8.4): scan from the first statement and stop
+    at the FIRST non-string-literal statement — no arbitrary 3-node window.
+    Leading comments are skipped; another directive string ('use strict') keeps
+    the prologue open; an import or any real statement ends it."""
+    for child in sf.tree.root_node.named_children:
+        if child.type in ("comment", "hash_bang_line"):
+            continue
         if child.type == "expression_statement" and child.named_children \
                 and child.named_children[0].type == "string":
             if node_text(child.named_children[0]).strip("'\"") == "use client":
                 return True
+            continue   # a different directive — the prologue continues
+        return False   # first non-string statement ends the prologue
     return False
 
 

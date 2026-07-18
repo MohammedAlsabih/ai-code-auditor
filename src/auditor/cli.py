@@ -110,6 +110,7 @@ def _scan(args) -> int:
         languages_seen: set[str] = set()
         expected_sg_paths: set[str] = set()   # for semgrep completeness reconciliation
         for adapter, proot in projects:
+            adapter.set_repo_root(root)   # confinement boundary = whole repo (CP-8.2)
             diag = Diagnostics()
             files = project_files(proot, adapter, projects, diag=diag)
             expected_sg_paths.update(str(f.path) for f in files)

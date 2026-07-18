@@ -41,6 +41,32 @@ def test_cli_surfaces_manifest_corruption_end_to_end(tmp_path):
     assert strict == 1  # incomplete analysis must not exit 0 in strict mode
 
 
+def test_cli_incomplete_manifest_never_passes(tmp_path):
+    # CP-8.1 gate: a partially-extracted manifest (dynamic setup.py) must reach
+    # report.json AND forbid a clean PASS, end to end.
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup(install_requires=get_reqs())\n",
+        encoding="utf-8")
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")   # clean code
+    out = tmp_path / "rep"
+    main(["scan", str(tmp_path), "--output", str(out), "--offline", "--no-semgrep"])
+    data = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert data["diagnostics"]["manifest_incomplete"]      # surfaced end to end
+    assert data["summary"]["verdict"] != "pass"            # incomplete => never clean
+
+
+def test_cli_report_never_leaks_target_credentials(tmp_path):
+    # CP-8.7 gate: a credential in the scan target must not survive into report.json
+    out = tmp_path / "rep"
+    main(["scan", str(tmp_path), "--output", str(out), "--offline", "--no-semgrep"])
+    # (a local path target has no creds; assert the redaction path is wired by
+    # feeding a credential-bearing target string through the report builder)
+    from auditor.report.build import build_report
+    data = build_report(target="https://u:S3cr3tW1re@github.com/x/y", projects=[],
+                        engines={}, limitations=[])
+    assert "S3cr3tW1re" not in json.dumps(data)
+
+
 def test_cli_bad_target_exits_2(tmp_path, capsys):
     assert main(["scan", str(tmp_path / "missing")]) == 2
     assert "خطأ" in capsys.readouterr().err  # bilingual error goes to stderr

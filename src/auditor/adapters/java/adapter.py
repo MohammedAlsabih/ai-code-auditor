@@ -152,16 +152,17 @@ class JavaAdapter(LanguageAdapter):
         return best[1] if best else None
 
     def match_declared(self, imp: ImportRef, declared: list[DeclaredDep]) -> DeclaredDep | None:
+        coords = self._known_map_hit(imp)
+        if coords:
+            # the curated map knows the EXACT artifact — require the FULL
+            # group:artifact. A different artifact under the same group must NOT
+            # masquerade as the provider (CP-8.3: no wrong-artifact hiding).
+            return next((d for d in declared if d.name == coords), None)
+        # no curated mapping: a declared group that owns the import's namespace
         for dep in declared:
             group = dep.name.split(":", 1)[0]
             if group and (imp.module == group or imp.module.startswith(group + ".")):
                 return dep
-        coords = self._known_map_hit(imp)
-        if coords:
-            group = coords.split(":", 1)[0]
-            for dep in declared:
-                if dep.name.split(":", 1)[0] == group:
-                    return dep
         return None
 
     def registry_candidates(self, imp: ImportRef) -> list[str]:
@@ -185,14 +186,16 @@ class JavaAdapter(LanguageAdapter):
         )
 
     def private_registry_reason(self, root: Path) -> str | None:
-        pom = root / "pom.xml"
-        if pom.is_file() and "<repositories>" in self._read(pom):
-            return "custom <repositories> configured in pom.xml"
-        for gradle in ("build.gradle", "build.gradle.kts", "settings.gradle",
-                       "settings.gradle.kts"):
-            g = root / gradle
-            if g.is_file():
-                text = self._read(g)
-                if re.search(r"maven\s*[{(]\s*(url|setUrl)", text):
-                    return f"custom maven repository configured in {gradle}"
+        # repo-level settings.gradle / parent pom above the project also apply
+        for d in self._config_search_dirs(root):
+            pom = d / "pom.xml"
+            if pom.is_file() and "<repositories>" in self._read(pom):
+                return f"custom <repositories> configured in {pom.as_posix()}"
+            for gradle in ("build.gradle", "build.gradle.kts", "settings.gradle",
+                           "settings.gradle.kts"):
+                g = d / gradle
+                if g.is_file():
+                    text = self._read(g)
+                    if re.search(r"maven\s*[{(]\s*(url|setUrl)", text):
+                        return f"custom maven repository configured in {g.as_posix()}"
         return None

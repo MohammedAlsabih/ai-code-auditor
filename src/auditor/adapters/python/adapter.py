@@ -189,18 +189,22 @@ class PythonAdapter(LanguageAdapter):
         return False, None, False
 
     def _follow_include(self, fname, is_c, path, rel, seen, depth, constraint):
-        """Resolve + recurse into a -r/-c include, recording a diagnostic note
-        for a missing file or one escaping the scan root (never silent)."""
+        """Resolve + recurse into a -r/-c include. A missing file, or one
+        escaping the REPOSITORY root, is an incompletely-read manifest — it
+        lowers confidence and forbids PASS via _include_gap (CP-8.1/8.2). A
+        shared file elsewhere in the same repo is followed normally."""
         role = "constraint" if is_c else "requirement"
         if not fname:
-            self._note(f"{rel}: empty {role} include directive")
+            self._include_gap(path, f"{rel}: empty {role} include directive")
             return []
         target = (path.parent / fname).resolve()
         if not target.is_file():
-            self._note(f"{rel}: {role} include not found: {fname}")
+            self._include_gap(path, f"{rel}: {role} include not found: {fname}")
             return []
-        if not (target == self._scan_root or self._scan_root in target.parents):
-            self._note(f"{rel}: {role} include outside scan root, NOT read: {fname}")
+        root = self._confinement_root()
+        if root is not None and not (target == root or root in target.parents):
+            self._include_gap(path, f"{rel}: {role} include outside the repository, "
+                                    f"NOT read: {fname}")
             return []
         return self._parse_requirements(target, seen, depth + 1,
                                         constraint=constraint or is_c)
@@ -408,11 +412,28 @@ class PythonAdapter(LanguageAdapter):
         except SyntaxError as e:
             self._manifest_error(path, e)
             return []
+        if not self._imports_setuptools(tree):
+            # CP-8.10: a setup() call with NO setuptools/distutils import is not
+            # the packaging entry point (it could be a local helper named setup)
+            # — do not fabricate declared deps from it.
+            return []
         out: list[DeclaredDep] = []
         for node in _ast.walk(tree):
             if isinstance(node, _ast.Call) and self._is_setup_call(node):
                 out += self._setup_call_deps(node, rel, path)
         return out
+
+    @staticmethod
+    def _imports_setuptools(tree) -> bool:
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Import):
+                if any(a.name.split(".")[0] in ("setuptools", "distutils")
+                       for a in node.names):
+                    return True
+            elif isinstance(node, _ast.ImportFrom):
+                if (node.module or "").split(".")[0] in ("setuptools", "distutils"):
+                    return True
+        return False
 
     @staticmethod
     def _is_setup_call(call) -> bool:
@@ -423,7 +444,11 @@ class PythonAdapter(LanguageAdapter):
     def _setup_call_deps(self, call, rel: str, path: Path) -> list[DeclaredDep]:
         out: list[DeclaredDep] = []
         for kw in call.keywords:
-            if kw.arg in self._SETUP_DEP_KWARGS:
+            if kw.arg is None:
+                # setup(**config): dependencies hidden in a dict we cannot
+                # resolve statically — record the manifest as incomplete.
+                self._dynamic_manifest(path, rel, "**kwargs")
+            elif kw.arg in self._SETUP_DEP_KWARGS:
                 out += self._static_spec_list(kw.value, kw.arg, rel, path)
             elif kw.arg == "extras_require":
                 if isinstance(kw.value, _ast.Dict):
@@ -637,12 +662,16 @@ class PythonAdapter(LanguageAdapter):
             text = self._read(Path(req))
             if any(line.strip().startswith(markers) for line in text.splitlines()):
                 return f"custom index configured in {Path(req).name}"
-        pyproject = root / "pyproject.toml"
-        if pyproject.is_file():
+        # pyproject index config, project dir and repo ancestors (a repo-level
+        # pip.conf / .pypirc equivalent lives above the project)
+        for d in self._config_search_dirs(root):
+            pyproject = d / "pyproject.toml"
+            if not pyproject.is_file():
+                continue
             try:
                 data = tomllib.loads(self._read(pyproject))
             except tomllib.TOMLDecodeError:
-                return None
+                continue
             tool = data.get("tool") if isinstance(data, dict) else None
             tool = tool if isinstance(tool, dict) else {}
             uv = tool.get("uv")
@@ -650,7 +679,7 @@ class PythonAdapter(LanguageAdapter):
             poetry = tool.get("poetry")
             poetry = poetry if isinstance(poetry, dict) else {}
             if uv.get("index") or poetry.get("source"):
-                return "custom index configured in pyproject.toml"
+                return f"custom index configured in {pyproject.as_posix()}"
         return None
 
     def project_rules(self, root: Path, frameworks: list[str]) -> list:

@@ -249,11 +249,15 @@ class TypeScriptAdapter(LanguageAdapter):
         )
 
     def private_registry_reason(self, root: Path) -> str | None:
-        npmrc = root / ".npmrc"
-        if npmrc.is_file():
+        # a repo-level .npmrc above the project dir also configures the registry
+        for d in self._config_search_dirs(root):
+            npmrc = d / ".npmrc"
+            if not npmrc.is_file():
+                continue
             for line in self._read(npmrc).splitlines():
                 stripped = line.strip()
                 if stripped.startswith("registry=") or \
                         (stripped.startswith("@") and ":registry=" in stripped):
-                    return "custom registry configured in .npmrc"
+                    where = ".npmrc" if d == root.resolve() else f"{npmrc.as_posix()}"
+                    return f"custom registry configured in {where}"
         return None

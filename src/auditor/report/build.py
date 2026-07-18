@@ -11,6 +11,19 @@ from auditor.core.scoring import FORMULA, language_score, overall_score, verdict
 from auditor.fetch import _redact
 
 
+def _redact_tree(value):
+    """Recursively redact EVERY string reachable in the report — target,
+    diagnostics notes/errors, findings, engine labels (CP-8.7). A credential in
+    a clone URL or a diagnostic path must never survive into report.json/md."""
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {k: _redact_tree(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_tree(v) for v in value]
+    return value
+
+
 def _counts(findings: list[Finding]) -> dict[str, int]:
     return {sev.value: sum(1 for f in findings if f.severity is sev) for sev in Severity}
 
@@ -36,11 +49,9 @@ def build_report(target: str, projects: list[dict], engines: dict,
             "frameworks": proj.get("frameworks", []),
             "file_count": proj.get("file_count", 0),
             "score": score, "counts": counts,
-            "findings": [dict(asdict(f), severity=f.severity.value,
-                              snippet=_redact(f.snippet), detail=_redact(f.detail))
-                         for f in findings],
+            "findings": [dict(asdict(f), severity=f.severity.value) for f in findings],
         })
-    return {
+    report = {
         "tool": "ai-code-auditor",
         "version": __version__,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -60,3 +71,6 @@ def build_report(target: str, projects: list[dict], engines: dict,
         "diagnostics": diagnostics or {},
         "limitations": limitations,
     }
+    # redact EVERY outgoing string in one pass — target, findings, diagnostics,
+    # limitations, engines (CP-8.7). Numbers/verdict are untouched by _redact.
+    return _redact_tree(report)
