@@ -11,7 +11,9 @@ FORMULA = (
     "analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage "
     "* manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * "
     "parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), "
-    "manifest_coverage = 1 - unique_error_files/unique_manifest_files, "
+    "manifest_coverage = 1 - affected_manifest_files/unique_manifest_files where "
+    "affected = union(errored, incomplete) by canonical path (a partially-"
+    "extracted manifest or a missing/outside include counts too), "
     "registry_coverage = 0 offline else 1 - failures/attempted, "
     "rule_health = 1 - rule_failures/rule_attempted (uncapped), "
     "parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), "
@@ -55,9 +57,10 @@ def analysis_confidence(diag: Diagnostics, offline: bool, files_read: int) -> in
     m_files = len(set(diag.manifest_files))
     err_files = _manifest_error_files(diag.manifest_errors)
     incomplete = set(diag.manifest_incomplete)
-    # affected manifest files: errored (unread) OR partially-extracted. Disjoint
-    # in practice — a parse error returns [] and is never also marked incomplete.
-    affected = len(err_files) + len(incomplete)
+    # affected manifest files = errored (unread) UNION partially-extracted, by
+    # canonical path (CP-8b.5). UNION, not sum — a file that both errors and is
+    # marked incomplete counts once; all three ledgers share the same spelling.
+    affected = len(err_files | incomplete)
     manifest_cov = 1.0 - affected / max(1, m_files, affected)
     if offline:
         registry_cov = 0.0

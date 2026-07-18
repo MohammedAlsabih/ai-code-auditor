@@ -13,6 +13,7 @@ def _mk(tmp_path: Path, rel: str, content: str) -> None:
 
 
 CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="FastJsonAI.Helpers" Version="1.0.0" />

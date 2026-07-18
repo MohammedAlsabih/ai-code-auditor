@@ -55,8 +55,17 @@ class DotnetAdapter(LanguageAdapter):
         return any(root.glob("*.csproj"))
 
     def _read_target_frameworks(self, root: Path) -> list[str]:
+        """TFMs from the project's csproj file(s) AND Directory.Build.props in
+        the project dir + repo ancestors (CP-8b.4) — MSBuild imports those
+        automatically. No MSBuild execution: dynamic values ($(Prop)) are kept
+        verbatim so the caller can classify them as unresolvable."""
+        candidates = list(root.glob("*.csproj"))
+        for d in self._config_search_dirs(root):
+            props = d / "Directory.Build.props"
+            if props.is_file():
+                candidates.append(props)
         tfms: list[str] = []
-        for proj in root.glob("*.csproj"):
+        for proj in candidates:
             try:
                 doc = ET.fromstring(self._read(proj))
             except (ET.ParseError, DefusedXmlException) as e:
@@ -79,6 +88,18 @@ class DotnetAdapter(LanguageAdapter):
             elif legacy:
                 tfms.append(legacy)
         return tfms
+
+    def _classify_tfm(self, root: Path) -> str:
+        """'old' | 'modern' | 'unknown' (CP-8b.4). unknown NEVER silently means
+        modern: it is surfaced as a limitation + manifest_incomplete by
+        prepare(). packages.config is the classic framework format => old."""
+        tfms = self._read_target_frameworks(root)
+        resolvable = [t for t in tfms if "$(" not in t]
+        if any(_is_old_tfm(t) for t in resolvable) or (root / "packages.config").is_file():
+            return "old"
+        if resolvable:
+            return "modern"
+        return "unknown"     # no TFM anywhere, or only dynamic $(...) values
 
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
         self._diag = diag
@@ -133,13 +154,14 @@ class DotnetAdapter(LanguageAdapter):
     def prepare(self, root: Path, files: list[SourceFile]) -> None:
         from auditor.core.treesitter import captures, node_text, parse_source
         self.ensure_grammars()
-        tfms = self._read_target_frameworks(root)
-        # CP-8.3: an old TFM (net4x/netstandard/netcoreapp1-2/TargetFrameworkVersion)
-        # OR a packages.config project — the classic .NET Framework dependency
-        # format, which carries no TFM in the csproj — treats System.* extras as
-        # package-delivered. An SDK-style csproj without a TFM is left as modern.
-        self._old_tfm = (any(_is_old_tfm(t) for t in tfms)
-                         or (root / "packages.config").is_file())
+        # CP-8b.4: old / modern / UNKNOWN — unknown must not silently pass as
+        # modern. When we cannot resolve the TFM, System.* stays external
+        # (conservative: an unverifiable package-vs-BCL split), and the manifest
+        # is marked incomplete so confidence drops and the verdict cannot PASS.
+        self._tfm_class = self._classify_tfm(root)
+        self._old_tfm = self._tfm_class in ("old", "unknown")
+        if self._tfm_class == "unknown":
+            self._diag_for_tfm(root)
         ns: set[str] = set()
         for sf in files:
             parse_source(sf)
@@ -148,6 +170,15 @@ class DotnetAdapter(LanguageAdapter):
                 if name is not None:
                     ns.add(node_text(name))
         self._own_namespaces = tuple(sorted(ns))
+
+    def _diag_for_tfm(self, root: Path) -> None:
+        """Unknown TFM => a limitation the report must show + a manifest marked
+        incomplete so confidence drops and the verdict cannot PASS."""
+        proj = next(iter(root.glob("*.csproj")), None) or (root / "project")
+        self._note(f"{proj.name}: TargetFramework could not be resolved "
+                   "(missing or dynamic $(...)) — System.* BCL vs package split is "
+                   "unverifiable; treated conservatively as package-delivered")
+        self._mark_incomplete(proj)
 
     def extract_imports(self, files: list[SourceFile]) -> list[ImportRef]:
         from auditor.core.treesitter import captures, line_of, node_text, parse_source

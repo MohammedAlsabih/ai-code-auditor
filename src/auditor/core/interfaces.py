@@ -82,6 +82,18 @@ class LanguageAdapter(ABC):
         via `self._manifest_error(path, err)` — a corrupt manifest yields [] PLUS
         a diagnostics entry, never a silent []."""
 
+    @staticmethod
+    def _canon(path: Path) -> str:
+        """The CANONICAL full-path identity for a manifest file (CP-8b.5). All
+        three ledgers (files / errors / incomplete) key on this same spelling, so
+        two same-named files in different monorepo projects (services/a/setup.py
+        vs services/b/setup.py) stay distinct AND a file that both errors and is
+        incomplete unions to one."""
+        try:
+            return path.resolve().as_posix()
+        except OSError:
+            return path.as_posix()
+
     def _read(self, path: Path) -> str:
         from auditor.core.walk import read_text_capped
         # CENTRAL symlink-escape guard (verified empirically under WSL): a
@@ -96,23 +108,22 @@ class LanguageAdapter(ABC):
                 rp = path
             if rp != root and root not in rp.parents:
                 if self._diag is not None:
-                    msg = (f"{path.as_posix()}: resolves outside the repository "
+                    msg = (f"{self._canon(path)}: resolves outside the repository "
                            "root (symlink?) — NOT read")
                     if msg not in self._diag.manifest_errors:
                         self._diag.manifest_errors.append(msg)
                 return ""
         if self._diag is not None:
-            key = str(path)
+            key = self._canon(path)
             if key not in self._diag.manifest_files:   # UNIQUE files, not read ops
                 self._diag.manifest_files.append(key)
-        return read_text_capped(path, self._diag)
+        return read_text_capped(path, self._diag, canon=self._canon(path))
 
     def _manifest_error(self, path: Path, err: Exception) -> None:
         if self._diag is not None:
-            # FULL path, not path.name: two broken pyproject.toml in different
-            # monorepo roots must be TWO errors over TWO files (=> manifest
-            # coverage 0), not collapsed to one by name (fifth-round)
-            msg = f"{path.as_posix()}: {err.__class__.__name__}"
+            # canonical full path: two broken pyproject.toml in different monorepo
+            # roots must be TWO errors over TWO files, not collapsed by name
+            msg = f"{self._canon(path)}: {err.__class__.__name__}"
             if msg not in self._diag.manifest_errors:   # one entry per broken file
                 self._diag.manifest_errors.append(msg)
 
@@ -121,19 +132,13 @@ class LanguageAdapter(ABC):
             self._diag.notes.append(message)
 
     def _mark_incomplete(self, path: Path) -> None:
-        """Record a manifest whose extraction was partial (drives
-        analysis_confidence to 'partial')."""
+        """Record a manifest whose extraction was partial, keyed on its CANONICAL
+        full path so monorepo same-named manifests never collapse (CP-8b.5)."""
         if self._diag is None:
             return
-        rel = path.name
-        scan_root = getattr(self, "_scan_root", None)
-        if scan_root is not None:
-            try:
-                rel = path.resolve().relative_to(scan_root).as_posix()
-            except (ValueError, OSError):
-                pass
-        if rel not in self._diag.manifest_incomplete:
-            self._diag.manifest_incomplete.append(rel)
+        key = self._canon(path)
+        if key not in self._diag.manifest_incomplete:
+            self._diag.manifest_incomplete.append(key)
 
     def _schema_note(self, path: Path, what: str) -> None:
         """A schema-invalid manifest section was skipped: never silent, and the

@@ -67,12 +67,20 @@ def run_semgrep(binary: str, project_root: Path, extra_configs: list[str],
         return [], "invalid_output"
     # Completeness reconciliation: errors + skipped + scanned-vs-expected
     paths = data.get("paths") or {}
+    root = project_root.resolve()
 
     def _norm(p: str) -> str:
+        # CP-8b.6: ONE base for scanned/results/expected. semgrep emits scanned
+        # paths RELATIVE to the scan root — anchoring them to the CWD (the old
+        # Path(p).resolve()) never matched the absolute expected set. Anchor
+        # relative paths to project_root instead.
+        pp = Path(p)
+        if not pp.is_absolute():
+            pp = project_root / p
         try:
-            return Path(p).resolve().as_posix()
+            return pp.resolve().as_posix()
         except OSError:
-            return p.replace("\\", "/")
+            return pp.as_posix()
 
     scanned = {_norm(p) for p in (paths.get("scanned") or [])}
     reasons: list[str] = []
@@ -87,7 +95,6 @@ def run_semgrep(binary: str, project_root: Path, extra_configs: list[str],
         missing = exp - scanned if scanned else exp
         if missing:
             reasons.append(f"{len(missing)}/{len(exp)} expected files not scanned")
-    root = project_root.resolve()
     out: list[Finding] = []
     escaped = 0
     for res in data.get("results", []):

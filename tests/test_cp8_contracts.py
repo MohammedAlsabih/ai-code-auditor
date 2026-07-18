@@ -289,11 +289,13 @@ def test_p8_two_secrets_on_one_line_both_kept():
 
 
 # ── Point 9: provider may supply multiple modules ────────────────────────────
-def test_p9_matched_provider_still_shields_sibling(tmp_path):
+def test_p9_unlinked_provider_gives_heuristic_red_with_note(tmp_path):
     from auditor.adapters.python.adapter import PythonAdapter
     from auditor.core.hallucination import audit_hallucinations
-    # one declared dist 'megatool' provides megatool (matched) AND megahelper
-    # (unmatched, absent). The sibling must be H007, not a red H008 (CP-8.9).
+    # CP-8b.3: 'megatool' (declared, matched by `import megatool`) could not be
+    # LINKED to the unmatched `megahelper`. Policy: fire H008 red (recall), but as
+    # a HEURISTIC red with an explicit UNVERIFIED note naming megatool — never a
+    # silent H007 suppression (that had recall 0.143).
     _mk(tmp_path, "requirements.txt", "megatool\n")
     _mk(tmp_path, "app.py", "import megatool\nimport megahelper\n")
     a = PythonAdapter()
@@ -303,10 +305,26 @@ def test_p9_matched_provider_still_shields_sibling(tmp_path):
     declared = a.parse_dependencies(tmp_path)
     a.prepare(tmp_path, files)
     fs = audit_hallucinations(a, tmp_path, files, declared, _Reg(exists={"megatool"}))
-    by = {f.rule_id for f in fs}
-    assert "H008" not in by and "H007" in by
-    h007 = next(f for f in fs if f.rule_id == "H007")
-    assert "megatool" in h007.detail
+    h008 = next(f for f in fs if f.rule_id == "H008")
+    assert h008.severity.value == "red" and h008.precision == "heuristic"
+    assert "UNVERIFIED" in h008.detail and "megatool" in h008.detail
+
+
+def test_p9_curated_multimodule_provider_is_matched_not_flagged(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    # a CURATED multi-module provider (biopython -> Bio) is resolved by
+    # match_declared, so it is internal and never reaches an H008 red at all
+    _mk(tmp_path, "requirements.txt", "biopython\n")
+    _mk(tmp_path, "app.py", "import Bio\nimport Bio.SeqIO\n")
+    a = PythonAdapter()
+    files = collect_source_files(tmp_path, a)
+    for f in files:
+        parse_source(f)
+    declared = a.parse_dependencies(tmp_path)
+    a.prepare(tmp_path, files)
+    fs = audit_hallucinations(a, tmp_path, files, declared, _Reg(exists={"biopython"}))
+    assert fs == []                                 # no false red for a curated provider
 
 
 def test_p9_no_declared_provider_still_red_h008(tmp_path):
@@ -363,7 +381,7 @@ def test_p10_setup_kwargs_recorded_incomplete(tmp_path):
         "from setuptools import setup\nCFG = {'install_requires': ['x']}\nsetup(**CFG)\n")
     diag = Diagnostics()
     assert PythonAdapter().parse_dependencies(tmp_path, diag=diag) == []
-    assert "setup.py" in diag.manifest_incomplete
+    assert any(p.endswith("setup.py") for p in diag.manifest_incomplete)
     assert any("kwargs" in n for n in diag.notes)
 
 

@@ -134,7 +134,7 @@ def test_package_json_schema_tolerance(tmp_path):
     diag2 = Diagnostics()
     assert TypeScriptAdapter().parse_dependencies(root2, diag=diag2) == []
     assert any("dependencies" in n for n in diag2.notes)
-    assert "package.json" in diag2.manifest_incomplete
+    assert any(p.endswith("package.json") for p in diag2.manifest_incomplete)
     from auditor.core.scoring import verdict
     assert verdict({"red": 0, "yellow": 0}, 100,
                    {"manifest_incomplete": diag2.manifest_incomplete}) == "review"

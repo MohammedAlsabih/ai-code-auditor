@@ -18,14 +18,31 @@ _URL_PREFIXES = ("http://", "https://", "git@", "ssh://", "file://")
 _CRED_URL = re.compile(r"(\b[a-z][a-z0-9+.\-]*://)([^/\s@'\"]{1,384})@")
 _SENSITIVE_KEYS = (
     "api[-_]?key|access[-_]?key|private[-_]?token|auth[-_]?token|"
-    "session[-_]?token|token|password|passwd|pwd|secret|authorization|"
-    "credentials?|auth"
+    "session[-_]?token|_auth(?:token)?|token|password|passwd|pwd|secret|"
+    "authorization|credentials?|auth"
 )
+# 1) auth-carrying HEADERS eat the REST of the line/segment: the value of
+#    `Authorization: Bearer XXX` is scheme + token — masking only the first
+#    word leaked the token (CP-8b.1)
+_AUTH_HEADER = re.compile(
+    r"(?im)\b((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|"
+    r"www-authenticate)(\s*[:=]\s*)([^\r\n]+)")
+# 2) QUOTED values (JSON/YAML/TOML): `"token": "XXX"` — the bare-KV value class
+#    deliberately excludes quotes, so quoted secrets survived (CP-8b.1)
+_QUOTED_KV = re.compile(
+    rf"(?i)([\"']?(?:{_SENSITIVE_KEYS})[\"']?\s*[=:]\s*)([\"'])((?:[^\"'\\]|\\.){{1,512}})\2")
+# 3) bare KV (query strings, .ini): value stops at delimiters
 _TOKEN_KV = re.compile(rf"(?i)\b({_SENSITIVE_KEYS})(\s*[=:]\s*)([^&\s'\";,]{{1,512}})")
 
 
 def _redact(text: str) -> str:
+    """The ONE redaction policy tool-wide. Order matters: URLs first (userinfo),
+    then headers (rest-of-line), then quoted KV, then bare KV. Every rule
+    rewrites the secret to *** and matches its own output onto *** again, so the
+    function is idempotent."""
     text = _CRED_URL.sub(r"\1***@", text)
+    text = _AUTH_HEADER.sub(r"\1\g<2>***", text)
+    text = _QUOTED_KV.sub(r"\1\g<2>***\g<2>", text)
     return _TOKEN_KV.sub(r"\1\g<2>***", text)
 
 

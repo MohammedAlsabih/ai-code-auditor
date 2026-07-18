@@ -50,3 +50,10 @@ def test_corpus_covers_direct_dangerous_html():
     # dangerouslySetInnerHTML={expr} is outside eslint-plugin-react-hooks, but
     # auditor R007 catches it (auditor-extra coverage)
     assert "R007" in (_auditor("dangerous_html_direct.tsx") & _EXTRA)
+
+
+def test_corpus_service_object_hook_is_clean_both():
+    # CP-8b.7: api.useState/client.useState are NOT React hooks — ESLint 7.1.1
+    # leaves them clean and auditor must AGREE (no R001 false positive)
+    assert _eslint()["service_object_hook.tsx"] == []
+    assert not (_auditor("service_object_hook.tsx") & _HOOKS)

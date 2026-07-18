@@ -340,16 +340,16 @@ def test_unmapped_multisegment_import_is_h007_not_red_h008(tmp_path):
     assert h008.precision == "heuristic"
 
 
-def test_trust_gate_unmatched_declared_downgrades_h008_to_h007(tmp_path):
-    # an UNMATCHED declared distribution may provide the module (the
-    # rest_framework<-djangorestframework shape) => no definitive RED
+def test_unlinked_declared_gives_heuristic_red_with_note(tmp_path):
+    # CP-8b.3: an UNLINKED declared distribution does NOT silence a hallucinated
+    # import (the all-declared-providers rule had recall 0.143). H008 red fires,
+    # but as a heuristic red with an explicit UNVERIFIED note.
     _mk(tmp_path, "requirements.txt", "some-unmatched-dist\n")
     _mk(tmp_path, "app.py", "import mystery_module\n")
     fs = _audit(tmp_path, _MissingReg(exists={"some-unmatched-dist"}))
-    ids = [f.rule_id for f in fs]
-    assert "H008" not in ids and "H007" in ids
-    h007 = next(f for f in fs if f.rule_id == "H007")
-    assert "some-unmatched-dist" in h007.detail      # names the possible provider
+    h008 = next(f for f in fs if f.rule_id == "H008")
+    assert h008.severity.value == "red" and h008.precision == "heuristic"
+    assert "UNVERIFIED" in h008.detail and "some-unmatched-dist" in h008.detail
 
 
 def test_import_dist_corpus_no_false_positives(tmp_path):
@@ -397,7 +397,7 @@ def test_missing_and_outside_includes_produce_diagnostics(tmp_path):
     assert "outside the repository" in joined
     # CP-8.1/8.2: a missing/outside include is an incompletely-read manifest —
     # it is recorded, folds into manifest_incomplete, and forbids PASS
-    assert diag.include_gaps and "requirements.txt" in diag.manifest_incomplete
+    assert diag.include_gaps and any(p.endswith("requirements.txt") for p in diag.manifest_incomplete)
     from auditor.core.scoring import verdict
     assert verdict({"red": 0, "yellow": 0}, 100,
                    {"include_gaps": diag.include_gaps}) == "review"
@@ -451,7 +451,7 @@ def test_setup_py_dynamic_install_requires_is_recorded_limitation(tmp_path):
     deps = PythonAdapter().parse_dependencies(tmp_path, diag=diag)
     assert deps == []
     assert any("dynamic" in n and "install_requires" in n for n in diag.notes)
-    assert "setup.py" in diag.manifest_incomplete
+    assert any(p.endswith("setup.py") for p in diag.manifest_incomplete)
     # CP-8.1: the single numeric confidence source reflects the incompleteness
     from auditor.core.scoring import analysis_confidence, verdict
     assert analysis_confidence(diag, offline=False, files_read=1) < 100
@@ -510,7 +510,7 @@ def test_silent_schema_cases_now_produce_diagnostics(tmp_path):
         diag = Diagnostics()
         PythonAdapter().parse_dependencies(root, diag=diag)
         assert any(expect in n for n in diag.notes), (expect, diag.notes)
-        assert "pyproject.toml" in diag.manifest_incomplete, expect
+        assert any(p.endswith("pyproject.toml") for p in diag.manifest_incomplete), expect
         from auditor.core.scoring import verdict
         assert verdict({"red": 0, "yellow": 0}, 100,
                        {"manifest_incomplete": diag.manifest_incomplete}) == "review", expect

@@ -228,6 +228,14 @@ def _provider_hint(providers: list[str]) -> str:
             "provider of this module — verify before treating it as undeclared.")
 
 
+def _unverified_provider_note(providers: list[str]) -> str:
+    shown = ", ".join(providers[:3]) + (", …" if len(providers) > 3 else "")
+    return (f" UNVERIFIED: declared distribution(s) ({shown}) could not be linked to "
+            "this import, but a single distribution can ship modules under other "
+            "names — if one provides this module, this red is a false positive. "
+            "This is a heuristic, not a proof.")
+
+
 def _judge_import_exists(adapter, imp: ImportRef, label: str, exists_name: str,
                          existing: PackageInfo, trust: str,
                          providers: list[str]) -> list[Finding]:
@@ -277,19 +285,22 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
                          f"guessed from the namespace ({', '.join(cands)}) and is absent "
                          "(accuracy limit — verify manually)."
                          + (_provider_hint(providers) if providers else ""), imp.module)]
+    # CP-8b.3 provider POLICY (measured precision/recall in
+    # evidence/cp8b-contract-batch.md): the previous "any declared dep suppresses
+    # every red" rule had recall 0.143 — a single declared dep (e.g. requests)
+    # silenced every hallucinated import. That over-suppression is rejected. A
+    # red H008 now FIRES (recall 1.0), but when declared distributions exist that
+    # we could NOT link to the import, it carries an explicit UNVERIFIED note and
+    # stays precision=heuristic — a red flag, not a definitive claim. Curated
+    # multi-module providers (Bio->biopython, google.cloud.*) never reach here:
+    # match_declared resolves them, so they are internal, not external.
+    detail = (f"{label}: imported but not declared AND not found in the public "
+              f"{adapter.ecosystem} registry (candidates tried: {', '.join(cands)}). "
+              "Likely an AI-hallucinated import; the unregistered name is claimable "
+              "(slopsquatting).")
     if trust != "exact" and providers:
-        # TRUST GATE: the candidate name came from a naming CONVENTION and a
-        # declared distribution could be its real provider (CP-8.9) — a
-        # definitive RED "hallucinated" claim is not justified; degrade to H007.
-        return [_finding("H007", adapter, imp.file, imp.line,
-                         f"{label}: imported but not declared, and the conventional "
-                         f"name ({', '.join(cands)}) is absent from the registry."
-                         + _provider_hint(providers), imp.module)]
-    return [_finding("H008", adapter, imp.file, imp.line,
-                     f"{label}: imported but not declared AND not found in the public "
-                     f"{adapter.ecosystem} registry (candidates tried: {', '.join(cands)}). "
-                     "Likely an AI-hallucinated import; the unregistered name is claimable "
-                     "(slopsquatting).", imp.module, trust=trust)]
+        detail += _unverified_provider_note(providers)
+    return [_finding("H008", adapter, imp.file, imp.line, detail, imp.module, trust=trust)]
 
 
 def _sorted(findings: list[Finding]) -> list[Finding]:

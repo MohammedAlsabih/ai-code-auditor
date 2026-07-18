@@ -15,9 +15,10 @@ def write_markdown(data: dict, path: Path) -> None:
     overall = s["overall_score"]
     L.append("# AI Code Auditor Report")
     L.append("")
-    L.append(f"**Target:** `{data['target']}`  ")
-    L.append(f"**Generated:** {data['generated_at']}  ")
-    L.append(f"**Tool:** {data['tool']} v{data['version']}")
+    # one compact metadata line — no trailing-space hard breaks (they trip
+    # `git diff --check` on the generated report)
+    L.append(f"**Target:** `{data['target']}` · **Generated:** {data['generated_at']} "
+             f"· **Tool:** {data['tool']} v{data['version']}")
     L.append("")
     L.append("## Executive Summary | الملخص التنفيذي")
     L.append("")

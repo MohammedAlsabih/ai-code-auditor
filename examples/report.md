@@ -1,8 +1,6 @@
 # AI Code Auditor Report
 
-**Target:** `tests\fixtures\monorepo`  
-**Generated:** 2026-07-18T08:30:28.491980+00:00  
-**Tool:** ai-code-auditor v0.1.0
+**Target:** `tests\fixtures\monorepo` · **Generated:** 2026-07-18T11:46:37.074844+00:00 · **Tool:** ai-code-auditor v0.1.0
 
 ## Executive Summary | الملخص التنفيذي
 
@@ -28,7 +26,7 @@ Overall code-health score (higher = safer) | درجة سلامة الكود: **1
 | python (`.`) | 2 | **50/100** | 2 | 4 | 4 |
 | typescript (`web`) | 5 | **0/100** | 5 | 5 | 4 |
 
-**Scoring contract | عقد الدرجات:** `code_health per language = max(0, 100 - 15*red - 5*yellow) — HIGHER is safer (this is a health/safety score, deliberately NOT named 'risk'); blue findings are informational and never affect health; overall = file-count-weighted average, ALWAYS reported alongside lowest language and red count. analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage * manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), manifest_coverage = 1 - unique_error_files/unique_manifest_files, registry_coverage = 0 offline else 1 - failures/attempted, rule_health = 1 - rule_failures/rule_attempted (uncapped), parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), semgrep_factor = 1.0 success / 0.97 partial / 0.95 otherwise. verdict: block if red>0 or confidence<40 or ALL rule invocations failed; review if yellow>0 or confidence<70 or any manifest/rule/parse failure; else pass — any rule failure forbids pass.` — i.e. `max(0, 100 - 15*🔴 - 5*🟡)` per language; 🔵 is informational and never changes the score. Findings marked `*` are heuristic (`precision: heuristic`), not proofs.
+**Scoring contract | عقد الدرجات:** `code_health per language = max(0, 100 - 15*red - 5*yellow) — HIGHER is safer (this is a health/safety score, deliberately NOT named 'risk'); blue findings are informational and never affect health; overall = file-count-weighted average, ALWAYS reported alongside lowest language and red count. analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage * manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), manifest_coverage = 1 - affected_manifest_files/unique_manifest_files where affected = union(errored, incomplete) by canonical path (a partially-extracted manifest or a missing/outside include counts too), registry_coverage = 0 offline else 1 - failures/attempted, rule_health = 1 - rule_failures/rule_attempted (uncapped), parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), semgrep_factor = 1.0 success / 0.97 partial / 0.95 otherwise. verdict: block if red>0 or confidence<40 or ALL rule invocations failed; review if yellow>0 or confidence<70 or any manifest/rule/parse failure; else pass — any rule failure forbids pass.` — i.e. `max(0, 100 - 15*🔴 - 5*🟡)` per language; 🔵 is informational and never changes the score. Findings marked `*` are heuristic (`precision: heuristic`), not proofs.
 
 ## Python — `.` (50/100)
 
@@ -36,7 +34,7 @@ Overall code-health score (higher = safer) | درجة سلامة الكود: **1
 |---|---|---|---|---|
 | 🟡 | H007* | `app.py:4` | `yaml` | yaml: imported but not declared; registry check skipped (--offline) |
 | 🟡 | H007* | `app.py:5` | `superjsonify` | superjsonify: imported but not declared; registry check skipped (--offline) |
-| 🔴 | P002 | `app.py:8` | `API_KEY = "AKIA***"  # planted AWS-style key for Engine 2` | AWS access key committed in source. |
+| 🔴 | P002 | `app.py:8` | `API_KEY = "***"  # planted AWS-style key for Engine 2` | AWS access key committed in source. |
 | 🟡 | P001 | `app.py:14` | `except Exception:` | Exception is silently swallowed — failures become invisible. |
 | 🔵 | P007 | `app.py:15` | `pass  # TODO: implement error handling` | Marker 'TODO: implement' suggests incomplete/demo-grade code left by generation. |
 | 🔵 | P007 | `app.py:19` | `# In a real application, use parameterized queries` | Marker 'In a real app' suggests incomplete/demo-grade code left by generation. |

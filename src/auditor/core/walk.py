@@ -55,17 +55,18 @@ def collect_source_files(root: Path, adapter, exclude_roots: tuple[Path, ...] = 
     return out
 
 
-def read_text_capped(path: Path, diag=None) -> str:
+def read_text_capped(path: Path, diag=None, canon: str | None = None) -> str:
     """Bounded manifest read: adversarial XML/JSON size is capped BEFORE parsing
     (expat's amplification limits are build-specific; the cap is the real defense).
-    Error entries use the FULL posix path so two same-named manifests in
-    different monorepo roots stay distinct (GATE 4)."""
+    Error entries key on the CANONICAL full path (passed in by the caller) so two
+    same-named manifests in different monorepo roots stay distinct (CP-8b.5)."""
+    ident = canon or path.as_posix()
     try:
         if path.stat().st_size > MAX_MANIFEST_BYTES:
             _note(diag, "manifest_errors",
-                  f"{path.as_posix()}: exceeds {MAX_MANIFEST_BYTES} bytes, skipped")
+                  f"{ident}: exceeds {MAX_MANIFEST_BYTES} bytes, skipped")
             return ""
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        _note(diag, "manifest_errors", f"{path.as_posix()}: unreadable ({e.__class__.__name__})")
+        _note(diag, "manifest_errors", f"{ident}: unreadable ({e.__class__.__name__})")
         return ""

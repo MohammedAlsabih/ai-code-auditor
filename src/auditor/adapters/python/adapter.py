@@ -412,34 +412,72 @@ class PythonAdapter(LanguageAdapter):
         except SyntaxError as e:
             self._manifest_error(path, e)
             return []
-        if not self._imports_setuptools(tree):
-            # CP-8.10: a setup() call with NO setuptools/distutils import is not
-            # the packaging entry point (it could be a local helper named setup)
-            # — do not fabricate declared deps from it.
+        fn_names, mod_aliases, imported = self._setup_bindings(tree, path, rel)
+        if not imported:
+            # no setuptools/distutils import at all — a call named setup() here
+            # is a local helper, not the packaging entry point (CP-8.10)
             return []
         out: list[DeclaredDep] = []
+        found_call = False
         for node in _ast.walk(tree):
-            if isinstance(node, _ast.Call) and self._is_setup_call(node):
+            if isinstance(node, _ast.Call) and \
+                    self._is_setup_call(node, fn_names, mod_aliases):
+                found_call = True
                 out += self._setup_call_deps(node, rel, path)
+        if not found_call:
+            # setuptools imported but NO statically-resolvable packaging call —
+            # neither silently accept nor silently drop (CP-8b.2)
+            self._dynamic_manifest(path, rel, "setup() call (none resolvable)")
         return out
 
-    @staticmethod
-    def _imports_setuptools(tree) -> bool:
+    def _setup_bindings(self, tree, path: Path, rel: str) -> tuple[set, set, bool]:
+        """Actual NAME BINDING for the packaging entry point (CP-8b.2):
+        - `from setuptools import setup as alias` binds alias as a direct call
+        - `import setuptools as st` / `import distutils.core as dc` bind module
+          aliases whose `.setup` attribute is the entry point
+        A later local rebinding (def setup/class/assignment over a bound name)
+        removes the binding AND marks the manifest incomplete — an ambiguous
+        entry point is never silently trusted."""
+        fn_names: set[str] = set()
+        mod_aliases: set[str] = set()
+        imported = False
         for node in _ast.walk(tree):
             if isinstance(node, _ast.Import):
-                if any(a.name.split(".")[0] in ("setuptools", "distutils")
-                       for a in node.names):
-                    return True
+                for a in node.names:
+                    if a.name.split(".")[0] in ("setuptools", "distutils"):
+                        imported = True
+                        mod_aliases.add(a.asname or a.name.split(".")[0])
             elif isinstance(node, _ast.ImportFrom):
                 if (node.module or "").split(".")[0] in ("setuptools", "distutils"):
-                    return True
-        return False
+                    imported = True
+                    for a in node.names:
+                        if a.name == "setup":
+                            fn_names.add(a.asname or "setup")
+        rebound: set[str] = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                if node.name in fn_names | mod_aliases:
+                    rebound.add(node.name)
+            elif isinstance(node, _ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, _ast.Name) and tgt.id in fn_names | mod_aliases:
+                        rebound.add(tgt.id)
+        if rebound:
+            self._dynamic_manifest(path, rel,
+                                   f"rebound packaging name(s): {', '.join(sorted(rebound))}")
+            fn_names -= rebound
+            mod_aliases -= rebound
+        return fn_names, mod_aliases, imported
 
     @staticmethod
-    def _is_setup_call(call) -> bool:
+    def _is_setup_call(call, fn_names: set, mod_aliases: set) -> bool:
         f = call.func
-        return (isinstance(f, _ast.Name) and f.id == "setup") or \
-               (isinstance(f, _ast.Attribute) and f.attr == "setup")
+        if isinstance(f, _ast.Name):
+            return f.id in fn_names
+        # module-attribute form: st.setup(...) — ONLY on a bound module alias;
+        # Helper().setup(...) has a Call object, not a bound Name => not packaging
+        return (isinstance(f, _ast.Attribute) and f.attr == "setup"
+                and isinstance(f.value, _ast.Name) and f.value.id in mod_aliases)
 
     def _setup_call_deps(self, call, rel: str, path: Path) -> list[DeclaredDep]:
         out: list[DeclaredDep] = []

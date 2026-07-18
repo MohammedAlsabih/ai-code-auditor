@@ -99,17 +99,53 @@ def function_name(fn_node) -> str:
     return ""
 
 
+def react_namespaces(sf: SourceFile) -> set[str]:
+    """Names that denote the React namespace for member-call hooks (CP-8b.7):
+    the default `React`, plus any alias imported FROM 'react'/'react-dom'
+    (`import * as R from 'react'` or `import R from 'react'`). Only member calls
+    on one of these count — `api.useState()` / `client.useState()` do NOT."""
+    ns = {"React"}
+    for imp in captures(sf.language, sf.tree.root_node, "(import_statement) @i").get("i", []):
+        src = imp.child_by_field_name("source")
+        if src is None or node_text(src).strip("'\"`") not in ("react", "react-dom"):
+            continue
+        clause = next((c for c in imp.named_children if c.type == "import_clause"), None)
+        if clause is None:
+            continue
+        for c in clause.named_children:
+            if c.type == "namespace_import":
+                idn = next((g for g in c.named_children if g.type == "identifier"), None)
+                if idn is not None:
+                    ns.add(node_text(idn))
+            elif c.type == "identifier":       # default import: import R from 'react'
+                ns.add(node_text(c))
+    return ns
+
+
+def is_hook_callee(callee, react_ns: set[str]) -> bool:
+    """THE shared hook predicate (react_rules + N006): a bare `useX` identifier,
+    or a member `<ns>.useX` whose object is a React namespace. A property named
+    `useX` on an arbitrary object (api/client/hooks) is NOT a React hook."""
+    if not is_hook_name(node_text(callee)):
+        return False
+    parent = callee.parent
+    if parent is not None and parent.type == "member_expression":
+        obj = parent.child_by_field_name("object")
+        return obj is not None and node_text(obj) in react_ns
+    return True   # bare identifier callee
+
+
 def hook_calls(sf: SourceFile) -> list[tuple]:
-    """(call_expression node, hook name) pairs. Handles both bare `useX(...)` and
-    member `React.useX(...)` — the captured callee is the identifier or the
-    member's property_identifier; we walk up to the enclosing call_expression
-    (its parent is a member_expression for the member form). Typed loosely:
-    tree_sitter.Node is deliberately not imported at module level."""
+    """(call_expression node, hook name) pairs. Bare `useX(...)` and member
+    `React.useX(...)` count; `api.useX(...)` does not (CP-8b.7). The captured
+    callee is the identifier or the member's property_identifier; walk up to the
+    enclosing call_expression."""
+    react_ns = react_namespaces(sf)
     out = []
     for callee in captures(sf.language, sf.tree.root_node, _CALL_QUERY).get("callee", []):
-        name = node_text(callee)
-        if not is_hook_name(name):
+        if not is_hook_callee(callee, react_ns):
             continue
+        name = node_text(callee)
         call = callee
         while call is not None and call.type != "call_expression":
             call = call.parent
