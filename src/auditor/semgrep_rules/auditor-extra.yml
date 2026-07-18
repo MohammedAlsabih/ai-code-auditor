@@ -1,0 +1,39 @@
+# Provenance: original rules written for ai-code-auditor (MIT), authored from
+# first principles against public API documentation (eval/exec, pickle,
+# child_process, Runtime.exec, weak hashes). NOT derived from, copied from, or
+# adapted from the Semgrep Registry or any Semgrep-Rules-License content.
+rules:
+  - id: auditor-python-eval-input
+    languages: [python]
+    severity: ERROR
+    message: eval()/exec() on dynamic input executes arbitrary code.
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+      - pattern-not: eval("...")
+      - pattern-not: exec("...")
+  - id: auditor-python-pickle-load
+    languages: [python]
+    severity: WARNING
+    message: pickle.load/loads on untrusted data enables code execution.
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+  - id: auditor-js-child-process-concat
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Shell command built from dynamic strings (command injection).
+    pattern-either:
+      - pattern: exec(`...${...}...`)
+      - pattern: execSync(`...${...}...`)
+  - id: auditor-java-runtime-exec-concat
+    languages: [java]
+    severity: ERROR
+    message: Runtime.exec with concatenated input (command injection).
+    pattern: Runtime.getRuntime().exec($X + $Y)
+  - id: auditor-weak-hash
+    languages: [python, typescript, javascript, java, csharp]
+    severity: WARNING
+    message: MD5/SHA1 are broken for security purposes.
+    pattern-regex: (?i)\b(md5|sha-?1)\s*[(.]
