@@ -53,28 +53,34 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _relativize_diag(diag_dict: dict, root) -> dict:
-    """Rewrite diagnostics paths for DISPLAY (CP-8b round 3/4): in-repo paths
-    become repo-relative; a path OUTSIDE the repository is reduced to
-    `<outside-repository>/<basename>` so no machine path leaks. The in-memory
-    ledgers keep their canonical absolute identity for merge."""
+    """Rewrite ONLY the path-valued diagnostics fields for DISPLAY (CP-8b round
+    5): manifest_files/manifest_incomplete are whole paths; manifest_errors is
+    `<path>: <reason>` (split once on ': '). Everything else — free-text notes,
+    rule_errors, URLs — is left untouched (a blanket path regex mangled URLs and
+    paths with spaces). In-repo paths become repo-relative; a path OUTSIDE the
+    repo is masked to `<outside-repository>/<basename>`. Canonical absolute
+    identity is kept in the in-memory ledgers for merge."""
     import re as _re
     prefix = root.resolve().as_posix().rstrip("/") + "/"
-    # an absolute machine path token: drive-letter (C:/...) or posix root (/...)
-    _abs = _re.compile(r"(?:[A-Za-z]:/|/)[^\s:'\"]*")
+    _is_abs = _re.compile(r"^(?:[A-Za-z]:/|/)")
 
-    def _mask(m):
-        p = m.group(0)
+    def _relpath(p: str) -> str:
+        p = p.replace("\\", "/")
         if p.startswith(prefix):
-            return p[len(prefix):]                 # inside the repo => relative
-        return "<outside-repository>/" + p.rstrip("/").rsplit("/", 1)[-1]
+            return p[len(prefix):]                 # inside the repo
+        if _is_abs.match(p):
+            return "<outside-repository>/" + p.rstrip("/").rsplit("/", 1)[-1]
+        return p                                   # already relative
 
-    def rel(v):
-        if isinstance(v, str):
-            return _abs.sub(_mask, v.replace("\\", "/"))
-        if isinstance(v, list):
-            return [rel(x) for x in v]
-        return v
-    return {k: rel(v) for k, v in diag_dict.items()}
+    def _relerr(e: str) -> str:
+        path, sep, reason = e.partition(": ")      # first ': ' splits path/reason
+        return _relpath(path) + sep + reason if sep else _relpath(e)
+
+    out = dict(diag_dict)
+    for field in ("manifest_files", "manifest_incomplete"):
+        out[field] = [_relpath(p) for p in diag_dict.get(field, [])]
+    out["manifest_errors"] = [_relerr(e) for e in diag_dict.get("manifest_errors", [])]
+    return out
 
 
 def _scan(args) -> int:

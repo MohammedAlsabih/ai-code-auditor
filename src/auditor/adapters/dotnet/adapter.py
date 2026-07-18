@@ -164,11 +164,15 @@ class DotnetAdapter(LanguageAdapter):
         except (ET.ParseError, DefusedXmlException) as e:
             self._manifest_error(path, e)
             return []
+        # CP-8b round 5: only a PackageReference Include DECLARES a used package.
+        # PackageVersion is a central-version CATALOG (Directory.Packages.props)
+        # — an entry alone does not mean the project uses it. PackageReference
+        # Update="X" modifies an existing reference (version pin) and does not
+        # declare X on its own.
         out = []
         for el in root.iter():
-            tag = el.tag.rsplit("}", 1)[-1]
-            if tag in ("PackageReference", "PackageVersion"):
-                name = el.get("Include") or el.get("Update")
+            if el.tag.rsplit("}", 1)[-1] == "PackageReference":
+                name = el.get("Include")
                 if name:
                     out.append(DeclaredDep(name=name, ecosystem="nuget",
                                            source_file=path.name, raw=name,

@@ -309,6 +309,9 @@ def test_r4_dotnet_nearest_props_wins(tmp_path):
 def test_r4_dotnet_reads_ancestor_props_packagerefs(tmp_path):
     from auditor.adapters.dotnet.adapter import DotnetAdapter
     repo = tmp_path / "repo"
+    # a PackageReference in an ancestor Directory.Build.props DECLARES; a
+    # PackageVersion in Directory.Packages.props is a version CATALOG only
+    # (CP-8b round 5) — read but not declared unless referenced
     _mk(repo, "Directory.Build.props",
         '<Project><ItemGroup><PackageReference Include="Serilog" Version="4.0.0"/></ItemGroup></Project>')
     _mk(repo, "Directory.Packages.props",
@@ -319,7 +322,8 @@ def test_r4_dotnet_reads_ancestor_props_packagerefs(tmp_path):
     a = DotnetAdapter()
     a.set_repo_root(repo)
     names = {d.name for d in a.parse_dependencies(repo / "src")}
-    assert {"Serilog", "Dapper"} <= names          # ancestor props + central packages
+    assert "Serilog" in names                       # ancestor PackageReference declares
+    assert "Dapper" not in names                     # PackageVersion catalog does NOT
 
 
 def test_r4_react_literal_eslint_semantics():
@@ -345,6 +349,65 @@ def test_r4_outside_repo_path_masked():
 def test_r4_h007_title_reflects_broadened_contract():
     from auditor.core.hallucination import _TITLES
     assert "Unverified" in _TITLES["H007"]          # no longer "cannot be mapped" only
+
+
+# ── Round 5 ──────────────────────────────────────────────────────────────────
+def test_r5_setup_branch_merge(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    # (src, declared, incomplete)
+    cases = {
+        "while_false": ("while False:\n    from setuptools import setup\n"
+                        "setup(install_requires=['fake-never'])\n", {"fake-never"}, True),
+        "lambda": ("from setuptools import setup\n"
+                   "f = lambda: setup(install_requires=['fake-lambda'])\n", set(), True),
+        "except_setup_none": ("try:\n    from setuptools import setup\nexcept ImportError:\n"
+                              "    setup = None\nsetup(install_requires=['requests'])\n",
+                              {"requests"}, True),
+        # a legitimate try/except import FALLBACK stays DEFINITE (not incomplete)
+        "import_fallback": ("try:\n    from setuptools import setup\nexcept ImportError:\n"
+                            "    from distutils.core import setup\n"
+                            "setup(install_requires=['ok'])\n", {"ok"}, False),
+    }
+    for name, (src, deps, inc) in cases.items():
+        root = tmp_path / name
+        _mk(root, "setup.py", src)
+        diag = Diagnostics()
+        got = {d.name for d in PythonAdapter().parse_dependencies(root, diag=diag)}
+        assert got == deps, name
+        assert bool(diag.manifest_incomplete) == inc, name
+
+
+def test_r5_packageversion_is_catalog_not_dependency(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    # catalog-only PackageVersion => NOT declared; a real PackageReference => yes
+    _mk(tmp_path, "Directory.Packages.props",
+        '<Project><ItemGroup><PackageVersion Include="Unused.Catalog" Version="1.0.0"/></ItemGroup></Project>')
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        '</TargetFramework></PropertyGroup><ItemGroup>'
+        '<PackageReference Include="Used.Ref"/></ItemGroup></Project>')
+    names = {d.name for d in DotnetAdapter().parse_dependencies(tmp_path)}
+    assert names == {"Used.Ref"}                     # catalog entry excluded
+    # PackageReference Update="X" alone (modifies an existing ref) does not declare
+    d2 = tmp_path / "upd"
+    _mk(d2, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+        '<PackageReference Update="X"/></ItemGroup></Project>')
+    assert {d.name for d in DotnetAdapter().parse_dependencies(d2)} == set()
+
+
+def test_r5_relativize_is_field_aware():
+    from auditor.cli import _relativize_diag
+    root = Path("C:/My Repo")     # a repo path WITH a space
+    d = {"notes": ["failed https://registry.example/a/b"],   # URL untouched
+         "manifest_errors": ["C:/My Repo/app/pyproject.toml: bad",
+                             "C:/outside/x/pyproject.toml: unreadable"],
+         "manifest_files": ["C:/My Repo/app/pyproject.toml"]}
+    out = _relativize_diag(d, root)
+    assert out["notes"] == ["failed https://registry.example/a/b"]     # URL intact
+    assert out["manifest_errors"][0] == "app/pyproject.toml: bad"      # space-safe, repo-relative
+    assert out["manifest_errors"][1] == "<outside-repository>/pyproject.toml: unreadable"
+    assert out["manifest_files"] == ["app/pyproject.toml"]
 
 
 def test_p7_n006_uses_same_predicate():

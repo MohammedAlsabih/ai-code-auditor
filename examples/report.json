@@ -1,7 +1,7 @@
 {
   "tool": "ai-code-auditor",
   "version": "0.1.0",
-  "generated_at": "2026-07-18T12:35:56.540265+00:00",
+  "generated_at": "2026-07-18T12:48:32.381604+00:00",
   "target": "tests\\fixtures\\monorepo",
   "engines": {
     "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",

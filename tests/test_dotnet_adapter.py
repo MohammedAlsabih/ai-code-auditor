@@ -30,14 +30,20 @@ def test_detect_and_csproj(tmp_path):
     assert names == {"Newtonsoft.Json", "FastJsonAI.Helpers"}
 
 
-def test_packages_config_and_directory_props(tmp_path):
+def test_packages_config_and_package_reference(tmp_path):
+    # packages.config <package id> declares; a PackageReference Include declares.
+    # A PackageVersion in Directory.Packages.props is a central-version CATALOG
+    # (CP-8b round 5) — an entry with no matching reference is NOT a dependency.
     _mk(tmp_path, "packages.config",
         '<packages><package id="Dapper" version="2.1.0" /></packages>')
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+        '<PackageReference Include="Serilog" /></ItemGroup></Project>')
     _mk(tmp_path, "Directory.Packages.props",
-        '<Project><ItemGroup><PackageVersion Include="Serilog" Version="4.0.0" />'
+        '<Project><ItemGroup><PackageVersion Include="Unused.Catalog" Version="4.0.0" />'
         "</ItemGroup></Project>")
     names = {d.name for d in DotnetAdapter().parse_dependencies(tmp_path)}
-    assert names == {"Dapper", "Serilog"}
+    assert names == {"Dapper", "Serilog"}       # Unused.Catalog (PackageVersion) excluded
 
 
 def test_broken_csproj_is_noted_not_silent(tmp_path):

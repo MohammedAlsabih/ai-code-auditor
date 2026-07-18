@@ -88,6 +88,57 @@ def _numeric_neighbours(lit: str) -> set[str]:
     return out
 
 
+class _SetupCtx:
+    """Branch-aware binding state for the setup.py scanner (CP-8b round 5).
+    `def_*` = bindings that hold on EVERY path so far; `poss_*` = bindings that
+    hold on SOME path. A call resolvable via def_* is a real packaging call; via
+    poss_* only is extracted but flags the manifest ambiguous."""
+
+    def __init__(self, def_fn=None, def_mods=None, poss_fn=None, poss_mods=None):
+        self.def_fn = set(def_fn or ())
+        self.def_mods = set(def_mods or ())
+        self.poss_fn = set(poss_fn or ())
+        self.poss_mods = set(poss_mods or ())
+        self.imported = False
+        self.out: list = []
+        self.found = False
+        self.ambiguous = False
+
+    def bind_fn(self, n):
+        self.def_fn.add(n)
+        self.poss_fn.add(n)
+
+    def bind_mod(self, n):
+        self.def_mods.add(n)
+        self.poss_mods.add(n)
+
+    def unbind(self, n):
+        self.def_fn.discard(n)
+        self.def_mods.discard(n)
+        self.poss_fn.discard(n)
+        self.poss_mods.discard(n)
+
+    def clone(self) -> "_SetupCtx":
+        c = _SetupCtx(self.def_fn, self.def_mods, self.poss_fn, self.poss_mods)
+        c.imported = self.imported
+        return c
+
+    def merge(self, branches: list, all_paths: bool) -> None:
+        for b in branches:
+            self.out += b.out
+            self.found = self.found or b.found
+            self.ambiguous = self.ambiguous or b.ambiguous
+            self.imported = self.imported or b.imported
+            self.poss_fn |= b.poss_fn
+            self.poss_mods |= b.poss_mods
+        if all_paths and branches:
+            # definite = what holds on EVERY branch of an exhaustive construct
+            self.def_fn = set.intersection(*(b.def_fn for b in branches)) | self.def_fn
+            self.def_mods = set.intersection(*(b.def_mods for b in branches)) | self.def_mods
+        # a non-exhaustive branch (while/for/if-no-else, try) never promotes a
+        # binding to definite — the parent's def_* is left as it was
+
+
 class PythonAdapter(LanguageAdapter):
     name = "python"
     ecosystem = "pypi"
@@ -423,63 +474,103 @@ class PythonAdapter(LanguageAdapter):
             self._dynamic_manifest(path, rel, "setup() call (none resolvable)")
         return out
 
-    # module-level control-flow containers whose bodies still execute at import
-    # time — their statements are processed IN ORDER (CP-8b round 4)
     _FLOW_STMTS = (_ast.If, _ast.While, _ast.For, _ast.With, _ast.Try)
+    # scopes whose body does NOT run at import time — a setup(...) inside one is
+    # NOT a packaging call (CP-8b round 5)
+    _DEFERRED = (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda,
+                 _ast.ClassDef, _ast.GeneratorExp)
 
     def _scan_setup_module(self, tree, rel: str, path: Path):
-        """ORDERED, MODULE-SCOPE name binding for the packaging entry point.
-        Round 4: descends into module-level control flow (try/except import
-        fallbacks, `if:` guards) — every branch's imports ADD candidate bindings
-        (conservative union); an Assign scans its RHS for the setup call BEFORE
-        discarding the target (`result = setup(...)`). A `def setup` nested in a
-        function never shadows the module symbol; calls inside function bodies
-        are not the module-level packaging entry."""
-        state = {"fn": set(), "mods": set(), "imported": False,
-                 "out": [], "found": False}
-        self._scan_setup_stmts(tree.body, state, rel, path)
-        return state["out"], state["found"], state["imported"]
+        """MODULE-SCOPE name binding with BRANCH-AWARE flow (CP-8b round 5).
+        Bindings are (definite, possible) sets: a branch (if/else, try/except)
+        contributes to `possible`, and only the intersection across ALL branches
+        stays `definite`. A setup call resolvable via `definite` is a real
+        packaging call; one resolvable only via `possible` is extracted AND marks
+        the manifest incomplete (ambiguous branch). Calls inside deferred scopes
+        (lambda/def/genexpr) are never packaging calls. `result = setup(...)`
+        stays detected (the RHS is scanned before the target is discarded)."""
+        ctx = _SetupCtx()
+        self._scan_setup_stmts(tree.body, ctx, rel, path)
+        # any AMBIGUOUS (possible-only) resolution => incomplete
+        if ctx.ambiguous:
+            self._dynamic_manifest(path, rel, "conditional setup binding/call")
+        return ctx.out, ctx.found, ctx.imported
 
-    def _scan_setup_stmts(self, stmts, state: dict, rel: str, path: Path) -> None:
+    def _scan_setup_stmts(self, stmts, ctx: "_SetupCtx", rel: str, path: Path) -> None:
         for stmt in stmts:
             if isinstance(stmt, _ast.Import):
                 for a in stmt.names:
                     if a.name.split(".")[0] in ("setuptools", "distutils"):
-                        state["imported"] = True
-                        state["mods"].add(a.asname or a.name.split(".")[0])
+                        ctx.imported = True
+                        ctx.bind_mod(a.asname or a.name.split(".")[0])
             elif isinstance(stmt, _ast.ImportFrom):
                 if (stmt.module or "").split(".")[0] in ("setuptools", "distutils"):
-                    state["imported"] = True
+                    ctx.imported = True
                     for a in stmt.names:
                         if a.name == "setup":
-                            state["fn"].add(a.asname or "setup")
+                            ctx.bind_fn(a.asname or "setup")
             elif isinstance(stmt, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
-                state["fn"].discard(stmt.name)     # module-level rebinding only —
-                state["mods"].discard(stmt.name)   # the BODY is a nested scope
+                ctx.unbind(stmt.name)              # module-level rebinding only —
             elif isinstance(stmt, (_ast.Assign, _ast.AnnAssign)):
-                # RHS may BE the packaging call (`result = setup(...)`) — scan it
-                # BEFORE discarding the assigned name
                 if stmt.value is not None:
-                    self._scan_calls(stmt.value, state, rel, path)
+                    self._scan_calls(stmt.value, ctx, rel, path)   # RHS first
                 targets = stmt.targets if isinstance(stmt, _ast.Assign) else [stmt.target]
                 for tgt in targets:
                     if isinstance(tgt, _ast.Name):
-                        state["fn"].discard(tgt.id)
-                        state["mods"].discard(tgt.id)
+                        ctx.unbind(tgt.id)
             elif isinstance(stmt, self._FLOW_STMTS):
-                for field in ("body", "orelse", "finalbody"):
-                    self._scan_setup_stmts(getattr(stmt, field, []) or [], state, rel, path)
-                for handler in getattr(stmt, "handlers", []) or []:
-                    self._scan_setup_stmts(handler.body, state, rel, path)
+                self._scan_branches(stmt, ctx, rel, path)
             else:
-                self._scan_calls(stmt, state, rel, path)
+                self._scan_calls(stmt, ctx, rel, path)
 
-    def _scan_calls(self, node, state: dict, rel: str, path: Path) -> None:
-        for sub in _ast.walk(node):
-            if isinstance(sub, _ast.Call) and \
-                    self._is_setup_call(sub, state["fn"], state["mods"]):
-                state["found"] = True
-                state["out"] += self._setup_call_deps(sub, rel, path)
+    def _scan_branches(self, stmt, ctx: "_SetupCtx", rel: str, path: Path) -> None:
+        # each alternative runs on a CLONE; the parent keeps the INTERSECTION of
+        # def_* as definite (only when the construct is EXHAUSTIVE — one branch
+        # always runs) and the UNION of poss_* as possible (CP-8b round 5).
+        if isinstance(stmt, _ast.Try):
+            # try-body(+else) OR one handler always determines the outcome =>
+            # exhaustive; finalbody ALWAYS runs => applied to the parent directly
+            bodies = [list(stmt.body) + list(stmt.orelse or [])]
+            bodies += [h.body for h in stmt.handlers]
+            self._merge_branch_bodies(bodies, ctx, rel, path, exhaustive=True)
+            if stmt.finalbody:
+                self._scan_setup_stmts(stmt.finalbody, ctx, rel, path)
+            return
+        if isinstance(stmt, _ast.If):
+            bodies = [stmt.body] + ([stmt.orelse] if stmt.orelse else [])
+            exhaustive = bool(stmt.orelse)           # no `else` => body may be skipped
+        elif isinstance(stmt, _ast.With):
+            bodies, exhaustive = [stmt.body], True    # a with-body always runs
+        else:                                         # For / While: body may run 0 times
+            bodies = [stmt.body] + ([stmt.orelse] if getattr(stmt, "orelse", None) else [])
+            exhaustive = False
+        self._merge_branch_bodies(bodies, ctx, rel, path, exhaustive)
+
+    def _merge_branch_bodies(self, bodies, ctx, rel, path, exhaustive):
+        clones = []
+        for body in bodies:
+            sub = ctx.clone()
+            self._scan_setup_stmts(body, sub, rel, path)
+            clones.append(sub)
+        ctx.merge(clones, all_paths=exhaustive)
+
+    def _scan_calls(self, node, ctx: "_SetupCtx", rel: str, path: Path) -> None:
+        # walk the expression, treating any deferred scope (lambda/def/genexpr)
+        # as a BARRIER — a setup(...) inside one is never run at import time
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, self._DEFERRED):
+                continue
+            if isinstance(cur, _ast.Call):
+                by_def = self._is_setup_call(cur, ctx.def_fn, ctx.def_mods)
+                by_poss = self._is_setup_call(cur, ctx.poss_fn, ctx.poss_mods)
+                if by_def or by_poss:
+                    ctx.found = True
+                    ctx.out += self._setup_call_deps(cur, rel, path)
+                    if by_poss and not by_def:
+                        ctx.ambiguous = True     # resolvable only on some branch
+            stack.extend(_ast.iter_child_nodes(cur))
 
     @staticmethod
     def _is_setup_call(call, fn_names: set, mod_aliases: set) -> bool:
