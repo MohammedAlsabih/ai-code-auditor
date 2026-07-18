@@ -82,6 +82,61 @@ export async function putReview(
   return body as Review
 }
 
+export interface BatchResult {
+  applied: number
+  status: string
+  updated_at: string
+}
+
+export class RedConfirmationRequired extends Error {
+  redCount: number
+  constructor(message: string, redCount: number) {
+    super(message)
+    this.redCount = redCount
+  }
+}
+
+export async function putReviewBatch(
+  reviewIds: string[],
+  status: string,
+  noteMode: string,
+  note: string,
+  confirmRed: boolean,
+): Promise<BatchResult> {
+  const res = await fetch('/api/review-batch', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      review_ids: reviewIds,
+      status,
+      note_mode: noteMode,
+      note,
+      confirm_red: confirmRed,
+    }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 409 && typeof body.red_count === 'number')
+    throw new RedConfirmationRequired(body.error ?? 'red confirmation required', body.red_count)
+  if (!res.ok) throw new Error(body.error ?? `batch failed (HTTP ${res.status})`)
+  return body as BatchResult
+}
+
+// Path-filter helpers (W2-B2.5). Matching is component-bounded: "api" matches
+// "api/x.cs" but NOT "api-old/x.cs". User input is normalized (\ -> /) and
+// absolute/drive/traversal inputs are rejected as invalid.
+export function normalizePathFilter(input: string): string | null {
+  const p = input.trim().replace(/\\/g, '/')
+  if (!p) return null
+  if (p.startsWith('/') || /^[A-Za-z]:/.test(p)) return null
+  const parts = p.split('/').filter((s) => s !== '')
+  if (parts.length === 0 || parts.some((s) => s === '.' || s === '..')) return null
+  return parts.join('/')
+}
+
+export function pathFilterMatches(repoRelative: string, filter: string): boolean {
+  return repoRelative === filter || repoRelative.startsWith(filter + '/')
+}
+
 export async function deleteReview(rid: string): Promise<void> {
   const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
   if (!res.ok) {

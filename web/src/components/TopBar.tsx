@@ -13,24 +13,24 @@ export function TopBar({
   target,
   total,
   shown,
-  activeSeverity,
-  onSeverity,
+  activeSeverities,
+  onToggleSeverity,
 }: {
   summary: Summary
   target?: string
   total: number
   shown: number
-  activeSeverity: string | null
-  onSeverity: (s: string | null) => void
+  activeSeverities: Set<string>
+  onToggleSeverity: (s: string) => void
 }) {
   const c = summary.counts ?? {}
   const verdict = summary.verdict ?? 'review'
 
   const chip = (sev: 'red' | 'yellow' | 'blue', n: number) => (
     <button
-      className={`count count-${sev} ${activeSeverity === sev ? 'active' : ''}`}
-      onClick={() => onSeverity(activeSeverity === sev ? null : sev)}
-      title={`${sev} findings — click to filter`}
+      className={`count count-${sev} ${activeSeverities.has(sev) ? 'active' : ''}`}
+      onClick={() => onToggleSeverity(sev)}
+      title={`${sev} findings — click to toggle filter (multi-select)`}
     >
       <span className="dot" /> {n}
     </button>

@@ -145,6 +145,39 @@ class ReviewStore:
             self._reviews = new       # publish only after the disk write landed
         return dict(entry)
 
+    def apply_batch(self, ids: list[str], status: str | None,
+                    note_mode: str, note: str) -> dict[str, Any]:
+        """Atomic bulk update: ONE lock, ONE disk write, ONE shared updated_at
+        for every member. status None means unreviewed (records are deleted).
+        note_mode: keep = preserve each finding's own note; append = add a new
+        line; replace = overwrite. The merged state is FULLY validated (incl.
+        append overflow) before anything touches disk — any problem fails the
+        whole batch with no write."""
+        with self._lock:
+            self._guard()
+            new = dict(self._reviews)
+            ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for rid in ids:
+                if status is None:
+                    new.pop(rid, None)
+                    continue
+                old = new.get(rid)
+                if note_mode == "keep":
+                    merged = old["note"] if old else ""
+                elif note_mode == "append":
+                    base = old["note"] if old and old["note"] else ""
+                    merged = f"{base}\n{note}" if base and note else (note or base)
+                else:                          # replace
+                    merged = note
+                if len(merged) > NOTE_MAX_CHARS:
+                    raise ValueError(
+                        f"merged note for one finding exceeds {NOTE_MAX_CHARS} "
+                        "characters — batch rejected before any write")
+                new[rid] = {"status": status, "note": merged, "updated_at": ts}
+            self._write(new)                   # raises => memory untouched
+            self._reviews = new
+            return {"updated_at": ts, "applied": len(ids)}
+
     def delete(self, rid: str) -> None:
         with self._lock:
             self._guard()

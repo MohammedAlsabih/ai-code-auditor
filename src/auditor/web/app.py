@@ -191,6 +191,18 @@ class ReviewIn(BaseModel):
     note: str = ""
 
 
+class BatchIn(BaseModel):
+    review_ids: list[str]
+    status: str
+    note_mode: str = "keep"
+    note: str = ""
+    confirm_red: bool = False
+
+
+BATCH_MAX_IDS = 5000
+_NOTE_MODES = ("keep", "append", "replace")
+
+
 def create_app(report_path: Path, repo_root: Path | None = None,
                max_bytes: int = DEFAULT_MAX_REPORT_BYTES,
                reviews_path: Path | None = None) -> FastAPI:
@@ -207,6 +219,7 @@ def create_app(report_path: Path, repo_root: Path | None = None,
     # original dict and report.json on disk are never touched.
     enriched: dict[str, Any] = json.loads(json.dumps(report))
     valid_review_ids: set[str] = set()
+    red_review_ids: set[str] = set()   # server-side gate for bulk FP/AR on red
     for _proj in enriched.get("projects", []):
         if not isinstance(_proj, dict) or not isinstance(_proj.get("root"), str):
             continue
@@ -218,6 +231,8 @@ def create_app(report_path: Path, repo_root: Path | None = None,
                 if _rid is not None:
                     _f["review_id"] = _rid
                     valid_review_ids.add(_rid)
+                    if _f.get("severity") == "red":
+                        red_review_ids.add(_rid)
 
     store = ReviewStore(reviews_path if reviews_path is not None
                         else report_path.parent / (report_path.stem + ".reviews.json"))
@@ -314,6 +329,50 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         except ReviewStoreError as e:
             return _err(503, str(e))
         return _AsciiJSON({"review_id": rid, "status": "unreviewed"})
+
+    @app.put("/api/review-batch")
+    def review_batch(body: BatchIn) -> JSONResponse:
+        """Atomic bulk review update. EVERYTHING is validated before any write;
+        one unknown id fails the whole batch. One lock, one sidecar write, one
+        shared updated_at. Dedicated static route — no clash with the dynamic
+        /api/reviews/{rid}."""
+        ids = body.review_ids
+        if not ids:
+            return _err(400, "empty batch")
+        if len(ids) > BATCH_MAX_IDS:
+            return _err(400, f"batch exceeds the {BATCH_MAX_IDS}-id cap")
+        if len(set(ids)) != len(ids):
+            return _err(400, "duplicate review ids in batch")
+        unknown = sum(1 for r in ids if r not in valid_review_ids)
+        if unknown:
+            return _err(404, f"{unknown} unknown review id(s) for the loaded "
+                             "report — nothing was written")
+        if body.status not in (*VALID_STATUSES, "unreviewed"):
+            return _err(400, "invalid status (expected one of "
+                             f"{', '.join(VALID_STATUSES)}, unreviewed)")
+        if body.note_mode not in _NOTE_MODES:
+            return _err(400, f"invalid note_mode (expected one of {', '.join(_NOTE_MODES)})")
+        if len(body.note) > NOTE_MAX_CHARS:
+            return _err(400, f"note exceeds {NOTE_MAX_CHARS} characters")
+        if body.status in ("false_positive", "accepted_risk") and not body.confirm_red:
+            reds = sum(1 for r in ids if r in red_review_ids)
+            if reds:
+                # enforced HERE, not just in the UI: dismissing red findings in
+                # bulk needs an explicit second confirmation
+                return JSONResponse(
+                    {"error": f"batch touches {reds} red finding(s); resend "
+                              "with confirm_red=true to proceed",
+                     "red_count": reds}, status_code=409)
+        try:
+            result = store.apply_batch(
+                ids, None if body.status == "unreviewed" else body.status,
+                body.note_mode, body.note)
+        except ValueError as e:                # e.g. append overflow — no write
+            return _err(400, str(e))
+        except ReviewStoreError as e:
+            return _err(503, str(e))
+        return _AsciiJSON({"applied": result["applied"], "status": body.status,
+                           "updated_at": result["updated_at"]})
 
     @app.get("/api/source")
     def get_source(path: str, line: int = 1,
