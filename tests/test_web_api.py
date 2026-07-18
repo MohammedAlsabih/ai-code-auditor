@@ -52,14 +52,18 @@ def test_valid_report_is_served(tmp_path):
 
 
 def test_health_endpoint(tmp_path):
-    app = create_app(_write(tmp_path, VALID), repo_root=Path("/some/repo"))
-    h = TestClient(app).get("/api/health").json()
+    app = create_app(_write(tmp_path, VALID), repo_root=tmp_path)
+    r = TestClient(app).get("/api/health")
+    h = r.json()
     assert h["status"] == "ok"
     assert h["report_loaded"] is True
     assert h["projects"] == 2
     assert h["findings"] == 2
     assert h["counts"] == {"red": 1, "yellow": 1, "blue": 0}
-    assert h["repo_root"] == str(Path("/some/repo"))
+    assert h["source_available"] is True
+    # machine paths never leave the server — not even the repo root
+    assert "repo_root" not in h
+    assert str(tmp_path) not in r.text and ":\\" not in r.text
 
 
 def test_corrupt_report_gives_clear_error(tmp_path):

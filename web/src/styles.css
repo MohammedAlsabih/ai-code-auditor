@@ -356,3 +356,47 @@ tr.sev-blue td.c-sev {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* source window (W2-A) */
+.src-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 2px;
+}
+.src-window {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: auto;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.src-line {
+  display: flex;
+  white-space: pre;
+}
+.src-num {
+  flex: 0 0 3.2em;
+  text-align: right;
+  padding: 0 8px 0 4px;
+  color: var(--muted);
+  border-right: 1px solid var(--line);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.src-text {
+  padding: 0 10px;
+  min-width: 0;
+}
+.src-line.hit {
+  background: var(--sel);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.src-line.hit .src-num {
+  color: var(--ink);
+  font-weight: 700;
+}

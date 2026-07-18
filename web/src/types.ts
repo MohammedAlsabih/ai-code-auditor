@@ -35,6 +35,23 @@ export interface Report {
   generated_at?: string
 }
 
+// One numbered line of a source window from /api/source.
+export interface SourceLine {
+  number: number
+  text: string
+}
+
+// The /api/source response: a WINDOW around the finding's line, never the
+// whole file.
+export interface SourceWindow {
+  path: string
+  requested_line: number
+  start_line: number
+  end_line: number
+  total_lines: number
+  lines: SourceLine[]
+}
+
 // A finding flattened out of its project, carrying the project context needed
 // by the table (project + resolved language).
 export interface Finding {
