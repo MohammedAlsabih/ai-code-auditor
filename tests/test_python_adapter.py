@@ -329,27 +329,26 @@ def _audit(tmp_path, reg):
     return audit_hallucinations(a, tmp_path, files, declared, reg)
 
 
-def test_unmapped_multisegment_import_is_h007_not_red_h008(tmp_path):
-    # NO declared deps at all => nothing could provide the imports:
-    # multi-segment unmapped => H007; single-segment hallucination => H008 red
-    # stamped precision=heuristic (identity mapping is a convention, not a fact)
+def test_unmapped_python_imports_are_yellow_probable_h007(tmp_path):
+    # CP-8b round 3: python mappings are naming CONVENTIONS (heuristic), so an
+    # absent name is a YELLOW probable-hallucination H007, not a red H008 —
+    # multi-segment (no candidate) and single-segment (convention) alike.
     _mk(tmp_path, "app.py", "import totallymadeup.submodule\nimport superhallucinated\n")
     fs = _audit(tmp_path, _MissingReg())
-    assert sorted(f.rule_id for f in fs) == ["H007", "H008"]
-    h008 = next(f for f in fs if f.rule_id == "H008")
-    assert h008.precision == "heuristic"
+    assert sorted(f.rule_id for f in fs) == ["H007", "H007"]
+    assert all(f.severity.value == "yellow" for f in fs)
 
 
-def test_unlinked_declared_gives_heuristic_red_with_note(tmp_path):
-    # CP-8b.3: an UNLINKED declared distribution does NOT silence a hallucinated
-    # import (the all-declared-providers rule had recall 0.143). H008 red fires,
-    # but as a heuristic red with an explicit UNVERIFIED note.
+def test_unlinked_declared_gives_yellow_probable_with_note(tmp_path):
+    # CP-8b round 3: an UNLINKED declared distribution does NOT silence the
+    # import (recall stays high) — it surfaces as a YELLOW probable H007 with an
+    # explicit UNVERIFIED note, never a definitive block on a guess.
     _mk(tmp_path, "requirements.txt", "some-unmatched-dist\n")
     _mk(tmp_path, "app.py", "import mystery_module\n")
     fs = _audit(tmp_path, _MissingReg(exists={"some-unmatched-dist"}))
-    h008 = next(f for f in fs if f.rule_id == "H008")
-    assert h008.severity.value == "red" and h008.precision == "heuristic"
-    assert "UNVERIFIED" in h008.detail and "some-unmatched-dist" in h008.detail
+    h = next(f for f in fs if f.rule_id == "H007")
+    assert h.severity.value == "yellow"
+    assert "UNVERIFIED" in h.detail and "some-unmatched-dist" in h.detail
 
 
 def test_import_dist_corpus_no_false_positives(tmp_path):

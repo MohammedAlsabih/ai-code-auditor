@@ -412,62 +412,57 @@ class PythonAdapter(LanguageAdapter):
         except SyntaxError as e:
             self._manifest_error(path, e)
             return []
-        fn_names, mod_aliases, imported = self._setup_bindings(tree, path, rel)
+        out, found_call, imported = self._scan_setup_module(tree, rel, path)
         if not imported:
             # no setuptools/distutils import at all — a call named setup() here
             # is a local helper, not the packaging entry point (CP-8.10)
             return []
-        out: list[DeclaredDep] = []
-        found_call = False
-        for node in _ast.walk(tree):
-            if isinstance(node, _ast.Call) and \
-                    self._is_setup_call(node, fn_names, mod_aliases):
-                found_call = True
-                out += self._setup_call_deps(node, rel, path)
         if not found_call:
             # setuptools imported but NO statically-resolvable packaging call —
             # neither silently accept nor silently drop (CP-8b.2)
             self._dynamic_manifest(path, rel, "setup() call (none resolvable)")
         return out
 
-    def _setup_bindings(self, tree, path: Path, rel: str) -> tuple[set, set, bool]:
-        """Actual NAME BINDING for the packaging entry point (CP-8b.2):
-        - `from setuptools import setup as alias` binds alias as a direct call
-        - `import setuptools as st` / `import distutils.core as dc` bind module
-          aliases whose `.setup` attribute is the entry point
-        A later local rebinding (def setup/class/assignment over a bound name)
-        removes the binding AND marks the manifest incomplete — an ambiguous
-        entry point is never silently trusted."""
+    def _scan_setup_module(self, tree, rel: str, path: Path):
+        """ORDERED, MODULE-SCOPE name binding for the packaging entry point
+        (CP-8b round 3): bindings evolve statement by statement, so an
+        assignment BEFORE the import does not kill the later import, a rebind
+        AFTER the call does not retract it, and a `def setup` nested inside a
+        function never shadows the module-level symbol. Only module-level
+        FunctionDef/ClassDef/Assign rebind; calls inside function bodies are
+        not the module-level packaging entry and are ignored."""
         fn_names: set[str] = set()
         mod_aliases: set[str] = set()
         imported = False
-        for node in _ast.walk(tree):
-            if isinstance(node, _ast.Import):
-                for a in node.names:
+        out: list[DeclaredDep] = []
+        found_call = False
+        for stmt in tree.body:
+            if isinstance(stmt, _ast.Import):
+                for a in stmt.names:
                     if a.name.split(".")[0] in ("setuptools", "distutils"):
                         imported = True
                         mod_aliases.add(a.asname or a.name.split(".")[0])
-            elif isinstance(node, _ast.ImportFrom):
-                if (node.module or "").split(".")[0] in ("setuptools", "distutils"):
+            elif isinstance(stmt, _ast.ImportFrom):
+                if (stmt.module or "").split(".")[0] in ("setuptools", "distutils"):
                     imported = True
-                    for a in node.names:
+                    for a in stmt.names:
                         if a.name == "setup":
                             fn_names.add(a.asname or "setup")
-        rebound: set[str] = set()
-        for node in _ast.walk(tree):
-            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
-                if node.name in fn_names | mod_aliases:
-                    rebound.add(node.name)
-            elif isinstance(node, _ast.Assign):
-                for tgt in node.targets:
-                    if isinstance(tgt, _ast.Name) and tgt.id in fn_names | mod_aliases:
-                        rebound.add(tgt.id)
-        if rebound:
-            self._dynamic_manifest(path, rel,
-                                   f"rebound packaging name(s): {', '.join(sorted(rebound))}")
-            fn_names -= rebound
-            mod_aliases -= rebound
-        return fn_names, mod_aliases, imported
+            elif isinstance(stmt, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                fn_names.discard(stmt.name)      # module-level rebinding only —
+                mod_aliases.discard(stmt.name)   # the BODY is a nested scope
+            elif isinstance(stmt, _ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, _ast.Name):
+                        fn_names.discard(tgt.id)
+                        mod_aliases.discard(tgt.id)
+            else:
+                for node in _ast.walk(stmt):
+                    if isinstance(node, _ast.Call) and \
+                            self._is_setup_call(node, fn_names, mod_aliases):
+                        found_call = True
+                        out += self._setup_call_deps(node, rel, path)
+        return out, found_call, imported
 
     @staticmethod
     def _is_setup_call(call, fn_names: set, mod_aliases: set) -> bool:

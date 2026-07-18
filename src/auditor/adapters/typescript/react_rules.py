@@ -123,15 +123,23 @@ def react_namespaces(sf: SourceFile) -> set[str]:
 
 
 def is_hook_callee(callee, react_ns: set[str]) -> bool:
-    """THE shared hook predicate (react_rules + N006): a bare `useX` identifier,
-    or a member `<ns>.useX` whose object is a React namespace. A property named
-    `useX` on an arbitrary object (api/client/hooks) is NOT a React hook."""
+    """THE shared hook predicate (react_rules + N006), matching
+    eslint-plugin-react-hooks 7.1.1: a bare `useX` identifier, or a member
+    `<obj>.useX` whose object is either a React namespace OR a PascalCase name
+    (ESLint treats `Hooks.useState` as a hook, `api.useState` as not)."""
     if not is_hook_name(node_text(callee)):
         return False
     parent = callee.parent
     if parent is not None and parent.type == "member_expression":
         obj = parent.child_by_field_name("object")
-        return obj is not None and node_text(obj) in react_ns
+        if obj is None:
+            return False
+        name = node_text(obj)
+        # ESLint: member hook if the object is the React namespace OR its
+        # (last) segment is PascalCase (Hooks.useX, React.useX). A lowercase
+        # service object (api/client/hooks) is NOT a hook.
+        seg = name.rsplit(".", 1)[-1]
+        return name in react_ns or (seg[:1].isupper())
     return True   # bare identifier callee
 
 

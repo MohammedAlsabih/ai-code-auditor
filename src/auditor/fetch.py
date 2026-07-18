@@ -18,9 +18,16 @@ _URL_PREFIXES = ("http://", "https://", "git@", "ssh://", "file://")
 _CRED_URL = re.compile(r"(\b[a-z][a-z0-9+.\-]*://)([^/\s@'\"]{1,384})@")
 _SENSITIVE_KEYS = (
     "api[-_]?key|access[-_]?key|private[-_]?token|auth[-_]?token|"
-    "session[-_]?token|_auth(?:token)?|token|password|passwd|pwd|secret|"
+    "session[-_]?token|access[-_]?token|refresh[-_]?token|id[-_]?token|"
+    "_auth(?:token)?|_password|token|password|passwd|pwd|secret|"
     "authorization|credentials?|auth"
 )
+# well-known token SHAPES redacted wherever they appear, key or no key
+_KNOWN_TOKENS = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}|[sr]k_live_[A-Za-z0-9]{20,}"
+    r"|AIza[0-9A-Za-z_\-]{35}|(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}"
+    r"|sk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_\-]{20,})\b")
 # 1) auth-carrying HEADERS eat the REST of the line/segment: the value of
 #    `Authorization: Bearer XXX` is scheme + token — masking only the first
 #    word leaked the token (CP-8b.1)
@@ -43,7 +50,8 @@ def _redact(text: str) -> str:
     text = _CRED_URL.sub(r"\1***@", text)
     text = _AUTH_HEADER.sub(r"\1\g<2>***", text)
     text = _QUOTED_KV.sub(r"\1\g<2>***\g<2>", text)
-    return _TOKEN_KV.sub(r"\1\g<2>***", text)
+    text = _TOKEN_KV.sub(r"\1\g<2>***", text)
+    return _KNOWN_TOKENS.sub("***", text)
 
 
 def _force_remove(path: Path) -> None:

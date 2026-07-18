@@ -1,7 +1,7 @@
 {
   "tool": "ai-code-auditor",
   "version": "0.1.0",
-  "generated_at": "2026-07-18T11:46:37.074844+00:00",
+  "generated_at": "2026-07-18T12:18:38.633795+00:00",
   "target": "tests\\fixtures\\monorepo",
   "engines": {
     "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",
@@ -349,9 +349,9 @@
   "diagnostics": {
     "manifest_errors": [],
     "manifest_files": [
-      "<repo>/tests/fixtures/monorepo/requirements.txt",
-      "<repo>/tests/fixtures/monorepo/web/package.json",
-      "<repo>/tests/fixtures/monorepo/web/tsconfig.json"
+      "requirements.txt",
+      "web/package.json",
+      "web/tsconfig.json"
     ],
     "manifest_incomplete": [],
     "skipped_files": [],

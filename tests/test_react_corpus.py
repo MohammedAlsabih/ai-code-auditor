@@ -57,3 +57,10 @@ def test_corpus_service_object_hook_is_clean_both():
     # leaves them clean and auditor must AGREE (no R001 false positive)
     assert _eslint()["service_object_hook.tsx"] == []
     assert not (_auditor("service_object_hook.tsx") & _HOOKS)
+
+
+def test_corpus_pascalcase_object_hook_flagged_both():
+    # CP-8b round 3: ESLint 7.1.1 treats Hooks.useState (PascalCase object) as a
+    # hook; auditor must AGREE (R001), matching the reference exactly
+    assert "rules-of-hooks" in _eslint()["pascalcase_object_hook.tsx"]
+    assert "R001" in _auditor("pascalcase_object_hook.tsx")

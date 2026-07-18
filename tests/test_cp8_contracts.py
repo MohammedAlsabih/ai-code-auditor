@@ -289,13 +289,14 @@ def test_p8_two_secrets_on_one_line_both_kept():
 
 
 # ── Point 9: provider may supply multiple modules ────────────────────────────
-def test_p9_unlinked_provider_gives_heuristic_red_with_note(tmp_path):
+def test_p9_unlinked_provider_gives_yellow_probable_with_note(tmp_path):
     from auditor.adapters.python.adapter import PythonAdapter
     from auditor.core.hallucination import audit_hallucinations
-    # CP-8b.3: 'megatool' (declared, matched by `import megatool`) could not be
-    # LINKED to the unmatched `megahelper`. Policy: fire H008 red (recall), but as
-    # a HEURISTIC red with an explicit UNVERIFIED note naming megatool — never a
-    # silent H007 suppression (that had recall 0.143).
+    # CP-8b round 3: 'megatool' (declared, matched) could not be LINKED to the
+    # unmatched `megahelper`. The python mapping is a naming CONVENTION
+    # (heuristic), so megahelper is a YELLOW probable-hallucination H007 with an
+    # explicit UNVERIFIED note naming megatool — surfaced for review, never a
+    # silent suppression, never a definitive block on a guess.
     _mk(tmp_path, "requirements.txt", "megatool\n")
     _mk(tmp_path, "app.py", "import megatool\nimport megahelper\n")
     a = PythonAdapter()
@@ -305,9 +306,9 @@ def test_p9_unlinked_provider_gives_heuristic_red_with_note(tmp_path):
     declared = a.parse_dependencies(tmp_path)
     a.prepare(tmp_path, files)
     fs = audit_hallucinations(a, tmp_path, files, declared, _Reg(exists={"megatool"}))
-    h008 = next(f for f in fs if f.rule_id == "H008")
-    assert h008.severity.value == "red" and h008.precision == "heuristic"
-    assert "UNVERIFIED" in h008.detail and "megatool" in h008.detail
+    h = next(f for f in fs if f.rule_id == "H007")
+    assert h.severity.value == "yellow"
+    assert "UNVERIFIED" in h.detail and "megatool" in h.detail
 
 
 def test_p9_curated_multimodule_provider_is_matched_not_flagged(tmp_path):
@@ -327,10 +328,12 @@ def test_p9_curated_multimodule_provider_is_matched_not_flagged(tmp_path):
     assert fs == []                                 # no false red for a curated provider
 
 
-def test_p9_no_declared_provider_still_red_h008(tmp_path):
+def test_p9_exact_mapping_absent_is_red_h008_heuristic_is_yellow(tmp_path):
     from auditor.adapters.python.adapter import PythonAdapter
     from auditor.core.hallucination import audit_hallucinations
-    # NO existing declared dep => nothing could provide it => the red stands
+    # CP-8b round 3: a definitive RED H008 requires an EXACT mapping. A python
+    # single-segment import is a naming CONVENTION (heuristic) => YELLOW H007
+    # even with no declared providers.
     _mk(tmp_path, "app.py", "import superhallucinated\n")
     a = PythonAdapter()
     files = collect_source_files(tmp_path, a)
@@ -339,7 +342,25 @@ def test_p9_no_declared_provider_still_red_h008(tmp_path):
     declared = a.parse_dependencies(tmp_path)
     a.prepare(tmp_path, files)
     fs = audit_hallucinations(a, tmp_path, files, declared, _Reg())
-    assert [f.rule_id for f in fs] == ["H008"]
+    assert [(f.rule_id, f.severity.value) for f in fs] == [("H007", "yellow")]
+
+    # an EXACT-mapping adapter (npm-style) absent from the registry => red H008
+    class Npmish:
+        name = "typescript"; ecosystem = "npm"; mapping_precision = "exact"
+        def is_internal(self, imp): return False
+        def match_declared(self, imp, d): return None
+        def registry_candidates(self, imp): return [imp.top_level]
+        def extract_imports(self, files): return self._imps
+        def private_registry_reason(self, root): return None
+        def unresolvable_hint(self, i): return None
+    npmish = Npmish()
+    npmish._imps = [ImportRef("madeuppkg", "a.ts", 1, top_level="madeuppkg")]
+
+    class Reg:
+        ecosystem = "npm"
+        def lookup(self, n): return PackageInfo(exists=False)
+    fs2 = audit_hallucinations(npmish, tmp_path, [], [], Reg())
+    assert [(f.rule_id, f.severity.value) for f in fs2] == [("H008", "red")]
 
 
 # ── Point 10: cache semantics + anchored setup() + kwargs ─────────────────────

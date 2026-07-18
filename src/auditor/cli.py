@@ -52,6 +52,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def _relativize_diag(diag_dict: dict, root) -> dict:
+    """Strip the repository-root prefix from every diagnostics string so the
+    report shows repo-relative paths, not absolute machine paths (CP-8b round 3).
+    The in-memory ledgers keep their canonical absolute identity for merge."""
+    prefix = root.resolve().as_posix().rstrip("/") + "/"
+
+    def rel(v):
+        if isinstance(v, str):
+            return v.replace(prefix, "")
+        if isinstance(v, list):
+            return [rel(x) for x in v]
+        return v
+    return {k: rel(v) for k, v in diag_dict.items()}
+
+
 def _scan(args) -> int:
     from auditor.adapters import default_adapters
     from auditor.core.hallucination import audit_hallucinations
@@ -197,8 +212,12 @@ def _scan(args) -> int:
             "complexity": "lizard",
             "semgrep": global_diag.semgrep_status,
         }
+        # canonical absolute paths are kept internally for merge identity, but
+        # the REPORT shows repository-relative paths (privacy + reproducibility,
+        # CP-8b round 3)
+        diag_dict = _relativize_diag(dc_asdict(global_diag), root)
         data = build_report(args.target, results, engines, limitations,
-                            diagnostics=dc_asdict(global_diag), confidence=confidence)
+                            diagnostics=diag_dict, confidence=confidence)
         out_dir = Path(args.output)
         write_json(data, out_dir / "report.json")
         write_markdown(data, out_dir / "report.md")

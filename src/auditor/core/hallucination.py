@@ -285,22 +285,25 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
                          f"guessed from the namespace ({', '.join(cands)}) and is absent "
                          "(accuracy limit — verify manually)."
                          + (_provider_hint(providers) if providers else ""), imp.module)]
-    # CP-8b.3 provider POLICY (measured precision/recall in
-    # evidence/cp8b-contract-batch.md): the previous "any declared dep suppresses
-    # every red" rule had recall 0.143 — a single declared dep (e.g. requests)
-    # silenced every hallucinated import. That over-suppression is rejected. A
-    # red H008 now FIRES (recall 1.0), but when declared distributions exist that
-    # we could NOT link to the import, it carries an explicit UNVERIFIED note and
-    # stays precision=heuristic — a red flag, not a definitive claim. Curated
-    # multi-module providers (Bio->biopython, google.cloud.*) never reach here:
-    # match_declared resolves them, so they are internal, not external.
-    detail = (f"{label}: imported but not declared AND not found in the public "
-              f"{adapter.ecosystem} registry (candidates tried: {', '.join(cands)}). "
-              "Likely an AI-hallucinated import; the unregistered name is claimable "
-              "(slopsquatting).")
-    if trust != "exact" and providers:
-        detail += _unverified_provider_note(providers)
-    return [_finding("H008", adapter, imp.file, imp.line, detail, imp.module, trust=trust)]
+    # PRODUCT CONTRACT (CP-8b round 3): verdict() blocks on ANY red and does not
+    # read precision, so a "heuristic red" was still a definitive block. The
+    # definitive RED H008 therefore requires an EXACT (authoritative) mapping.
+    # A heuristic (convention) mapping with an absent name yields a YELLOW
+    # probable-hallucination H007 — it always SURFACES for review (never
+    # silently suppressed by a declared dep) but never blocks on a guess.
+    if trust != "exact":
+        detail = (f"{label}: imported but not declared, and the conventional name "
+                  f"({', '.join(cands)}) is absent from the registry — PROBABLE "
+                  "AI-hallucinated import (unverified: the mapping is a naming "
+                  "convention, not a proof; the unregistered name is claimable).")
+        if providers:
+            detail += _unverified_provider_note(providers)
+        return [_finding("H007", adapter, imp.file, imp.line, detail, imp.module)]
+    return [_finding("H008", adapter, imp.file, imp.line,
+                     f"{label}: imported but not declared AND not found in the public "
+                     f"{adapter.ecosystem} registry (candidates tried: {', '.join(cands)}). "
+                     "Likely an AI-hallucinated import; the unregistered name is claimable "
+                     "(slopsquatting).", imp.module, trust=trust)]
 
 
 def _sorted(findings: list[Finding]) -> list[Finding]:

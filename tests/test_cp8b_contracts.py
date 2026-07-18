@@ -27,6 +27,12 @@ def test_p1_scrubber_covers_common_secret_formats():
         "https://alice:URLPASS@host/x": "URLPASS",
         "https://ONLYTOKEN@host/x": "ONLYTOKEN",
         "?api_key=QUERYSECRET&x=1": "QUERYSECRET",
+        # CP-8b round 3: OAuth token keys, npm _password, known token shapes
+        "?access_token=OAUTHSECRET&x=1": "OAUTHSECRET",
+        "refresh_token=REFRESHSECRET": "REFRESHSECRET",
+        "//registry/:_password=NPMBASE64": "NPMBASE64",
+        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA": "ghp_AAAA",
+        "the key is AKIAIOSFODNN7EXAMPLE here": "AKIAIOSFODNN7EXAMPLE",
     }
     for text, secret in cases.items():
         red = _redact(text)
@@ -101,10 +107,15 @@ def test_p3_single_declared_dep_does_not_suppress_hallucination(tmp_path):
             return PackageInfo(exists=True, created="2019-01-01T00:00:00Z") if n == "requests" \
                 else PackageInfo(exists=False)
     fs = audit_hallucinations(a, tmp_path, files, declared, Reg())
-    h008 = next(f for f in fs if f.rule_id == "H008")
-    assert h008.severity.value == "red"          # requests does NOT suppress the red
-    assert h008.precision == "heuristic"         # but it is a heuristic red, not a proof
-    assert "UNVERIFIED" in h008.detail and "requests" in h008.detail
+    from auditor.core.scoring import verdict
+    h = next(f for f in fs if f.rule_id == "H007")
+    # requests does NOT silence it — it SURFACES as a yellow probable...
+    assert h.severity.value == "yellow"
+    assert "PROBABLE" in h.detail and "requests" in h.detail
+    # ...for REVIEW, not a definitive block on an unproven mapping (CP-8b r3)
+    counts = {"red": 0, "yellow": sum(1 for f in fs if f.severity.value == "yellow"),
+              "blue": 0}
+    assert verdict(counts, 100, {}) == "review"
 
 
 # ── Point 4: .NET TFM old/modern/unknown ─────────────────────────────────────
@@ -232,10 +243,12 @@ def _tsx(code):
 def test_p7_service_object_hooks_are_not_flagged():
     from auditor.adapters.typescript.react_rules import HookInConditional
     tmpl = "export function C({{f}}:{{f:boolean}}){{ if(f){{ {}.useState(0); }} return null; }}"
-    for obj in ("api", "client", "hooks", "Hooks"):
+    # lowercase service objects are NOT hooks (eslint-plugin-react-hooks 7.1.1)
+    for obj in ("api", "client", "hooks"):
         assert HookInConditional().check(_tsx(tmpl.format(obj))) == [], obj
-    # React namespace + bare are still flagged
-    assert [x.rule_id for x in HookInConditional().check(_tsx(tmpl.format("React")))] == ["R001"]
+    # PascalCase object OR React namespace OR bare ARE hooks (matches ESLint)
+    for obj in ("React", "Hooks"):
+        assert [x.rule_id for x in HookInConditional().check(_tsx(tmpl.format(obj)))] == ["R001"], obj
     assert [x.rule_id for x in HookInConditional().check(
         _tsx("export function C({f}:{f:boolean}){ if(f){ useState(0); } return null; }"))] == ["R001"]
 
@@ -245,6 +258,19 @@ def test_p7_react_alias_import_counts():
     sf = _tsx("import * as R from 'react';\n"
               "export function C({f}:{f:boolean}){ if(f){ R.useState(0); } return null; }")
     assert [x.rule_id for x in HookInConditional().check(sf)] == ["R001"]
+
+
+def test_p6_report_paths_are_repository_relative(tmp_path):
+    # CP-8b round 3: the report shows repo-relative paths, not absolute machine
+    # paths (privacy + reproducibility)
+    from auditor.cli import main
+    (tmp_path / "pyproject.toml").write_text("[project\nbroken", encoding="utf-8")
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    out = tmp_path / "rep"
+    main(["scan", str(tmp_path), "--output", str(out), "--offline", "--no-semgrep"])
+    blob = (out / "report.json").read_text(encoding="utf-8")
+    assert tmp_path.resolve().as_posix() not in blob        # no absolute repo path
+    assert "pyproject.toml" in json.loads(blob)["diagnostics"]["manifest_errors"][0]
 
 
 def test_p7_n006_uses_same_predicate():

@@ -55,15 +55,22 @@ class DotnetAdapter(LanguageAdapter):
         return any(root.glob("*.csproj"))
 
     def _read_target_frameworks(self, root: Path) -> list[str]:
-        """TFMs from the project's csproj file(s) AND Directory.Build.props in
-        the project dir + repo ancestors (CP-8b.4) — MSBuild imports those
-        automatically. No MSBuild execution: dynamic values ($(Prop)) are kept
-        verbatim so the caller can classify them as unresolvable."""
-        candidates = list(root.glob("*.csproj"))
+        """All TFMs visible to the project (csproj + ancestor props), verbatim."""
+        return (self._tfms_from(list(root.glob("*.csproj")))
+                + self._tfms_from(self._props_files(root)))
+
+    def _props_files(self, root: Path) -> list[Path]:
+        out = []
         for d in self._config_search_dirs(root):
             props = d / "Directory.Build.props"
             if props.is_file():
-                candidates.append(props)
+                out.append(props)
+        return out
+
+    def _tfms_from(self, candidates: list[Path]) -> list[str]:
+        """TFMs from the given MSBuild files. No MSBuild execution: dynamic
+        values ($(Prop)) are kept verbatim so the caller can classify them as
+        unresolvable."""
         tfms: list[str] = []
         for proj in candidates:
             try:
@@ -89,17 +96,34 @@ class DotnetAdapter(LanguageAdapter):
                 tfms.append(legacy)
         return tfms
 
+    @staticmethod
+    def _tfm_kind(tfms: list[str]) -> str | None:
+        """Classify ONE source's TFM list: None (no TFMs), 'unknown' (any
+        dynamic $(...)), 'old'/'modern', or 'unknown' when a single source
+        mixes... no — a static multi-target list mixing old+modern IS old (the
+        old target needs the package)."""
+        if not tfms:
+            return None
+        if any("$(" in t for t in tfms):
+            return "unknown"    # a dynamic member poisons the whole list
+        return "old" if any(_is_old_tfm(t) for t in tfms) else "modern"
+
     def _classify_tfm(self, root: Path) -> str:
-        """'old' | 'modern' | 'unknown' (CP-8b.4). unknown NEVER silently means
-        modern: it is surfaced as a limitation + manifest_incomplete by
-        prepare(). packages.config is the classic framework format => old."""
-        tfms = self._read_target_frameworks(root)
-        resolvable = [t for t in tfms if "$(" not in t]
-        if any(_is_old_tfm(t) for t in resolvable) or (root / "packages.config").is_file():
+        """'old' | 'modern' | 'unknown' (CP-8b.4, round 3). Sources are
+        classified SEPARATELY (csproj vs ancestor Directory.Build.props) — never
+        pooled into one any(old) check. A csproj/props CONFLICT (different
+        classes) is 'unknown': MSBuild override order is not proven without
+        executing MSBuild. Any dynamic $(...) value is 'unknown'.
+        packages.config (the classic framework format) => old."""
+        if (root / "packages.config").is_file():
             return "old"
-        if resolvable:
-            return "modern"
-        return "unknown"     # no TFM anywhere, or only dynamic $(...) values
+        cs = self._tfm_kind(self._tfms_from(list(root.glob("*.csproj"))))
+        pr = self._tfm_kind(self._tfms_from(self._props_files(root)))
+        if "unknown" in (cs, pr):
+            return "unknown"
+        if cs and pr and cs != pr:
+            return "unknown"    # conflicting sources — priority not provable
+        return cs or pr or "unknown"
 
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
         self._diag = diag
