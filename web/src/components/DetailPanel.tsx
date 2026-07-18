@@ -1,17 +1,78 @@
 import { useEffect, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
 
-import { SourceUnavailable, fetchSource, sourcePathFor } from '../api'
-import type { Finding, SourceWindow } from '../types'
+import { SourceUnavailable, deleteReview, fetchSource, putReview, sourcePathFor } from '../api'
+import type { Finding, Review, SourceWindow } from '../types'
 
 type SrcState = 'idle' | 'loading' | 'ok' | 'unavailable' | 'error'
+type RevState = 'idle' | 'saving' | 'saved' | 'error'
+
+const STATUS_OPTIONS: Array<[string, string]> = [
+  ['confirmed', 'Confirmed'],
+  ['false_positive', 'False positive'],
+  ['accepted_risk', 'Accepted risk'],
+]
 
 // Note: detail, snippet and source lines are rendered as PLAIN TEXT (React
 // escapes children). dangerouslySetInnerHTML is intentionally never used here.
-export function DetailPanel({ finding, onClose }: { finding: Finding; onClose: () => void }) {
+export function DetailPanel({
+  finding,
+  review,
+  reviewsOk,
+  reviewsError,
+  onReviewChange,
+  onClose,
+}: {
+  finding: Finding
+  review: Review | undefined
+  reviewsOk: boolean
+  reviewsError: string
+  onReviewChange: (rid: string, review: Review | null) => void
+  onClose: () => void
+}) {
   const [src, setSrc] = useState<SourceWindow | null>(null)
   const [srcState, setSrcState] = useState<SrcState>('idle')
   const [srcMsg, setSrcMsg] = useState('')
+  const [status, setStatus] = useState(review?.status ?? '')
+  const [note, setNote] = useState(review?.note ?? '')
+  const [revState, setRevState] = useState<RevState>('idle')
+  const [revMsg, setRevMsg] = useState('')
+
+  useEffect(() => {
+    // re-seed the form whenever another finding (or its saved review) arrives
+    setStatus(review?.status ?? '')
+    setNote(review?.note ?? '')
+    setRevState('idle')
+    setRevMsg('')
+  }, [finding, review])
+
+  const saveReview = async () => {
+    if (!finding.review_id || !status) return
+    setRevState('saving')
+    try {
+      const saved = await putReview(finding.review_id, status, note)
+      onReviewChange(finding.review_id, saved)
+      setRevState('saved')
+    } catch (e) {
+      setRevMsg(String((e as Error)?.message ?? e))
+      setRevState('error')
+    }
+  }
+
+  const clearReview = async () => {
+    if (!finding.review_id) return
+    setRevState('saving')
+    try {
+      await deleteReview(finding.review_id)
+      onReviewChange(finding.review_id, null)
+      setStatus('')
+      setNote('')
+      setRevState('idle')
+    } catch (e) {
+      setRevMsg(String((e as Error)?.message ?? e))
+      setRevState('error')
+    }
+  }
 
   useEffect(() => {
     setSrc(null)
@@ -107,6 +168,64 @@ export function DetailPanel({ finding, onClose }: { finding: Finding; onClose: (
         <>
           <div className="detail-label">Snippet</div>
           <pre className="snippet">{finding.snippet}</pre>
+        </>
+      )}
+      {finding.review_id && (
+        <>
+          <div className="detail-label">Review</div>
+          {!reviewsOk ? (
+            <div className="src-note">
+              Reviews unavailable{reviewsError ? `: ${reviewsError}` : ''}
+            </div>
+          ) : (
+            <div className="review-box">
+              <select
+                className="review-select"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="">— set status —</option>
+                {STATUS_OPTIONS.map(([v, label]) => (
+                  <option key={v} value={v}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <textarea
+                className="review-note"
+                placeholder="Optional note (max 2000 chars)"
+                maxLength={2000}
+                rows={3}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+              <div className="review-actions">
+                <button
+                  className="btn btn-primary"
+                  onClick={saveReview}
+                  disabled={!status || revState === 'saving'}
+                >
+                  {revState === 'saving' ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  className="btn"
+                  onClick={clearReview}
+                  disabled={revState === 'saving' || (!review && !status)}
+                >
+                  Clear
+                </button>
+                {revState === 'saved' && <span className="review-msg ok">Saved.</span>}
+                {revState === 'error' && (
+                  <span className="review-msg err">Save failed: {revMsg}</span>
+                )}
+              </div>
+              {review && (
+                <div className="review-meta">
+                  saved: {review.status} · {review.updated_at}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </section>

@@ -6,10 +6,19 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from auditor.core.walk import MAX_FILE_BYTES
+from auditor.web.reviews import (
+    NOTE_MAX_CHARS,
+    VALID_STATUSES,
+    ReviewStore,
+    ReviewStoreError,
+    review_id,
+)
 
 # A report is small (the field-online run is ~110 KB; a large offline run a few
 # MB). Cap well above realistic reports but low enough that a hostile/blob file
@@ -52,6 +61,18 @@ def bad_source_path(path: str) -> str | None:
 # The built SPA is bundled next to this module (web/vite build -> here), so it
 # ships inside the wheel and resolves the same from source or installed.
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+class _AsciiJSON(JSONResponse):
+    """Canonical-safe JSON rendering for EVERY response: ensure_ascii=True
+    escapes all non-ASCII — including a lone surrogate from a malformed
+    finding title or note — as \\uXXXX, so the byte-encode can never raise
+    (starlette's default renderer uses ensure_ascii=False + utf-8 encode and
+    crashes on surrogates). Browsers decode the escapes back losslessly."""
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(content, ensure_ascii=True, allow_nan=False,
+                          separators=(",", ":")).encode("ascii")
 
 
 class ReportError(Exception):
@@ -150,14 +171,55 @@ def resolve_confined(root: Path, rel: str) -> Path | None:
     return resolved
 
 
+def _finding_review_id(root: str, f: dict[str, Any]) -> str | None:
+    """Identity of one finding for the review sidecar — or None when a field
+    has a malformed type (never stringify junk into an identity)."""
+    file, rule = f.get("file"), f.get("rule_id")
+    title, engine = f.get("title"), f.get("engine", "")
+    line = f.get("line", 0)
+    if not (isinstance(file, str) and file and isinstance(rule, str)
+            and isinstance(title, str) and isinstance(engine, str)):
+        return None
+    if isinstance(line, bool) or not isinstance(line, int):
+        return None
+    return review_id(root, file, line, rule, title, engine)
+
+
+class ReviewIn(BaseModel):
+    status: str
+    note: str = ""
+
+
 def create_app(report_path: Path, repo_root: Path | None = None,
-               max_bytes: int = DEFAULT_MAX_REPORT_BYTES) -> FastAPI:
+               max_bytes: int = DEFAULT_MAX_REPORT_BYTES,
+               reviews_path: Path | None = None) -> FastAPI:
     """Build the app around ONE already-resolved report path. The path is fixed
     here at startup and never taken from a request, so the browser cannot point
     the server at another file. `repo_root` (optional) enables the read-only
     /api/source window; without it the explorer still works and /api/source
-    returns a clear error."""
+    returns a clear error. The reviews sidecar path is likewise fixed here
+    (default: <report>.reviews.json next to the report) — the report itself
+    stays read-only forever; the sidecar is the ONLY thing the server writes."""
     report = load_report(report_path, max_bytes)   # may raise ReportError (caller handles)
+
+    # /api/report serves an ENRICHED COPY carrying review_id per finding; the
+    # original dict and report.json on disk are never touched.
+    enriched: dict[str, Any] = json.loads(json.dumps(report))
+    valid_review_ids: set[str] = set()
+    for _proj in enriched.get("projects", []):
+        if not isinstance(_proj, dict) or not isinstance(_proj.get("root"), str):
+            continue
+        if not isinstance(_proj.get("findings"), list):
+            continue
+        for _f in _proj["findings"]:
+            if isinstance(_f, dict):
+                _rid = _finding_review_id(_proj["root"], _f)
+                if _rid is not None:
+                    _f["review_id"] = _rid
+                    valid_review_ids.add(_rid)
+
+    store = ReviewStore(reviews_path if reviews_path is not None
+                        else report_path.parent / (report_path.stem + ".reviews.json"))
 
     # source-viewer state, all fixed at startup: the repository root (only if it
     # actually is a directory) and the ALLOWLIST — the exact file paths carried
@@ -185,6 +247,12 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         version="0.1.0",
         docs_url=None, redoc_url=None, openapi_url=None,   # no interactive docs surface
     )
+    # DNS-rebinding guard for the write endpoints: the server is loopback-only
+    # (CLI hardcodes 127.0.0.1) and additionally refuses any request whose Host
+    # header is not a local name. Deliberately NO CORS middleware — cross-origin
+    # writes stay blocked by the browser's same-origin policy.
+    app.add_middleware(TrustedHostMiddleware,
+                       allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
     @app.get("/api/health")
     def health() -> JSONResponse:
@@ -192,7 +260,7 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             if isinstance(report.get("summary"), dict) else {}
         # deliberately NO absolute machine paths here (or anywhere the browser
         # sees): source_available carries everything the UI needs.
-        return JSONResponse({
+        return _AsciiJSON({
             "status": "ok",
             "report_loaded": True,
             "projects": len(report.get("projects", [])),
@@ -203,12 +271,41 @@ def create_app(report_path: Path, repo_root: Path | None = None,
 
     @app.get("/api/report")
     def get_report() -> JSONResponse:
-        return JSONResponse(report)
+        return _AsciiJSON(enriched)   # the review_id-carrying copy, disk untouched
 
     def _err(status: int, msg: str) -> JSONResponse:
-        # every /api/source error goes through here: msg must never contain a
-        # machine path — only repo-relative paths and plain reasons.
-        return JSONResponse({"error": msg}, status_code=status)
+        # every API error goes through here: msg must never contain a machine
+        # path — only repo-relative paths and plain reasons.
+        return _AsciiJSON({"error": msg}, status_code=status)
+
+    @app.get("/api/reviews")
+    def get_reviews() -> JSONResponse:
+        return _AsciiJSON({"available": store.available, "error": store.error,
+                             "reviews": store.all()})
+
+    @app.put("/api/reviews/{rid}")
+    def put_review(rid: str, body: ReviewIn) -> JSONResponse:
+        if rid not in valid_review_ids:
+            return _err(404, "unknown review id for the loaded report")
+        if body.status not in VALID_STATUSES:
+            return _err(400, f"invalid status (expected one of {', '.join(VALID_STATUSES)})")
+        if len(body.note) > NOTE_MAX_CHARS:
+            return _err(400, f"note exceeds {NOTE_MAX_CHARS} characters")
+        try:
+            entry = store.put(rid, body.status, body.note)
+        except ReviewStoreError as e:
+            return _err(503, str(e))
+        return _AsciiJSON({"review_id": rid, **entry})
+
+    @app.delete("/api/reviews/{rid}")
+    def delete_review(rid: str) -> JSONResponse:
+        if rid not in valid_review_ids:
+            return _err(404, "unknown review id for the loaded report")
+        try:
+            store.delete(rid)
+        except ReviewStoreError as e:
+            return _err(503, str(e))
+        return _AsciiJSON({"review_id": rid, "status": "unreviewed"})
 
     @app.get("/api/source")
     def get_source(path: str, line: int = 1,
@@ -252,7 +349,7 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         target = min(max(line, 1), total)
         start = max(1, target - ctx)
         end = min(total, target + ctx)
-        return JSONResponse({
+        return _AsciiJSON({
             "path": path,
             "requested_line": target,
             "start_line": start,

@@ -1,3 +1,11 @@
+const REVIEW_FILTERS: Array<[string | null, string]> = [
+  [null, 'All'],
+  ['unreviewed', 'Unreviewed'],
+  ['confirmed', 'Confirmed'],
+  ['false_positive', 'False positive'],
+  ['accepted_risk', 'Accepted risk'],
+]
+
 export function Sidebar({
   projects,
   languages,
@@ -5,6 +13,8 @@ export function Sidebar({
   activeLanguage,
   onProject,
   onLanguage,
+  reviewFilter,
+  onReviewFilter,
 }: {
   projects: string[]
   languages: string[]
@@ -12,6 +22,8 @@ export function Sidebar({
   activeLanguage: string | null
   onProject: (p: string | null) => void
   onLanguage: (l: string | null) => void
+  reviewFilter: string | null
+  onReviewFilter: (f: string | null) => void
 }) {
   const item = (label: string, active: boolean, onClick: () => void) => (
     <button
@@ -40,6 +52,12 @@ export function Sidebar({
         {item('All languages', !activeLanguage, () => onLanguage(null))}
         {languages.map((l) =>
           item(l, activeLanguage === l, () => onLanguage(activeLanguage === l ? null : l)),
+        )}
+      </div>
+      <div className="side-group">
+        <div className="side-head">Review</div>
+        {REVIEW_FILTERS.map(([value, label]) =>
+          item(label, reviewFilter === value, () => onReviewFilter(value)),
         )}
       </div>
     </aside>
