@@ -81,3 +81,58 @@ export interface ReviewsResponse {
   error: string | null
   reviews: Record<string, Review>
 }
+
+// Coverage & Methodology payload (W2-B2) — evidence-only; absent data is
+// "not_recorded", never guessed.
+export interface CoverageStage {
+  key: string
+  label: string
+  status: 'complete' | 'partial' | 'failed' | 'unavailable' | 'not_recorded'
+  evidence: string
+  issues: string[]
+}
+
+export interface CoverageProject {
+  root: string
+  language: string
+  frameworks: string[]
+  file_count: number | null
+  score: number | null
+  findings_count: number | null
+}
+
+export interface ObservedRule {
+  rule_id: string
+  count: number
+  languages: string[]
+  precisions: string[]
+  severities: string[]
+}
+
+export interface Coverage {
+  provenance: {
+    tool: string | null
+    version: string | null
+    generated_at: string | null
+    target: string | null
+    engines: Record<string, string>
+  }
+  projects: CoverageProject[]
+  stages: CoverageStage[]
+  diagnostics: {
+    manifest_errors: string[]
+    manifest_incomplete: string[]
+    skipped_files: string[]
+    parse_error_files: string[]
+    rule_errors: string[]
+    rule_attempted: number | null
+    rule_failures: number | null
+    registry_attempted: number | null
+    registry_failures: number | null
+    notes: string[]
+    include_gaps: string[]
+  }
+  limitations: string[]
+  observed_rules: ObservedRule[]
+  observed_rules_disclaimer: string
+}

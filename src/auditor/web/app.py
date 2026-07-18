@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auditor.core.walk import MAX_FILE_BYTES
+from auditor.web.coverage import build_coverage
 from auditor.web.reviews import (
     NOTE_MAX_CHARS,
     VALID_STATUSES,
@@ -272,6 +273,13 @@ def create_app(report_path: Path, repo_root: Path | None = None,
     @app.get("/api/report")
     def get_report() -> JSONResponse:
         return _AsciiJSON(enriched)   # the review_id-carrying copy, disk untouched
+
+    # evidence-only coverage payload, built ONCE from the loaded report
+    coverage = build_coverage(report)
+
+    @app.get("/api/coverage")
+    def get_coverage() -> JSONResponse:
+        return _AsciiJSON(coverage)
 
     def _err(status: int, msg: str) -> JSONResponse:
         # every API error goes through here: msg must never contain a machine

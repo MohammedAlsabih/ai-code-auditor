@@ -1,4 +1,10 @@
-import type { Finding, Report, Review, ReviewsResponse, SourceWindow } from './types'
+import type { Coverage, Finding, Report, Review, ReviewsResponse, SourceWindow } from './types'
+
+export async function fetchCoverage(): Promise<Coverage> {
+  const res = await fetch('/api/coverage')
+  if (!res.ok) throw new Error(`coverage request failed (HTTP ${res.status})`)
+  return res.json()
+}
 
 export async function fetchReport(): Promise<Report> {
   const res = await fetch('/api/report')
