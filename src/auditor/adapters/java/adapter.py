@@ -168,6 +168,10 @@ class JavaAdapter(LanguageAdapter):
         coords = self._known_map_hit(imp)
         return [coords] if coords else []
 
+    def language_rules(self):
+        from auditor.adapters.java.rules import MissingTryWithResources, StringEqualsCompare
+        return [StringEqualsCompare(), MissingTryWithResources()]
+
     def grammars(self) -> dict[str, object]:
         import tree_sitter_java
         return {"java": tree_sitter_java.language()}

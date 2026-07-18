@@ -175,6 +175,11 @@ class DotnetAdapter(LanguageAdapter):
             cands.append(".".join(parts[:2]))
         return [_NUGET_ALIASES.get(c.lower(), c) for c in cands]
 
+    def language_rules(self):
+        from auditor.adapters.dotnet.rules import (AsyncVoidMethod, BlockingTaskWait,
+                                                   RawSqlInterpolation)
+        return [AsyncVoidMethod(), BlockingTaskWait(), RawSqlInterpolation()]
+
     def grammars(self) -> dict[str, object]:
         import tree_sitter_c_sharp
         return {"csharp": tree_sitter_c_sharp.language()}
