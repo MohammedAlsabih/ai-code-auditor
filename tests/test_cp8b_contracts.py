@@ -273,6 +273,80 @@ def test_p6_report_paths_are_repository_relative(tmp_path):
     assert "pyproject.toml" in json.loads(blob)["diagnostics"]["manifest_errors"][0]
 
 
+# ── Round 4 ──────────────────────────────────────────────────────────────────
+def test_r4_setup_inside_control_flow(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    cases = {
+        "try_except": "try:\n    from setuptools import setup\nexcept ImportError:\n"
+                      "    from distutils.core import setup\nsetup(install_requires=['requests'])\n",
+        "if_guard": "if True:\n    from setuptools import setup\nsetup(install_requires=['requests'])\n",
+        "assign_rhs": "from setuptools import setup\nr = setup(install_requires=['requests'])\n",
+    }
+    for name, src in cases.items():
+        root = tmp_path / name
+        _mk(root, "setup.py", src)
+        got = {d.name for d in PythonAdapter().parse_dependencies(root)}
+        assert got == {"requests"}, name          # imports inside control flow are seen
+
+
+def test_r4_dotnet_nearest_props_wins(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    repo = tmp_path / "repo"
+    _mk(repo, "Directory.Build.props",
+        "<Project><PropertyGroup><TargetFramework>net48</TargetFramework></PropertyGroup></Project>")
+    _mk(repo, "src/app/Directory.Build.props",
+        "<Project><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>")
+    _mk(repo, "src/app/App.csproj", '<Project Sdk="Microsoft.NET.Sdk"></Project>')
+    _mk(repo, "src/app/P.cs", "namespace X {}")
+    a = DotnetAdapter()
+    a.set_repo_root(repo)
+    a.parse_dependencies(repo / "src" / "app")
+    a.prepare(repo / "src" / "app", [])
+    # the NEAREST props (net8.0) applies, not the pooled root net48
+    assert a._tfm_class == "modern"
+
+
+def test_r4_dotnet_reads_ancestor_props_packagerefs(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    repo = tmp_path / "repo"
+    _mk(repo, "Directory.Build.props",
+        '<Project><ItemGroup><PackageReference Include="Serilog" Version="4.0.0"/></ItemGroup></Project>')
+    _mk(repo, "Directory.Packages.props",
+        '<Project><ItemGroup><PackageVersion Include="Dapper" Version="2.0.0"/></ItemGroup></Project>')
+    _mk(repo, "src/App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup></Project>")
+    a = DotnetAdapter()
+    a.set_repo_root(repo)
+    names = {d.name for d in a.parse_dependencies(repo / "src")}
+    assert {"Serilog", "Dapper"} <= names          # ancestor props + central packages
+
+
+def test_r4_react_literal_eslint_semantics():
+    from auditor.adapters.typescript.react_rules import HookInConditional
+    tmpl = "export function C({{f}}:{{f:boolean}}){{ if(f){{ {} }} return null; }}"
+    clean = ["api.useState(0);", "api.Hooks.useState(0);",           # nested member
+             "r.useState(0);"]                                        # lowercase alias
+    for expr in clean:
+        assert HookInConditional().check(_tsx(tmpl.format(expr))) == [], expr
+    for expr in ["Hooks.useState(0);", "React.useState(0);", "useState(0);"]:
+        assert [x.rule_id for x in HookInConditional().check(_tsx(tmpl.format(expr)))] == ["R001"], expr
+
+
+def test_r4_outside_repo_path_masked():
+    from auditor.cli import _relativize_diag
+    out = _relativize_diag(
+        {"manifest_errors": ["C:/outside/private/pyproject.toml: unreadable"]},
+        Path("C:/repo"))["manifest_errors"][0]
+    assert "outside/private" not in out and "C:/outside" not in out
+    assert out == "<outside-repository>/pyproject.toml: unreadable"
+
+
+def test_r4_h007_title_reflects_broadened_contract():
+    from auditor.core.hallucination import _TITLES
+    assert "Unverified" in _TITLES["H007"]          # no longer "cannot be mapped" only
+
+
 def test_p7_n006_uses_same_predicate():
     from auditor.adapters.typescript.next_graph import analyze
     from auditor.core.models import SourceFile

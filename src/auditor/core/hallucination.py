@@ -14,7 +14,7 @@ _TITLES = {
     "H004": "Registry unreachable — dependency unverified",
     "H005": "Brand-new package with near-zero downloads",
     "H006": "Recently published package (< fresh threshold)",
-    "H007": "Undeclared import — cannot be mapped to a registry identifier",
+    "H007": "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
     "H008": "Undeclared import not found in the public registry",
     "H009": "Package quarantined by the registry (suspected malware)",
     "H010": "Not found in public registry — private source configured or scoped (unverifiable)",

@@ -99,59 +99,33 @@ def function_name(fn_node) -> str:
     return ""
 
 
-def react_namespaces(sf: SourceFile) -> set[str]:
-    """Names that denote the React namespace for member-call hooks (CP-8b.7):
-    the default `React`, plus any alias imported FROM 'react'/'react-dom'
-    (`import * as R from 'react'` or `import R from 'react'`). Only member calls
-    on one of these count — `api.useState()` / `client.useState()` do NOT."""
-    ns = {"React"}
-    for imp in captures(sf.language, sf.tree.root_node, "(import_statement) @i").get("i", []):
-        src = imp.child_by_field_name("source")
-        if src is None or node_text(src).strip("'\"`") not in ("react", "react-dom"):
-            continue
-        clause = next((c for c in imp.named_children if c.type == "import_clause"), None)
-        if clause is None:
-            continue
-        for c in clause.named_children:
-            if c.type == "namespace_import":
-                idn = next((g for g in c.named_children if g.type == "identifier"), None)
-                if idn is not None:
-                    ns.add(node_text(idn))
-            elif c.type == "identifier":       # default import: import R from 'react'
-                ns.add(node_text(c))
-    return ns
-
-
-def is_hook_callee(callee, react_ns: set[str]) -> bool:
+def is_hook_callee(callee) -> bool:
     """THE shared hook predicate (react_rules + N006), matching
-    eslint-plugin-react-hooks 7.1.1: a bare `useX` identifier, or a member
-    `<obj>.useX` whose object is either a React namespace OR a PascalCase name
-    (ESLint treats `Hooks.useState` as a hook, `api.useState` as not)."""
+    eslint-plugin-react-hooks 7.1.1 LITERALLY: a bare `useX` identifier, or a
+    member `<Obj>.useX` whose object is a plain IDENTIFIER that is either
+    `React` or PascalCase. This rejects `api.useState` (lowercase object),
+    `r.useState` (lowercase alias — ESLint diverges here too), AND
+    `api.Hooks.useState` (object is a member_expression, not an Identifier)."""
     if not is_hook_name(node_text(callee)):
         return False
     parent = callee.parent
     if parent is not None and parent.type == "member_expression":
         obj = parent.child_by_field_name("object")
-        if obj is None:
-            return False
+        if obj is None or obj.type != "identifier":
+            return False   # nested member (api.Hooks.useState) => object not an Identifier
         name = node_text(obj)
-        # ESLint: member hook if the object is the React namespace OR its
-        # (last) segment is PascalCase (Hooks.useX, React.useX). A lowercase
-        # service object (api/client/hooks) is NOT a hook.
-        seg = name.rsplit(".", 1)[-1]
-        return name in react_ns or (seg[:1].isupper())
+        return name == "React" or name[:1].isupper()
     return True   # bare identifier callee
 
 
 def hook_calls(sf: SourceFile) -> list[tuple]:
     """(call_expression node, hook name) pairs. Bare `useX(...)` and member
-    `React.useX(...)` count; `api.useX(...)` does not (CP-8b.7). The captured
-    callee is the identifier or the member's property_identifier; walk up to the
-    enclosing call_expression."""
-    react_ns = react_namespaces(sf)
+    `React.useX(...)`/`Hooks.useX(...)` count; `api.useX(...)`,
+    `api.Hooks.useX(...)`, and lowercase-alias `r.useX(...)` do not — literal
+    ESLint 7.1.1 semantics. Walk up to the enclosing call_expression."""
     out = []
     for callee in captures(sf.language, sf.tree.root_node, _CALL_QUERY).get("callee", []):
-        if not is_hook_callee(callee, react_ns):
+        if not is_hook_callee(callee):
             continue
         name = node_text(callee)
         call = callee

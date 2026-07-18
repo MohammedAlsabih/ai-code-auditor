@@ -53,14 +53,24 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _relativize_diag(diag_dict: dict, root) -> dict:
-    """Strip the repository-root prefix from every diagnostics string so the
-    report shows repo-relative paths, not absolute machine paths (CP-8b round 3).
-    The in-memory ledgers keep their canonical absolute identity for merge."""
+    """Rewrite diagnostics paths for DISPLAY (CP-8b round 3/4): in-repo paths
+    become repo-relative; a path OUTSIDE the repository is reduced to
+    `<outside-repository>/<basename>` so no machine path leaks. The in-memory
+    ledgers keep their canonical absolute identity for merge."""
+    import re as _re
     prefix = root.resolve().as_posix().rstrip("/") + "/"
+    # an absolute machine path token: drive-letter (C:/...) or posix root (/...)
+    _abs = _re.compile(r"(?:[A-Za-z]:/|/)[^\s:'\"]*")
+
+    def _mask(m):
+        p = m.group(0)
+        if p.startswith(prefix):
+            return p[len(prefix):]                 # inside the repo => relative
+        return "<outside-repository>/" + p.rstrip("/").rsplit("/", 1)[-1]
 
     def rel(v):
         if isinstance(v, str):
-            return v.replace(prefix, "")
+            return _abs.sub(_mask, v.replace("\\", "/"))
         if isinstance(v, list):
             return [rel(x) for x in v]
         return v

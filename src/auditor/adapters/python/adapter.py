@@ -423,46 +423,63 @@ class PythonAdapter(LanguageAdapter):
             self._dynamic_manifest(path, rel, "setup() call (none resolvable)")
         return out
 
+    # module-level control-flow containers whose bodies still execute at import
+    # time — their statements are processed IN ORDER (CP-8b round 4)
+    _FLOW_STMTS = (_ast.If, _ast.While, _ast.For, _ast.With, _ast.Try)
+
     def _scan_setup_module(self, tree, rel: str, path: Path):
-        """ORDERED, MODULE-SCOPE name binding for the packaging entry point
-        (CP-8b round 3): bindings evolve statement by statement, so an
-        assignment BEFORE the import does not kill the later import, a rebind
-        AFTER the call does not retract it, and a `def setup` nested inside a
-        function never shadows the module-level symbol. Only module-level
-        FunctionDef/ClassDef/Assign rebind; calls inside function bodies are
-        not the module-level packaging entry and are ignored."""
-        fn_names: set[str] = set()
-        mod_aliases: set[str] = set()
-        imported = False
-        out: list[DeclaredDep] = []
-        found_call = False
-        for stmt in tree.body:
+        """ORDERED, MODULE-SCOPE name binding for the packaging entry point.
+        Round 4: descends into module-level control flow (try/except import
+        fallbacks, `if:` guards) — every branch's imports ADD candidate bindings
+        (conservative union); an Assign scans its RHS for the setup call BEFORE
+        discarding the target (`result = setup(...)`). A `def setup` nested in a
+        function never shadows the module symbol; calls inside function bodies
+        are not the module-level packaging entry."""
+        state = {"fn": set(), "mods": set(), "imported": False,
+                 "out": [], "found": False}
+        self._scan_setup_stmts(tree.body, state, rel, path)
+        return state["out"], state["found"], state["imported"]
+
+    def _scan_setup_stmts(self, stmts, state: dict, rel: str, path: Path) -> None:
+        for stmt in stmts:
             if isinstance(stmt, _ast.Import):
                 for a in stmt.names:
                     if a.name.split(".")[0] in ("setuptools", "distutils"):
-                        imported = True
-                        mod_aliases.add(a.asname or a.name.split(".")[0])
+                        state["imported"] = True
+                        state["mods"].add(a.asname or a.name.split(".")[0])
             elif isinstance(stmt, _ast.ImportFrom):
                 if (stmt.module or "").split(".")[0] in ("setuptools", "distutils"):
-                    imported = True
+                    state["imported"] = True
                     for a in stmt.names:
                         if a.name == "setup":
-                            fn_names.add(a.asname or "setup")
+                            state["fn"].add(a.asname or "setup")
             elif isinstance(stmt, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
-                fn_names.discard(stmt.name)      # module-level rebinding only —
-                mod_aliases.discard(stmt.name)   # the BODY is a nested scope
-            elif isinstance(stmt, _ast.Assign):
-                for tgt in stmt.targets:
+                state["fn"].discard(stmt.name)     # module-level rebinding only —
+                state["mods"].discard(stmt.name)   # the BODY is a nested scope
+            elif isinstance(stmt, (_ast.Assign, _ast.AnnAssign)):
+                # RHS may BE the packaging call (`result = setup(...)`) — scan it
+                # BEFORE discarding the assigned name
+                if stmt.value is not None:
+                    self._scan_calls(stmt.value, state, rel, path)
+                targets = stmt.targets if isinstance(stmt, _ast.Assign) else [stmt.target]
+                for tgt in targets:
                     if isinstance(tgt, _ast.Name):
-                        fn_names.discard(tgt.id)
-                        mod_aliases.discard(tgt.id)
+                        state["fn"].discard(tgt.id)
+                        state["mods"].discard(tgt.id)
+            elif isinstance(stmt, self._FLOW_STMTS):
+                for field in ("body", "orelse", "finalbody"):
+                    self._scan_setup_stmts(getattr(stmt, field, []) or [], state, rel, path)
+                for handler in getattr(stmt, "handlers", []) or []:
+                    self._scan_setup_stmts(handler.body, state, rel, path)
             else:
-                for node in _ast.walk(stmt):
-                    if isinstance(node, _ast.Call) and \
-                            self._is_setup_call(node, fn_names, mod_aliases):
-                        found_call = True
-                        out += self._setup_call_deps(node, rel, path)
-        return out, found_call, imported
+                self._scan_calls(stmt, state, rel, path)
+
+    def _scan_calls(self, node, state: dict, rel: str, path: Path) -> None:
+        for sub in _ast.walk(node):
+            if isinstance(sub, _ast.Call) and \
+                    self._is_setup_call(sub, state["fn"], state["mods"]):
+                state["found"] = True
+                state["out"] += self._setup_call_deps(sub, rel, path)
 
     @staticmethod
     def _is_setup_call(call, fn_names: set, mod_aliases: set) -> bool:

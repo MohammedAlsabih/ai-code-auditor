@@ -1,7 +1,7 @@
 {
   "tool": "ai-code-auditor",
   "version": "0.1.0",
-  "generated_at": "2026-07-18T12:18:38.633795+00:00",
+  "generated_at": "2026-07-18T12:35:56.540265+00:00",
   "target": "tests\\fixtures\\monorepo",
   "engines": {
     "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",
@@ -41,7 +41,7 @@
         {
           "rule_id": "H007",
           "severity": "yellow",
-          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "title": "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
           "file": "app.py",
           "line": 4,
           "snippet": "yaml",
@@ -53,7 +53,7 @@
         {
           "rule_id": "H007",
           "severity": "yellow",
-          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "title": "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
           "file": "app.py",
           "line": 5,
           "snippet": "superjsonify",
@@ -262,7 +262,7 @@
         {
           "rule_id": "H007",
           "severity": "yellow",
-          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "title": "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
           "file": "lib/db.ts",
           "line": 3,
           "snippet": "pg",
@@ -274,7 +274,7 @@
         {
           "rule_id": "H007",
           "severity": "yellow",
-          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "title": "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
           "file": "lib/db.ts",
           "line": 4,
           "snippet": "axios-retry-ai",

@@ -59,13 +59,21 @@ class DotnetAdapter(LanguageAdapter):
         return (self._tfms_from(list(root.glob("*.csproj")))
                 + self._tfms_from(self._props_files(root)))
 
-    def _props_files(self, root: Path) -> list[Path]:
-        out = []
+    def _nearest_ancestor_file(self, root: Path, name: str) -> tuple[Path | None, bool]:
+        """(nearest ancestor file with this name, does a FURTHER one exist).
+        MSBuild auto-imports only the NEAREST Directory.Build.props walking up —
+        outer ones apply only via a manual <Import>, which we do not execute
+        (CP-8b round 4: never pool all ancestors as if applied together)."""
+        found: list[Path] = []
         for d in self._config_search_dirs(root):
-            props = d / "Directory.Build.props"
-            if props.is_file():
-                out.append(props)
-        return out
+            f = d / name
+            if f.is_file():
+                found.append(f)
+        return (found[0] if found else None), len(found) > 1
+
+    def _props_files(self, root: Path) -> list[Path]:
+        nearest, _ = self._nearest_ancestor_file(root, "Directory.Build.props")
+        return [nearest] if nearest else []
 
     def _tfms_from(self, candidates: list[Path]) -> list[str]:
         """TFMs from the given MSBuild files. No MSBuild execution: dynamic
@@ -109,12 +117,11 @@ class DotnetAdapter(LanguageAdapter):
         return "old" if any(_is_old_tfm(t) for t in tfms) else "modern"
 
     def _classify_tfm(self, root: Path) -> str:
-        """'old' | 'modern' | 'unknown' (CP-8b.4, round 3). Sources are
-        classified SEPARATELY (csproj vs ancestor Directory.Build.props) — never
-        pooled into one any(old) check. A csproj/props CONFLICT (different
-        classes) is 'unknown': MSBuild override order is not proven without
-        executing MSBuild. Any dynamic $(...) value is 'unknown'.
-        packages.config (the classic framework format) => old."""
+        """'old' | 'modern' | 'unknown' (CP-8b round 3/4). Sources classified
+        SEPARATELY — the csproj vs the NEAREST ancestor Directory.Build.props —
+        never pooled into one any(old). A conflict between them, or any dynamic
+        $(...), is 'unknown': MSBuild override order is not assumed without
+        executing MSBuild. packages.config (the classic framework format) => old."""
         if (root / "packages.config").is_file():
             return "old"
         cs = self._tfm_kind(self._tfms_from(list(root.glob("*.csproj"))))
@@ -128,8 +135,16 @@ class DotnetAdapter(LanguageAdapter):
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
         self._diag = diag
         self._scan_root = root.resolve()   # central symlink guard for manifests
+        manifests = sorted(root.glob("*.csproj")) + [root / "Directory.Packages.props"]
+        # MSBuild auto-imports the NEAREST ancestor Directory.Build.props AND
+        # Directory.Packages.props (central package management) — read their
+        # PackageReference/PackageVersion too (CP-8b round 4)
+        for name in ("Directory.Build.props", "Directory.Packages.props"):
+            anc, _ = self._nearest_ancestor_file(root, name)
+            if anc is not None and anc not in manifests:
+                manifests.append(anc)
         out: list[DeclaredDep] = []
-        for proj in sorted(root.glob("*.csproj")) + [root / "Directory.Packages.props"]:
+        for proj in manifests:
             if proj.is_file():
                 out += self._parse_msbuild(proj)
         pkgcfg = root / "packages.config"
