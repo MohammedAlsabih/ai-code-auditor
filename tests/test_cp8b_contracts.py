@@ -356,13 +356,18 @@ def test_r5_setup_branch_merge(tmp_path):
     from auditor.adapters.python.adapter import PythonAdapter
     # (src, declared, incomplete)
     cases = {
+        # round 6: `while False:` is dead code — the import never happens, so
+        # fake-never is NOT declared (a possible/impossible dep never enters the
+        # confirmed list)
         "while_false": ("while False:\n    from setuptools import setup\n"
-                        "setup(install_requires=['fake-never'])\n", {"fake-never"}, True),
+                        "setup(install_requires=['fake-never'])\n", set(), False),
         "lambda": ("from setuptools import setup\n"
                    "f = lambda: setup(install_requires=['fake-lambda'])\n", set(), True),
+        # round 6: setup unbound on the except path => possible-only => NOT a
+        # confirmed dependency, only manifest_incomplete
         "except_setup_none": ("try:\n    from setuptools import setup\nexcept ImportError:\n"
                               "    setup = None\nsetup(install_requires=['requests'])\n",
-                              {"requests"}, True),
+                              set(), True),
         # a legitimate try/except import FALLBACK stays DEFINITE (not incomplete)
         "import_fallback": ("try:\n    from setuptools import setup\nexcept ImportError:\n"
                             "    from distutils.core import setup\n"
@@ -408,6 +413,94 @@ def test_r5_relativize_is_field_aware():
     assert out["manifest_errors"][0] == "app/pyproject.toml: bad"      # space-safe, repo-relative
     assert out["manifest_errors"][1] == "<outside-repository>/pyproject.toml: unreadable"
     assert out["manifest_files"] == ["app/pyproject.toml"]
+
+
+# ── Round 6 ──────────────────────────────────────────────────────────────────
+def test_r6_setup_prebound_then_unbound(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    # setup bound BEFORE the branch, then unbound => NOT a confirmed dependency
+    # (the merge must not re-OR the parent's pre-branch binding)
+    cases = {
+        "both_branches_none": "from setuptools import setup\nif c:\n    setup = None\n"
+                              "else:\n    setup = None\nsetup(install_requires=['requests'])\n",
+        "one_branch_none": "from setuptools import setup\nif c:\n    setup = None\n"
+                           "setup(install_requires=['requests'])\n",
+        "except_none": "from setuptools import setup\ntry:\n    pass\nexcept Exception:\n"
+                       "    setup = None\nsetup(install_requires=['requests'])\n",
+    }
+    for name, src in cases.items():
+        root = tmp_path / name
+        _mk(root, "setup.py", src)
+        diag = Diagnostics()
+        got = {d.name for d in PythonAdapter().parse_dependencies(root, diag=diag)}
+        assert got == set(), name                    # requests is NOT confirmed
+        assert diag.manifest_incomplete, name         # but the manifest is flagged
+
+
+def test_r6_const_condition_eval(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    # if True: import => DEFINITE; while False: import => DEAD
+    _mk(tmp_path / "t", "setup.py",
+        "if True:\n    from setuptools import setup\nsetup(install_requires=['real'])\n")
+    dt = Diagnostics()
+    assert {d.name for d in PythonAdapter().parse_dependencies(tmp_path / "t", diag=dt)} == {"real"}
+    assert not dt.manifest_incomplete                 # constant-true guard => definite
+
+
+def test_r6_possible_only_does_not_suppress_import_finding(tmp_path):
+    from auditor.adapters.python.adapter import PythonAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    # a conditional (possible-only) setup dep must not silence a real import
+    _mk(tmp_path, "setup.py",
+        "from setuptools import setup\nif c:\n    setup = None\nsetup(install_requires=['realpkg'])\n")
+    _mk(tmp_path, "app.py", "import realpkg\n")
+    a = PythonAdapter()
+    files = collect_source_files(tmp_path, a)
+    for f in files:
+        parse_source(f)
+    declared = a.parse_dependencies(tmp_path)
+    a.prepare(tmp_path, files)
+    assert "realpkg" not in {d.name for d in declared}   # not a confirmed declaration
+
+    class Reg:
+        ecosystem = "pypi"
+        def lookup(self, n):
+            return PackageInfo(exists=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, tmp_path, files, declared, Reg())
+    assert any(f.rule_id == "H002" and "realpkg" in f.detail for f in fs)  # finding survives
+
+
+def test_r6_dotnet_conditions_and_remove(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    head = ('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+            "</TargetFramework></PropertyGroup>")
+    # element Condition=false and ItemGroup Condition=false => excluded
+    for body in ('<ItemGroup><PackageReference Include="X" Condition="false"/></ItemGroup>',
+                 '<ItemGroup Condition="false"><PackageReference Include="X"/></ItemGroup>'):
+        root = tmp_path / str(abs(hash(body)))
+        _mk(root, "App.csproj", head + body + "</Project>")
+        assert {d.name for d in DotnetAdapter().parse_dependencies(root)} == set()
+    # ancestor props adds X, csproj Removes X (cross-file, evaluation order)
+    repo = tmp_path / "repo"
+    _mk(repo, "Directory.Build.props",
+        '<Project><ItemGroup><PackageReference Include="X" Version="1.0"/></ItemGroup></Project>')
+    _mk(repo, "src/App.csproj",
+        head + '<ItemGroup><PackageReference Remove="X"/></ItemGroup></Project>')
+    a = DotnetAdapter()
+    a.set_repo_root(repo)
+    assert {d.name for d in a.parse_dependencies(repo / "src")} == set()
+
+
+def test_r6_dotnet_dynamic_condition_is_incomplete(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup><ItemGroup>"
+        "<PackageReference Include=\"X\" Condition=\"'$(Cfg)'=='Debug'\"/></ItemGroup></Project>")
+    diag = Diagnostics()
+    names = {d.name for d in DotnetAdapter().parse_dependencies(tmp_path, diag=diag)}
+    assert names == {"X"}                             # kept (conservative)...
+    assert diag.manifest_incomplete                    # ...but its presence is unproven
 
 
 def test_p7_n006_uses_same_predicate():

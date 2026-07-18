@@ -88,6 +88,20 @@ def _numeric_neighbours(lit: str) -> set[str]:
     return out
 
 
+def _const_bool(node) -> bool | None:
+    """Statically resolve a literal `if True:` / `while False:` guard, else None
+    (unknown). Handles a bare constant and a single `not` of one (CP-8b round 6)."""
+    if isinstance(node, _ast.Constant):
+        try:
+            return bool(node.value)
+        except Exception:
+            return None
+    if isinstance(node, _ast.UnaryOp) and isinstance(node.op, _ast.Not):
+        inner = _const_bool(node.operand)
+        return None if inner is None else (not inner)
+    return None
+
+
 class _SetupCtx:
     """Branch-aware binding state for the setup.py scanner (CP-8b round 5).
     `def_*` = bindings that hold on EVERY path so far; `poss_*` = bindings that
@@ -123,20 +137,23 @@ class _SetupCtx:
         c.imported = self.imported
         return c
 
-    def merge(self, branches: list, all_paths: bool) -> None:
-        for b in branches:
+    def merge(self, clones: list) -> None:
+        """Fold path clones into this (parent) context. `clones` already includes
+        a no-op clone (= parent unchanged) for a non-exhaustive construct, so the
+        parent's pre-branch state participates AS a path — it is NOT OR-ed back in
+        afterwards (that re-bound names a branch had unbound: CP-8b round 6).
+        definite = INTERSECTION of clone def_*; possible = UNION of clone poss_*."""
+        if not clones:
+            return
+        for b in clones:
             self.out += b.out
             self.found = self.found or b.found
             self.ambiguous = self.ambiguous or b.ambiguous
             self.imported = self.imported or b.imported
-            self.poss_fn |= b.poss_fn
-            self.poss_mods |= b.poss_mods
-        if all_paths and branches:
-            # definite = what holds on EVERY branch of an exhaustive construct
-            self.def_fn = set.intersection(*(b.def_fn for b in branches)) | self.def_fn
-            self.def_mods = set.intersection(*(b.def_mods for b in branches)) | self.def_mods
-        # a non-exhaustive branch (while/for/if-no-else, try) never promotes a
-        # binding to definite — the parent's def_* is left as it was
+        self.def_fn = set.intersection(*(b.def_fn for b in clones))
+        self.def_mods = set.intersection(*(b.def_mods for b in clones))
+        self.poss_fn = set().union(*(b.poss_fn for b in clones))
+        self.poss_mods = set().union(*(b.poss_mods for b in clones))
 
 
 class PythonAdapter(LanguageAdapter):
@@ -537,11 +554,22 @@ class PythonAdapter(LanguageAdapter):
                 self._scan_setup_stmts(stmt.finalbody, ctx, rel, path)
             return
         if isinstance(stmt, _ast.If):
+            cond = _const_bool(stmt.test)             # evaluate `if True:` / `if False:`
+            if cond is True:
+                self._merge_branch_bodies([stmt.body], ctx, rel, path, exhaustive=True)
+                return
+            if cond is False:
+                self._merge_branch_bodies([stmt.orelse or []], ctx, rel, path, exhaustive=True)
+                return
             bodies = [stmt.body] + ([stmt.orelse] if stmt.orelse else [])
-            exhaustive = bool(stmt.orelse)           # no `else` => body may be skipped
+            exhaustive = bool(stmt.orelse)            # no `else` => body may be skipped
         elif isinstance(stmt, _ast.With):
-            bodies, exhaustive = [stmt.body], True    # a with-body always runs
-        else:                                         # For / While: body may run 0 times
+            bodies, exhaustive = [stmt.body], True     # a with-body always runs
+        elif isinstance(stmt, _ast.While):
+            if _const_bool(stmt.test) is False:
+                return                                 # `while False:` body is DEAD code
+            bodies, exhaustive = [stmt.body], False    # may run 0 times otherwise
+        else:                                          # For: body may run 0 times
             bodies = [stmt.body] + ([stmt.orelse] if getattr(stmt, "orelse", None) else [])
             exhaustive = False
         self._merge_branch_bodies(bodies, ctx, rel, path, exhaustive)
@@ -552,7 +580,9 @@ class PythonAdapter(LanguageAdapter):
             sub = ctx.clone()
             self._scan_setup_stmts(body, sub, rel, path)
             clones.append(sub)
-        ctx.merge(clones, all_paths=exhaustive)
+        if not exhaustive:
+            clones.append(ctx.clone())                 # no-op path: the branch may not run
+        ctx.merge(clones)
 
     def _scan_calls(self, node, ctx: "_SetupCtx", rel: str, path: Path) -> None:
         # walk the expression, treating any deferred scope (lambda/def/genexpr)
@@ -563,13 +593,17 @@ class PythonAdapter(LanguageAdapter):
             if isinstance(cur, self._DEFERRED):
                 continue
             if isinstance(cur, _ast.Call):
-                by_def = self._is_setup_call(cur, ctx.def_fn, ctx.def_mods)
-                by_poss = self._is_setup_call(cur, ctx.poss_fn, ctx.poss_mods)
-                if by_def or by_poss:
+                if self._is_setup_call(cur, ctx.def_fn, ctx.def_mods):
                     ctx.found = True
                     ctx.out += self._setup_call_deps(cur, rel, path)
-                    if by_poss and not by_def:
-                        ctx.ambiguous = True     # resolvable only on some branch
+                elif self._is_setup_call(cur, ctx.poss_fn, ctx.poss_mods):
+                    # POSSIBLE-only (conditional binding): setup is bound on some
+                    # path but not all. Do NOT add its deps to the CONFIRMED
+                    # declarations (an unreachable/conditional dep must never
+                    # silence H002/H007/H008) — just mark the manifest incomplete
+                    # (CP-8b round 6).
+                    ctx.found = True
+                    ctx.ambiguous = True
             stack.extend(_ast.iter_child_nodes(cur))
 
     @staticmethod

@@ -143,41 +143,66 @@ class DotnetAdapter(LanguageAdapter):
             anc, _ = self._nearest_ancestor_file(root, name)
             if anc is not None and anc not in manifests:
                 manifests.append(anc)
-        out: list[DeclaredDep] = []
-        for proj in manifests:
+        # MSBuild EVALUATION ORDER: Directory.*.props imports are applied BEFORE
+        # the csproj body, so an ancestor props' Include can be cancelled by a
+        # csproj Remove — fold Include/Remove events across files in that order
+        # (CP-8b round 6). props first, then csproj(s).
+        props = [m for m in manifests if m.name.endswith(".props")]
+        csprojs = [m for m in manifests if m.name.endswith(".csproj")]
+        declared: dict[str, DeclaredDep] = {}
+        for proj in props + csprojs:
             if proj.is_file():
-                out += self._parse_msbuild(proj)
+                self._apply_msbuild_events(proj, declared)
         pkgcfg = root / "packages.config"
         if pkgcfg.is_file():
-            out += self._parse_packages_config(pkgcfg)
-        seen: set[str] = set()
-        deduped = []
-        for d in out:
-            if d.name.lower() not in seen:   # NuGet ids are case-insensitive
-                seen.add(d.name.lower())
-                deduped.append(d)
-        return deduped
+            for d in self._parse_packages_config(pkgcfg):
+                declared.setdefault(d.name.lower(), d)
+        return list(declared.values())
 
-    def _parse_msbuild(self, path: Path) -> list[DeclaredDep]:
+    @staticmethod
+    def _const_false_condition(el) -> bool:
+        c = (el.get("Condition") or "").strip().lower()
+        # a literal always-false condition (Condition="false", "'a'!='a'")
+        return c in ("false", "'false'") or c in ("'a'!='a'", "'x'!='x'")
+
+    def _apply_msbuild_events(self, path: Path, declared: dict) -> None:
+        """Fold this file's PackageReference Include/Remove into `declared`
+        (shared across files, in MSBuild evaluation order). Only Include
+        DECLARES; Remove cancels an earlier Include; Update alone declares
+        nothing. Statically-false conditions (element OR enclosing ItemGroup)
+        are skipped; a non-constant condition marks the manifest incomplete."""
         try:
             root = ET.fromstring(self._read(path))   # defused + 2MB-capped
         except (ET.ParseError, DefusedXmlException) as e:
             self._manifest_error(path, e)
-            return []
-        # CP-8b round 5: only a PackageReference Include DECLARES a used package.
-        # PackageVersion is a central-version CATALOG (Directory.Packages.props)
-        # — an entry alone does not mean the project uses it. PackageReference
-        # Update="X" modifies an existing reference (version pin) and does not
-        # declare X on its own.
-        out = []
-        for el in root.iter():
-            if el.tag.rsplit("}", 1)[-1] == "PackageReference":
-                name = el.get("Include")
-                if name:
-                    out.append(DeclaredDep(name=name, ecosystem="nuget",
-                                           source_file=path.name, raw=name,
-                                           skip_registry="$(" in name))
-        return out
+            return
+        incomplete = False
+        for group in root.iter():
+            if group.tag.rsplit("}", 1)[-1] != "ItemGroup":
+                continue
+            if self._const_false_condition(group):
+                continue                              # whole group disabled
+            group_dynamic = bool((group.get("Condition") or "").strip())
+            for el in group:
+                if el.tag.rsplit("}", 1)[-1] != "PackageReference":
+                    continue
+                if self._const_false_condition(el):
+                    continue                          # this reference disabled
+                inc, rem = el.get("Include"), el.get("Remove")
+                el_dynamic = bool((el.get("Condition") or "").strip())
+                if rem:
+                    declared.pop(rem.lower(), None)   # Remove cancels an earlier Include
+                elif inc:
+                    declared[inc.lower()] = DeclaredDep(
+                        name=inc, ecosystem="nuget", source_file=path.name, raw=inc,
+                        skip_registry="$(" in inc)
+                    if group_dynamic or el_dynamic:
+                        incomplete = True             # kept, but presence unproven
+                # Update="X" alone modifies an existing reference — declares nothing
+        if incomplete:
+            self._mark_incomplete(path)
+            self._note(f"{path.name}: PackageReference under an unresolved Condition — "
+                       "presence not statically provable")
 
     def _parse_packages_config(self, path: Path) -> list[DeclaredDep]:
         try:
