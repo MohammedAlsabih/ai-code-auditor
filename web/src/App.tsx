@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Loader2, TriangleAlert } from 'lucide-react'
 
 import { aggregate, fetchReport, fetchReviews } from './api'
+import { CoveragePanel } from './components/CoveragePanel'
 import { DetailPanel } from './components/DetailPanel'
 import { FindingsTable } from './components/FindingsTable'
 import { Sidebar } from './components/Sidebar'
@@ -19,6 +20,7 @@ export default function App() {
   const [reviewsOk, setReviewsOk] = useState(true)
   const [reviewsError, setReviewsError] = useState('')
   const [reviewFilter, setReviewFilter] = useState<string | null>(null)
+  const [tab, setTab] = useState<'findings' | 'coverage'>('findings')
 
   useEffect(() => {
     fetchReport().then(setReport).catch((e) => setError(String(e?.message ?? e)))
@@ -94,36 +96,58 @@ export default function App() {
         activeSeverity={severity}
         onSeverity={setSeverity}
       />
-      <div className="body">
-        <Sidebar
-          projects={projects}
-          languages={languages}
-          activeProject={project}
-          activeLanguage={language}
-          onProject={setProject}
-          onLanguage={setLanguage}
-          reviewFilter={reviewFilter}
-          onReviewFilter={setReviewFilter}
-        />
-        <main className="main">
-          <FindingsTable
-            rows={rows}
-            reviews={reviews}
-            selected={selected}
-            onSelect={setSelected}
+      <nav className="tabs">
+        <button
+          className={`tab ${tab === 'findings' ? 'active' : ''}`}
+          onClick={() => setTab('findings')}
+        >
+          Findings
+        </button>
+        <button
+          className={`tab ${tab === 'coverage' ? 'active' : ''}`}
+          onClick={() => setTab('coverage')}
+        >
+          Coverage
+        </button>
+      </nav>
+      {tab === 'coverage' ? (
+        <div className="body">
+          <main className="main">
+            <CoveragePanel />
+          </main>
+        </div>
+      ) : (
+        <div className="body">
+          <Sidebar
+            projects={projects}
+            languages={languages}
+            activeProject={project}
+            activeLanguage={language}
+            onProject={setProject}
+            onLanguage={setLanguage}
+            reviewFilter={reviewFilter}
+            onReviewFilter={setReviewFilter}
           />
-        </main>
-        {selected && (
-          <DetailPanel
-            finding={selected}
-            review={selected.review_id ? reviews[selected.review_id] : undefined}
-            reviewsOk={reviewsOk}
-            reviewsError={reviewsError}
-            onReviewChange={onReviewChange}
-            onClose={() => setSelected(null)}
-          />
-        )}
-      </div>
+          <main className="main">
+            <FindingsTable
+              rows={rows}
+              reviews={reviews}
+              selected={selected}
+              onSelect={setSelected}
+            />
+          </main>
+          {selected && (
+            <DetailPanel
+              finding={selected}
+              review={selected.review_id ? reviews[selected.review_id] : undefined}
+              reviewsOk={reviewsOk}
+              reviewsError={reviewsError}
+              onReviewChange={onReviewChange}
+              onClose={() => setSelected(null)}
+            />
+          )}
+        </div>
+      )}
     </div>
   )
 }
