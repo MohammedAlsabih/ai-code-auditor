@@ -1,0 +1,1303 @@
+{
+  "tool": "ai-code-auditor",
+  "version": "0.1.0",
+  "generated_at": "2026-07-18T00:17:44.737161+00:00",
+  "target": "https://github.com/open-telemetry/opentelemetry-demo",
+  "engines": {
+    "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",
+    "registry": "online (pypi/npm/maven/nuget, cached)",
+    "complexity": "lizard",
+    "semgrep": "not available (builtin rules only)"
+  },
+  "summary": {
+    "overall_score": 66,
+    "score_kind": "code_health (higher = safer; experimental indicator)",
+    "lowest_language": {
+      "language": "java",
+      "score": 0
+    },
+    "counts": {
+      "red": 2,
+      "yellow": 100,
+      "blue": 63
+    },
+    "analysis_confidence": 90,
+    "verdict": "block"
+  },
+  "scoring_formula": "code_health per language = max(0, 100 - 15*red - 5*yellow) — HIGHER is safer (this is a health/safety score, deliberately NOT named 'risk'); blue findings are informational and never affect health; overall = file-count-weighted average, ALWAYS reported alongside lowest language and red count. analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage * manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), manifest_coverage = 1 - unique_error_files/unique_manifest_files, registry_coverage = 0 offline else 1 - failures/attempted, rule_health = 1 - rule_failures/rule_attempted (uncapped), parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), semgrep_factor = 1.0 success / 0.97 partial / 0.95 otherwise. verdict: block if red>0 or confidence<40 or ALL rule invocations failed; review if yellow>0 or confidence<70 or any manifest/rule/parse failure; else pass — any rule failure forbids pass.",
+  "projects": [
+    {
+      "language": "python",
+      "root": ".",
+      "frameworks": [],
+      "file_count": 2,
+      "score": 90,
+      "counts": {
+        "red": 0,
+        "yellow": 2,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "P006",
+          "severity": "yellow",
+          "title": "Cyclomatic complexity above 10",
+          "file": "internal/tools/sanitycheck.py",
+          "line": 15,
+          "snippet": "sanitycheck",
+          "detail": "sanitycheck has cyclomatic complexity 32 (> 10).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "src/shared/tools.py",
+          "line": 9,
+          "snippet": "httpx",
+          "detail": "httpx: imported but not declared in the manifest (exists in registry as 'httpx').",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        }
+      ]
+    },
+    {
+      "language": "typescript",
+      "root": ".",
+      "frameworks": [],
+      "file_count": 6,
+      "score": 65,
+      "counts": {
+        "red": 0,
+        "yellow": 7,
+        "blue": 6
+      },
+      "findings": [
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "src/flagd-ui/assets/js/app.js",
+          "line": 5,
+          "snippet": "phoenix_html",
+          "detail": "phoenix_html: imported but not declared in the manifest (exists in registry as 'phoenix_html').",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "src/flagd-ui/assets/js/app.js",
+          "line": 7,
+          "snippet": "phoenix",
+          "detail": "phoenix: imported but not declared in the manifest (exists in registry as 'phoenix').",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "src/flagd-ui/assets/js/app.js",
+          "line": 8,
+          "snippet": "phoenix_live_view",
+          "detail": "phoenix_live_view: imported but not declared in the manifest (exists in registry as 'phoenix_live_view').",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P006",
+          "severity": "yellow",
+          "title": "Cyclomatic complexity above 10",
+          "file": "src/flagd-ui/assets/vendor/daisyui.js",
+          "line": 86,
+          "snippet": "(anonymous)",
+          "detail": "(anonymous) has cyclomatic complexity 11 (> 10).",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P006",
+          "severity": "yellow",
+          "title": "Cyclomatic complexity above 10",
+          "file": "src/flagd-ui/assets/vendor/daisyui.js",
+          "line": 221,
+          "snippet": "getPrefixedKey",
+          "detail": "getPrefixedKey has cyclomatic complexity 22 (> 10).",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "src/flagd-ui/assets/vendor/daisyui.js",
+          "line": 467,
+          "snippet": "var object_default18 = { \".input\": { cursor: \"text\", border: \"var(--border) solid #0000\", position: \"relative\", display:",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "src/flagd-ui/assets/vendor/daisyui.js",
+          "line": 485,
+          "snippet": "var object_default20 = { \".avatar-group\": { display: \"flex\", overflow: \"hidden\", \":where(.avatar)\": { overflow: \"hidden\"",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "src/flagd-ui/assets/vendor/daisyui.js",
+          "line": 521,
+          "snippet": "var object_default24 = { \".label\": { display: \"inline-flex\", \"align-items\": \"center\", gap: \"calc(0.25rem * 1.5)\", \"white",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "…",
+          "severity": "blue",
+          "title": "(trimmed for the example — 5 more in a real run)",
+          "file": "",
+          "line": 0,
+          "snippet": "",
+          "detail": "",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "dotnet",
+      "root": "src/accounting",
+      "frameworks": [],
+      "file_count": 5,
+      "score": 70,
+      "counts": {
+        "red": 0,
+        "yellow": 6,
+        "blue": 1
+      },
+      "findings": [
+        {
+          "rule_id": "H004",
+          "severity": "blue",
+          "title": "Registry unreachable — dependency unverified",
+          "file": "Accounting.csproj",
+          "line": 0,
+          "snippet": "EFCore.NamingConventions",
+          "detail": "EFCore.NamingConventions: lookup crashed: KeyError",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Consumer.cs",
+          "line": 5,
+          "snippet": "Microsoft.Extensions.Hosting",
+          "detail": "Microsoft.Extensions.Hosting: imported but not declared in the manifest (exists in registry as 'Microsoft.Extensions.Hosting'). A declared-but-unmatched distribution (EFCore.NamingConventions, Google.Protobuf, Grpc.Tools, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Consumer.cs",
+          "line": 7,
+          "snippet": "Npgsql",
+          "detail": "Npgsql: imported but not declared in the manifest (exists in registry as 'Npgsql'). A declared-but-unmatched distribution (EFCore.NamingConventions, Google.Protobuf, Grpc.Tools, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "Consumer.cs",
+          "line": 8,
+          "snippet": "Oteldemo",
+          "detail": "Oteldemo: imported but not declared, and the conventional name (Oteldemo) is absent from the registry. A declared-but-unmatched distribution (EFCore.NamingConventions, Google.Protobuf, Grpc.Tools, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Consumer.cs",
+          "line": 9,
+          "snippet": "Microsoft.EntityFrameworkCore",
+          "detail": "Microsoft.EntityFrameworkCore: imported but not declared in the manifest (exists in registry as 'Microsoft.EntityFrameworkCore'). A declared-but-unmatched distribution (EFCore.NamingConventions, Google.Protobuf, Grpc.Tools, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "P001",
+          "severity": "yellow",
+          "title": "Empty or exception-swallowing catch/except block",
+          "file": "Consumer.cs",
+          "line": 73,
+          "snippet": "catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)",
+          "detail": "Exception is silently swallowed — failures become invisible.",
+          "language": "csharp",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 5,
+          "snippet": "Microsoft.Extensions.DependencyInjection",
+          "detail": "Microsoft.Extensions.DependencyInjection: imported but not declared in the manifest (exists in registry as 'Microsoft.Extensions.DependencyInjection'). A declared-but-unmatched distribution (EFCore.NamingConventions, Google.Protobuf, Grpc.Tools, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        }
+      ]
+    },
+    {
+      "language": "java",
+      "root": "src/ad",
+      "frameworks": [],
+      "file_count": 4,
+      "score": 0,
+      "counts": {
+        "red": 0,
+        "yellow": 29,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 9,
+          "snippet": "com.google.common.collect.Iterables",
+          "detail": "com.google.common.collect: imported but not declared in the manifest (exists in registry as 'com.google.guava:guava'). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 10,
+          "snippet": "io.grpc",
+          "detail": "io.grpc: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 11,
+          "snippet": "io.grpc.health.v1.HealthCheckResponse.ServingStatus",
+          "detail": "io.grpc.health.v1: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 12,
+          "snippet": "io.grpc.protobuf.services",
+          "detail": "io.grpc.protobuf.services: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 13,
+          "snippet": "io.grpc.stub.StreamObserver",
+          "detail": "io.grpc.stub: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 14,
+          "snippet": "io.opentelemetry.api.GlobalOpenTelemetry",
+          "detail": "io.opentelemetry.api: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 15,
+          "snippet": "io.opentelemetry.api.OpenTelemetry",
+          "detail": "io.opentelemetry.api: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/main/java/oteldemo/AdService.java",
+          "line": 16,
+          "snippet": "io.opentelemetry.api.baggage.Baggage",
+          "detail": "io.opentelemetry.api.baggage: imported but not declared; no reliable mapping to a maven identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (com.fasterxml.jackson.core:jackson-core, com.google.api.grpc:proto-google-common-protos) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "…",
+          "severity": "blue",
+          "title": "(trimmed for the example — 21 more in a real run)",
+          "file": "",
+          "line": 0,
+          "snippet": "",
+          "detail": "",
+          "language": "java",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "python",
+      "root": "src/agent",
+      "frameworks": [],
+      "file_count": 5,
+      "score": 65,
+      "counts": {
+        "red": 0,
+        "yellow": 7,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "H006",
+          "severity": "yellow",
+          "title": "Recently published package (< fresh threshold)",
+          "file": "requirements.txt",
+          "line": 536,
+          "snippet": "fastmcp-slim==3.4.4 \\",
+          "detail": "fastmcp-slim first published 2026-05-11 (younger than 90 days).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H006",
+          "severity": "yellow",
+          "title": "Recently published package (< fresh threshold)",
+          "file": "requirements.txt",
+          "line": 1515,
+          "snippet": "opentelemetry-instrumentation-litellm==0.1.0 \\",
+          "detail": "opentelemetry-instrumentation-litellm first published 2026-06-28 (younger than 90 days).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/agents/agents.py",
+          "line": 19,
+          "snippet": "src.agents.tools",
+          "detail": "src: imported but not declared; no reliable mapping to a pypi identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (aiofile, aiohappyeyeballs, aiohttp, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/agents/patch_vcr.py",
+          "line": 10,
+          "snippet": "vcr",
+          "detail": "vcr: imported but not declared, and the conventional name (vcr) is absent from the registry. A declared-but-unmatched distribution (aiofile, aiohappyeyeballs, aiohttp, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "src/agents/patch_vcr.py",
+          "line": 11,
+          "snippet": "vcr.stubs.httpx_stubs",
+          "detail": "vcr: imported but not declared; no reliable mapping to a pypi identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (aiofile, aiohappyeyeballs, aiohttp, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "P001",
+          "severity": "yellow",
+          "title": "Empty or exception-swallowing catch/except block",
+          "file": "src/agents/patch_vcr.py",
+          "line": 48,
+          "snippet": "except Exception:",
+          "detail": "Exception is silently swallowed — failures become invisible.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P001",
+          "severity": "yellow",
+          "title": "Empty or exception-swallowing catch/except block",
+          "file": "src/agents/patch_vcr.py",
+          "line": 83,
+          "snippet": "except Exception:",
+          "detail": "Exception is silently swallowed — failures become invisible.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "dotnet",
+      "root": "src/cart",
+      "frameworks": [],
+      "file_count": 0,
+      "score": 100,
+      "counts": {
+        "red": 0,
+        "yellow": 0,
+        "blue": 0
+      },
+      "findings": []
+    },
+    {
+      "language": "dotnet",
+      "root": "src/cart/src",
+      "frameworks": [],
+      "file_count": 6,
+      "score": 25,
+      "counts": {
+        "red": 0,
+        "yellow": 15,
+        "blue": 1
+      },
+      "findings": [
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Log.cs",
+          "line": 5,
+          "snippet": "Microsoft.Extensions.Logging",
+          "detail": "Microsoft.Extensions.Logging: imported but not declared in the manifest (exists in registry as 'Microsoft.Extensions.Logging'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "Program.cs",
+          "line": 5,
+          "snippet": "Grpc.Health.V1",
+          "detail": "Grpc.Health.V1: imported but not declared, and the conventional name (Grpc.Health.V1, Grpc.Health) is absent from the registry. A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 6,
+          "snippet": "Microsoft.AspNetCore.Diagnostics.HealthChecks",
+          "detail": "Microsoft.AspNetCore.Diagnostics.HealthChecks: imported but not declared in the manifest (exists in registry as 'Microsoft.AspNetCore.Diagnostics.HealthChecks'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 10,
+          "snippet": "Grpc.Core",
+          "detail": "Grpc.Core: imported but not declared in the manifest (exists in registry as 'Grpc.Core'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 16,
+          "snippet": "Microsoft.AspNetCore.Builder",
+          "detail": "Microsoft.AspNetCore.Builder: imported but not declared in the manifest (exists in registry as 'Microsoft.AspNetCore'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 17,
+          "snippet": "Microsoft.AspNetCore.Http",
+          "detail": "Microsoft.AspNetCore.Http: imported but not declared in the manifest (exists in registry as 'Microsoft.AspNetCore.Http'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 18,
+          "snippet": "Microsoft.Extensions.DependencyInjection",
+          "detail": "Microsoft.Extensions.DependencyInjection: imported but not declared in the manifest (exists in registry as 'Microsoft.Extensions.DependencyInjection'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "Program.cs",
+          "line": 19,
+          "snippet": "Microsoft.Extensions.Diagnostics.HealthChecks",
+          "detail": "Microsoft.Extensions.Diagnostics.HealthChecks: imported but not declared in the manifest (exists in registry as 'Microsoft.Extensions.Diagnostics.HealthChecks'). A declared-but-unmatched distribution (Grpc.AspNetCore, Grpc.AspNetCore.HealthChecks, Grpc.Net.Client, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "…",
+          "severity": "blue",
+          "title": "(trimmed for the example — 8 more in a real run)",
+          "file": "",
+          "line": 0,
+          "snippet": "",
+          "detail": "",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "dotnet",
+      "root": "src/cart/tests",
+      "frameworks": [],
+      "file_count": 1,
+      "score": 80,
+      "counts": {
+        "red": 0,
+        "yellow": 4,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "CartServiceTests.cs",
+          "line": 6,
+          "snippet": "Oteldemo",
+          "detail": "Oteldemo: imported but not declared, and the conventional name (Oteldemo) is absent from the registry. A declared-but-unmatched distribution (Microsoft.NET.Test.Sdk, xunit, xunit.runner.visualstudio) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "CartServiceTests.cs",
+          "line": 8,
+          "snippet": "Microsoft.Extensions.Hosting",
+          "detail": "Microsoft.Extensions.Hosting: imported but not declared in the manifest (exists in registry as 'Microsoft.Extensions.Hosting'). A declared-but-unmatched distribution (Microsoft.NET.Test.Sdk, xunit, xunit.runner.visualstudio) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "CartServiceTests.cs",
+          "line": 9,
+          "snippet": "Xunit",
+          "detail": "Xunit: imported but not declared in the manifest (exists in registry as 'Xunit'). A declared-but-unmatched distribution (Microsoft.NET.Test.Sdk, xunit, xunit.runner.visualstudio) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "CartServiceTests.cs",
+          "line": 10,
+          "snippet": "Oteldemo.CartService",
+          "detail": "Oteldemo.CartService: imported but not declared, and the conventional name (Oteldemo.CartService) is absent from the registry. A declared-but-unmatched distribution (Microsoft.NET.Test.Sdk, xunit, xunit.runner.visualstudio) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "dotnet",
+          "engine": "auditor",
+          "precision": "heuristic"
+        }
+      ]
+    },
+    {
+      "language": "python",
+      "root": "src/chatbot",
+      "frameworks": [],
+      "file_count": 2,
+      "score": 95,
+      "counts": {
+        "red": 0,
+        "yellow": 1,
+        "blue": 1
+      },
+      "findings": [
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "run.py",
+          "line": 12,
+          "snippet": "opentelemetry",
+          "detail": "opentelemetry: imported but not declared, and the conventional name (opentelemetry) is absent from the registry. A declared-but-unmatched distribution (annotated-doc, annotated-types, anyio, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "src/chat_interface/chat_interface.py",
+          "line": 105,
+          "snippet": "placeholder=\"Type a message...\",",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "java",
+      "root": "src/fraud-detection",
+      "frameworks": [],
+      "file_count": 0,
+      "score": 100,
+      "counts": {
+        "red": 0,
+        "yellow": 0,
+        "blue": 0
+      },
+      "findings": []
+    },
+    {
+      "language": "typescript",
+      "root": "src/frontend",
+      "frameworks": [
+        "react",
+        "next"
+      ],
+      "file_count": 109,
+      "score": 80,
+      "counts": {
+        "red": 1,
+        "yellow": 1,
+        "blue": 6
+      },
+      "findings": [
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CheckoutForm/CheckoutForm.tsx",
+          "line": 120,
+          "snippet": "placeholder=\"Country Name\"",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "tsx",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CheckoutForm/CheckoutForm.tsx",
+          "line": 137,
+          "snippet": "placeholder=\"0000-0000-0000-0000\"",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "tsx",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CurrencySwitcher/CurrencySwitcher.styled.ts",
+          "line": 18,
+          "snippet": "&::-webkit-input-placeholder,",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CurrencySwitcher/CurrencySwitcher.styled.ts",
+          "line": 19,
+          "snippet": "&::-moz-placeholder,",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CurrencySwitcher/CurrencySwitcher.styled.ts",
+          "line": 20,
+          "snippet": ":-ms-input-placeholder,",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CurrencySwitcher/CurrencySwitcher.styled.ts",
+          "line": 21,
+          "snippet": ":-moz-placeholder {",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "R007",
+          "severity": "red",
+          "title": "dangerouslySetInnerHTML with non-literal value",
+          "file": "pages/_document.tsx",
+          "line": 59,
+          "snippet": "dangerouslySetInnerHTML={{ __html: this.props.envString }}",
+          "detail": "__html receives a non-literal value; any user-influenced content here is an XSS vector.",
+          "language": "tsx",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H002",
+          "severity": "yellow",
+          "title": "Undeclared import (package exists in registry)",
+          "file": "utils/telemetry/FrontendTracer.ts",
+          "line": 11,
+          "snippet": "@opentelemetry/semantic-conventions",
+          "detail": "@opentelemetry/semantic-conventions: imported but not declared in the manifest (exists in registry as '@opentelemetry/semantic-conventions').",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "python",
+      "root": "src/mcp",
+      "frameworks": [],
+      "file_count": 2,
+      "score": 90,
+      "counts": {
+        "red": 0,
+        "yellow": 2,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "H006",
+          "severity": "yellow",
+          "title": "Recently published package (< fresh threshold)",
+          "file": "requirements.txt",
+          "line": 507,
+          "snippet": "fastmcp-slim==3.4.4 \\",
+          "detail": "fastmcp-slim first published 2026-05-11 (younger than 90 days).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H006",
+          "severity": "yellow",
+          "title": "Recently published package (< fresh threshold)",
+          "file": "requirements.txt",
+          "line": 1268,
+          "snippet": "opentelemetry-instrumentation-litellm==0.1.0 \\",
+          "detail": "opentelemetry-instrumentation-litellm first published 2026-06-28 (younger than 90 days).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "typescript",
+      "root": "src/payment",
+      "frameworks": [],
+      "file_count": 3,
+      "score": 95,
+      "counts": {
+        "red": 0,
+        "yellow": 1,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "P006",
+          "severity": "yellow",
+          "title": "Cyclomatic complexity above 10",
+          "file": "charge.js",
+          "line": 24,
+          "snippet": "module.exports.charge",
+          "detail": "module.exports.charge has cyclomatic complexity 12 (> 10).",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "typescript",
+      "root": "src/react-native-app",
+      "frameworks": [
+        "react"
+      ],
+      "file_count": 36,
+      "score": 25,
+      "counts": {
+        "red": 1,
+        "yellow": 12,
+        "blue": 8
+      },
+      "findings": [
+        {
+          "rule_id": "H010",
+          "severity": "yellow",
+          "title": "Not found in public registry — private source configured or scoped (unverifiable)",
+          "file": "app/(tabs)/_layout.tsx",
+          "line": 5,
+          "snippet": "@/components/navigation/TabBarIcon",
+          "detail": "@/components: imported but not declared, and not found in the public registry — scoped npm package (private scopes return 404 without auth); cannot verify.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H010",
+          "severity": "yellow",
+          "title": "Not found in public registry — private source configured or scoped (unverifiable)",
+          "file": "app/(tabs)/cart.tsx",
+          "line": 17,
+          "snippet": "@/gateways/Session.gateway",
+          "detail": "@/gateways: imported but not declared, and not found in the public registry — scoped npm package (private scopes return 404 without auth); cannot verify.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H010",
+          "severity": "yellow",
+          "title": "Not found in public registry — private source configured or scoped (unverifiable)",
+          "file": "app/(tabs)/settings.tsx",
+          "line": 6,
+          "snippet": "@/utils/Settings",
+          "detail": "@/utils: imported but not declared, and not found in the public registry — scoped npm package (private scopes return 404 without auth); cannot verify.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H010",
+          "severity": "yellow",
+          "title": "Not found in public registry — private source configured or scoped (unverifiable)",
+          "file": "app/_layout.tsx",
+          "line": 15,
+          "snippet": "@/hooks/useTracer",
+          "detail": "@/hooks: imported but not declared, and not found in the public registry — scoped npm package (private scopes return 404 without auth); cannot verify.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "H010",
+          "severity": "yellow",
+          "title": "Not found in public registry — private source configured or scoped (unverifiable)",
+          "file": "app/_layout.tsx",
+          "line": 16,
+          "snippet": "@/providers/Cart.provider",
+          "detail": "@/providers: imported but not declared, and not found in the public registry — scoped npm package (private scopes return 404 without auth); cannot verify.",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CheckoutForm/CheckoutForm.tsx",
+          "line": 54,
+          "snippet": "placeholder=\"E-mail Address\"",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "tsx",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CheckoutForm/CheckoutForm.tsx",
+          "line": 68,
+          "snippet": "placeholder=\"Street Address\"",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "tsx",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "components/CheckoutForm/CheckoutForm.tsx",
+          "line": 82,
+          "snippet": "placeholder=\"Zip Code\"",
+          "detail": "Marker 'placeholder' suggests incomplete/demo-grade code left by generation.",
+          "language": "tsx",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "…",
+          "severity": "blue",
+          "title": "(trimmed for the example — 13 more in a real run)",
+          "file": "",
+          "line": 0,
+          "snippet": "",
+          "detail": "",
+          "language": "typescript",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "python",
+      "root": "src/recommendation",
+      "frameworks": [],
+      "file_count": 5,
+      "score": 45,
+      "counts": {
+        "red": 0,
+        "yellow": 11,
+        "blue": 40
+      },
+      "findings": [
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "demo_pb2.py",
+          "line": 7,
+          "snippet": "google.protobuf",
+          "detail": "google: imported but not declared; no reliable mapping to a pypi identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (cachebox, googleapis-common-protos, grpcio-health-checking, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "H007",
+          "severity": "yellow",
+          "title": "Undeclared import — cannot be mapped to a registry identifier",
+          "file": "demo_pb2.py",
+          "line": 11,
+          "snippet": "google.protobuf.internal",
+          "detail": "google: imported but not declared; no reliable mapping to a pypi identifier (accuracy limit — verify manually). A declared-but-unmatched distribution (cachebox, googleapis-common-protos, grpcio-health-checking, …) may be the real provider of this module — verify before treating it as undeclared.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "heuristic"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "demo_pb2_grpc.py",
+          "line": 64,
+          "snippet": "context.set_details('Method not implemented!')",
+          "detail": "Marker 'not implemented' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "demo_pb2_grpc.py",
+          "line": 65,
+          "snippet": "raise NotImplementedError('Method not implemented!')",
+          "detail": "Marker 'not implemented' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "demo_pb2_grpc.py",
+          "line": 70,
+          "snippet": "context.set_details('Method not implemented!')",
+          "detail": "Marker 'not implemented' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "demo_pb2_grpc.py",
+          "line": 71,
+          "snippet": "raise NotImplementedError('Method not implemented!')",
+          "detail": "Marker 'not implemented' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "demo_pb2_grpc.py",
+          "line": 76,
+          "snippet": "context.set_details('Method not implemented!')",
+          "detail": "Marker 'not implemented' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P007",
+          "severity": "blue",
+          "title": "AI-style incompleteness comment",
+          "file": "demo_pb2_grpc.py",
+          "line": 77,
+          "snippet": "raise NotImplementedError('Method not implemented!')",
+          "detail": "Marker 'not implemented' suggests incomplete/demo-grade code left by generation.",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "…",
+          "severity": "blue",
+          "title": "(trimmed for the example — 43 more in a real run)",
+          "file": "",
+          "line": 0,
+          "snippet": "",
+          "detail": "",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    },
+    {
+      "language": "python",
+      "root": "src/recommendation/genproto",
+      "frameworks": [],
+      "file_count": 0,
+      "score": 100,
+      "counts": {
+        "red": 0,
+        "yellow": 0,
+        "blue": 0
+      },
+      "findings": []
+    },
+    {
+      "language": "python",
+      "root": "src/telemetry-docs",
+      "frameworks": [],
+      "file_count": 0,
+      "score": 100,
+      "counts": {
+        "red": 0,
+        "yellow": 0,
+        "blue": 0
+      },
+      "findings": []
+    },
+    {
+      "language": "python",
+      "root": "test/telemetry",
+      "frameworks": [],
+      "file_count": 8,
+      "score": 90,
+      "counts": {
+        "red": 0,
+        "yellow": 2,
+        "blue": 0
+      },
+      "findings": [
+        {
+          "rule_id": "P006",
+          "severity": "yellow",
+          "title": "Cyclomatic complexity above 10",
+          "file": "conftest.py",
+          "line": 352,
+          "snippet": "wait_for_warmup",
+          "detail": "wait_for_warmup has cyclomatic complexity 21 (> 10).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        },
+        {
+          "rule_id": "P006",
+          "severity": "yellow",
+          "title": "Cyclomatic complexity above 10",
+          "file": "test_traces_edges.py",
+          "line": 9,
+          "snippet": "_trace_has_edge",
+          "detail": "_trace_has_edge has cyclomatic complexity 11 (> 10).",
+          "language": "python",
+          "engine": "auditor",
+          "precision": "exact"
+        }
+      ]
+    }
+  ],
+  "diagnostics": {
+    "manifest_errors": [],
+    "manifest_files": [
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\package.json",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\accounting\\Accounting.csproj",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\accounting\\Directory.Packages.props",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\ad\\build.gradle",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\ad\\settings.gradle",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\agent\\requirements.txt",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\cart\\Directory.Packages.props",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\cart\\nuget.config",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\cart\\NuGet.Config",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\cart\\NuGet.config",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\cart\\src\\cart.csproj",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\cart\\tests\\cart.tests.csproj",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\chatbot\\requirements.txt",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\fraud-detection\\build.gradle.kts",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\fraud-detection\\settings.gradle.kts",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\frontend\\package.json",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\frontend\\tsconfig.json",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\mcp\\requirements.txt",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\payment\\package.json",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\react-native-app\\package.json",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\react-native-app\\tsconfig.json",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\recommendation\\requirements.txt",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\recommendation\\genproto\\requirements.txt",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\src\\telemetry-docs\\requirements.txt",
+      "<user-home>\\AppData\\Local\\Temp\\auditor-hb_f4isx\\repo\\test\\telemetry\\requirements.txt"
+    ],
+    "manifest_incomplete": [],
+    "skipped_files": [],
+    "parse_error_files": [
+      "components/Button/Button.tsx",
+      "components/CartDropdown/CartDropdown.styled.ts",
+      "components/ProductCard/ProductCard.styled.ts",
+      "pages/_document.tsx",
+      "styles/ProductDetail.styled.ts",
+      "components/Button/Button.tsx: partial parse (syntax errors)",
+      "components/CartDropdown/CartDropdown.styled.ts: partial parse (syntax errors)",
+      "components/ProductCard/ProductCard.styled.ts: partial parse (syntax errors)",
+      "pages/_document.tsx: partial parse (syntax errors)",
+      "styles/ProductDetail.styled.ts: partial parse (syntax errors)"
+    ],
+    "rule_errors": [],
+    "rule_attempted": 2447,
+    "rule_failures": 0,
+    "registry_attempted": 705,
+    "registry_failures": 7,
+    "semgrep_status": "not available (builtin rules only)",
+    "notes": []
+  },
+  "limitations": [
+    "python: source files found but no dependency manifest — every external import is reported as undeclared.",
+    "Maven Central exposes no download counts; Java namespace→artifact mapping uses a curated prefix map — unmapped imports are reported as H007, never as RED.",
+    ".NET usings under System.*/Microsoft.* are treated as BCL (not registry-checked).",
+    "Some registry lookups failed; affected packages are marked H004 (unverified).",
+    "semgrep layer: not available (builtin rules only).",
+    "Undetectable private-source channels (env vars, ~/.m2/settings.xml mirrors, CI config) cannot be ruled out for not-found packages.",
+    "Private registries are NEVER contacted; packages behind them are classified unverified (H010), and the public registry is not treated as the source of truth for them."
+  ]
+}
