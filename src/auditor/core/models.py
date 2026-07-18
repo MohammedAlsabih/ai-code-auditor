@@ -35,6 +35,11 @@ class DeclaredDep:
     raw: str = ""
     skip_registry: bool = False   # workspace:/file:/git+/unresolved-property deps
     registry_name: str = ""       # npm alias "foo": "npm:bar@^1" => name=foo, registry_name=bar
+    # "definite": the manifest declares this unconditionally. "possible": the
+    # declaration is under an UNRESOLVED condition (MSBuild Condition, Choose/
+    # When) — a definitive red H001 must NOT fire on a possible dep; the package
+    # is still looked up so its SECURITY state (quarantine/archive) surfaces.
+    presence: str = "definite"
 
     @property
     def lookup_name(self) -> str:

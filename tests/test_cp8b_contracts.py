@@ -664,3 +664,82 @@ def test_p7_n006_uses_same_predicate():
     react = sf("components/W.tsx", "export default function W(){ React.useState(0); return null; }")
     assert not any(f.rule_id == "N006" for f in analyze([page, api], alias_map=())[0])
     assert any(f.rule_id == "N006" for f in analyze([page, react], alias_map=())[0])
+
+
+# ── Round 8 ──────────────────────────────────────────────────────────────────
+def _dotnet_e2e(root):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    a = DotnetAdapter()
+    a.set_repo_root(root)
+    files = collect_source_files(root, a)
+    for f in files:
+        parse_source(f)
+    diag = Diagnostics()
+    declared = a.parse_dependencies(root, diag=diag)
+    a.prepare(root, files)
+
+    class NoReg:
+        ecosystem = "nuget"
+        def lookup(self, n):
+            return PackageInfo(exists=False)
+    return a, declared, diag, audit_hallucinations(a, root, files, declared, NoReg())
+
+
+def test_r8_conditional_ghost_is_not_red_h001(tmp_path):
+    from auditor.report.build import build_report
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup><ItemGroup>"
+        "<PackageReference Include=\"Maybe.Ghost\" Condition=\"'$(Cfg)'=='Debug'\"/>"
+        "</ItemGroup></Project>")
+    a, declared, diag, fs = _dotnet_e2e(tmp_path)
+    # presence is carried end-to-end, not dropped
+    assert [(d.name, d.presence) for d in declared] == [("Maybe.Ghost", "possible")]
+    # a conditional ghost is a YELLOW H007, never a definitive red H001 "(fact)"
+    assert [(f.rule_id, f.severity.value) for f in fs] == [("H007", "yellow")]
+    assert diag.manifest_incomplete
+    # and it never serializes as an exact H001 in report.json
+    data = build_report("x", [{"language": "dotnet", "root": ".", "frameworks": [],
+                               "file_count": 0, "findings": fs}], engines={}, limitations=[])
+    blob = json.dumps(data)
+    assert "H001" not in blob and '"exact"' not in blob
+
+
+def test_r8_conditional_dep_quarantine_still_surfaces(tmp_path):
+    from auditor.adapters.dotnet.adapter import DotnetAdapter
+    from auditor.core.hallucination import audit_hallucinations
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup><ItemGroup>"
+        "<PackageReference Include=\"Risky.Pkg\" Condition=\"'$(Cfg)'=='Debug'\"/>"
+        "</ItemGroup></Project>")
+    a = DotnetAdapter()
+    files = collect_source_files(tmp_path, a)
+    for f in files:
+        parse_source(f)
+    declared = a.parse_dependencies(tmp_path)
+    a.prepare(tmp_path, files)
+
+    class QReg:
+        ecosystem = "nuget"
+        def lookup(self, n):
+            return PackageInfo(exists=True, quarantined=True, created="2019-01-01T00:00:00Z")
+    fs = audit_hallucinations(a, tmp_path, files, declared, QReg())
+    assert any(f.rule_id == "H009" for f in fs)   # quarantine not hidden by 'possible'
+
+
+def test_r8_choose_when_is_possible(tmp_path):
+    _mk(tmp_path, "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0'
+        "</TargetFramework></PropertyGroup>"
+        "<Choose><When Condition=\"'$(Cfg)'=='Debug'\"><ItemGroup>"
+        '<PackageReference Include="Only.Debug"/></ItemGroup></When>'
+        "<Otherwise><ItemGroup><PackageReference Include=\"Only.Release\"/></ItemGroup>"
+        "</Otherwise></Choose></Project>")
+    a, declared, diag, fs = _dotnet_e2e(tmp_path)
+    # BOTH branch packages are POSSIBLE (conditional context inherited), incomplete
+    assert {(d.name, d.presence) for d in declared} == \
+        {("Only.Debug", "possible"), ("Only.Release", "possible")}
+    assert diag.manifest_incomplete
+    assert all(f.rule_id == "H007" for f in fs)   # neither is a false red H001

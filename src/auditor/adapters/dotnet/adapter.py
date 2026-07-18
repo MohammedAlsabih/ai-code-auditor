@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import defusedxml.ElementTree as ET
@@ -162,7 +163,9 @@ class DotnetAdapter(LanguageAdapter):
             for key, (dep, kind) in state.items():
                 if key not in merged or kind == "definite":
                     merged[key] = (dep, kind)
-        declared = {k: dep for k, (dep, _) in merged.items()}
+        # carry the definite/possible KIND onto the DeclaredDep so the engine can
+        # gate H001 on it (CP-8b round 8: dropping kind here lost 'possible')
+        declared = {k: replace(dep, presence=kind) for k, (dep, kind) in merged.items()}
         pkgcfg = root / "packages.config"
         if pkgcfg.is_file():
             for d in self._parse_packages_config(pkgcfg):
@@ -197,45 +200,54 @@ class DotnetAdapter(LanguageAdapter):
             self._manifest_error(path, e)
             return
         possible_names: list[str] = []
-        for group in root.iter():
-            if group.tag.rsplit("}", 1)[-1] != "ItemGroup":
-                continue
-            if self._const_false_condition(group):
-                continue                              # whole group disabled
-            group_dynamic = bool((group.get("Condition") or "").strip())
-            for el in group:
-                if el.tag.rsplit("}", 1)[-1] != "PackageReference":
-                    continue
-                if self._const_false_condition(el):
-                    continue                          # this reference disabled
-                inc, rem = el.get("Include"), el.get("Remove")
-                dynamic = group_dynamic or bool((el.get("Condition") or "").strip())
-                if rem:
-                    key = rem.lower()
-                    if not dynamic:
-                        state.pop(key, None)          # unconditional Remove cancels
-                    elif key in state:
-                        dep, _ = state[key]
-                        state[key] = (dep, "possible")   # unproven removal
-                        possible_names.append(rem)
-                elif inc:
-                    dep = DeclaredDep(name=inc, ecosystem="nuget",
-                                      source_file=path.name, raw=inc,
-                                      skip_registry="$(" in inc)
-                    if dynamic:
-                        # do not overwrite an existing DEFINITE entry with a
-                        # conditional one
-                        if state.get(inc.lower(), (None, ""))[1] != "definite":
-                            state[inc.lower()] = (dep, "possible")
-                        possible_names.append(inc)
-                    else:
-                        state[inc.lower()] = (dep, "definite")
-                # Update="X" alone modifies an existing reference — declares nothing
+        self._walk_msbuild(root, False, path, state, possible_names)
         if possible_names:
             self._mark_incomplete(path)
             self._note(f"{path.name}: conditional PackageReference "
                        f"({', '.join(sorted(set(possible_names)))}) — presence not "
                        "statically provable; treated as POSSIBLE, not exact")
+
+    def _walk_msbuild(self, el, dynamic: bool, path: Path, state: dict,
+                      possible_names: list) -> None:
+        """Recursive MSBuild walk carrying CONDITIONAL context from ancestors
+        (CP-8b round 8): a PackageReference under an unresolved Condition — on the
+        element, an ItemGroup, OR a Choose/When/Otherwise ancestor — is POSSIBLE,
+        never definite. A statically-false condition prunes the whole subtree. No
+        MSBuild interpreter: this is a conservative classification only."""
+        tag = el.tag.rsplit("}", 1)[-1]
+        if self._const_false_condition(el):
+            return                                    # dead subtree
+        # a When/Otherwise branch, or any non-constant Condition, makes the
+        # subtree conditional
+        here_dynamic = dynamic or bool((el.get("Condition") or "").strip()) \
+            or tag in ("When", "Otherwise")
+        if tag == "PackageReference":
+            self._pkgref_event(el, here_dynamic, path, state, possible_names)
+            return
+        for child in el:
+            self._walk_msbuild(child, here_dynamic, path, state, possible_names)
+
+    def _pkgref_event(self, el, dynamic: bool, path: Path, state: dict,
+                      possible_names: list) -> None:
+        inc, rem = el.get("Include"), el.get("Remove")
+        if rem:
+            key = rem.lower()
+            if not dynamic:
+                state.pop(key, None)                  # unconditional Remove cancels
+            elif key in state:
+                dep, _ = state[key]
+                state[key] = (dep, "possible")        # unproven removal
+                possible_names.append(rem)
+        elif inc:
+            dep = DeclaredDep(name=inc, ecosystem="nuget", source_file=path.name,
+                              raw=inc, skip_registry="$(" in inc)
+            if dynamic:
+                if state.get(inc.lower(), (None, ""))[1] != "definite":
+                    state[inc.lower()] = (dep, "possible")
+                possible_names.append(inc)
+            else:
+                state[inc.lower()] = (dep, "definite")
+        # Update="X" alone modifies an existing reference — declares nothing
 
     def _parse_packages_config(self, path: Path) -> list[DeclaredDep]:
         try:

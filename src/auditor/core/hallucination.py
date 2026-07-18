@@ -190,12 +190,25 @@ def _judge_declared(adapter, dep: DeclaredDep, info: PackageInfo,
                              f"{name} was not found in the public {adapter.ecosystem} registry, "
                              f"but {reason} — cannot verify; if this name is NOT served by your "
                              "private source, it is dependency-confusion exposure.", dep.raw)]
+        if getattr(dep, "presence", "definite") != "definite":
+            # CP-8b round 8: the declaration is under an UNRESOLVED condition —
+            # a definitive RED "declared (fact)" H001 is not justified. Surface a
+            # YELLOW H007 probable/unverified instead (the manifest is already
+            # flagged incomplete by the adapter).
+            return [_finding("H007", adapter, dep.source_file, dep.line,
+                             f"{name} is declared only under an unresolved build condition and "
+                             f"was NOT found in the public {adapter.ecosystem} registry — probable "
+                             "hallucination, but its presence is conditional (unverified).",
+                             dep.raw)]
         return [_finding("H001", adapter, dep.source_file, dep.line,
                          f"{name} is declared in {dep.source_file} but was NOT found in the "
                          f"public {adapter.ecosystem} registry queried at scan time (fact). "
                          "Likely causes: AI-hallucinated name (unregistered names are "
                          "claimable — slopsquatting), a registry-removed/quarantined package, "
                          "or a source this scan cannot see.", dep.raw)]
+    # the package EXISTS — its security state (quarantine/archive/newness) is
+    # reported regardless of definite/possible (a dangerous package must never be
+    # hidden just because its declaration is conditional)
     return _status_findings(adapter, info, dep.source_file, dep.line, name, dep.raw)
 
 
