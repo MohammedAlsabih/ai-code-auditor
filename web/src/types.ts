@@ -66,4 +66,18 @@ export interface Finding {
   detail: string
   snippet: string
   engine?: string
+  review_id?: string
+}
+
+// One saved review decision (W2-B1). unreviewed = no record at all.
+export interface Review {
+  status: string // 'confirmed' | 'false_positive' | 'accepted_risk'
+  note: string
+  updated_at: string
+}
+
+export interface ReviewsResponse {
+  available: boolean
+  error: string | null
+  reviews: Record<string, Review>
 }

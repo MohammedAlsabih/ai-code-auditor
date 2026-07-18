@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Loader2, TriangleAlert } from 'lucide-react'
 
-import { aggregate, fetchReport } from './api'
+import { aggregate, fetchReport, fetchReviews } from './api'
 import { DetailPanel } from './components/DetailPanel'
 import { FindingsTable } from './components/FindingsTable'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
-import type { Finding, Report } from './types'
+import type { Finding, Report, Review } from './types'
 
 export default function App() {
   const [report, setReport] = useState<Report | null>(null)
@@ -15,9 +15,23 @@ export default function App() {
   const [language, setLanguage] = useState<string | null>(null)
   const [severity, setSeverity] = useState<string | null>(null)
   const [selected, setSelected] = useState<Finding | null>(null)
+  const [reviews, setReviews] = useState<Record<string, Review>>({})
+  const [reviewsOk, setReviewsOk] = useState(true)
+  const [reviewsError, setReviewsError] = useState('')
+  const [reviewFilter, setReviewFilter] = useState<string | null>(null)
 
   useEffect(() => {
     fetchReport().then(setReport).catch((e) => setError(String(e?.message ?? e)))
+    fetchReviews()
+      .then((r) => {
+        setReviews(r.reviews)
+        setReviewsOk(r.available)
+        setReviewsError(r.error ?? '')
+      })
+      .catch((e) => {
+        setReviewsOk(false)
+        setReviewsError(String(e?.message ?? e))
+      })
   }, [])
 
   const allRows = useMemo(() => (report ? aggregate(report) : []), [report])
@@ -31,14 +45,28 @@ export default function App() {
   )
   const rows = useMemo(
     () =>
-      allRows.filter(
-        (r) =>
-          (!project || r.project === project) &&
-          (!language || r.language === language) &&
-          (!severity || r.severity === severity),
-      ),
-    [allRows, project, language, severity],
+      allRows.filter((r) => {
+        if (project && r.project !== project) return false
+        if (language && r.language !== language) return false
+        if (severity && r.severity !== severity) return false
+        if (reviewFilter) {
+          const rv = r.review_id ? reviews[r.review_id] : undefined
+          if (reviewFilter === 'unreviewed' ? Boolean(rv) : rv?.status !== reviewFilter)
+            return false
+        }
+        return true
+      }),
+    [allRows, project, language, severity, reviewFilter, reviews],
   )
+
+  const onReviewChange = (rid: string, review: Review | null) => {
+    setReviews((prev) => {
+      const next = { ...prev }
+      if (review === null) delete next[rid]
+      else next[rid] = review
+      return next
+    })
+  }
 
   if (error) {
     return (
@@ -74,11 +102,27 @@ export default function App() {
           activeLanguage={language}
           onProject={setProject}
           onLanguage={setLanguage}
+          reviewFilter={reviewFilter}
+          onReviewFilter={setReviewFilter}
         />
         <main className="main">
-          <FindingsTable rows={rows} selected={selected} onSelect={setSelected} />
+          <FindingsTable
+            rows={rows}
+            reviews={reviews}
+            selected={selected}
+            onSelect={setSelected}
+          />
         </main>
-        {selected && <DetailPanel finding={selected} onClose={() => setSelected(null)} />}
+        {selected && (
+          <DetailPanel
+            finding={selected}
+            review={selected.review_id ? reviews[selected.review_id] : undefined}
+            reviewsOk={reviewsOk}
+            reviewsError={reviewsError}
+            onReviewChange={onReviewChange}
+            onClose={() => setSelected(null)}
+          />
+        )}
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-import type { Finding, Report, SourceWindow } from './types'
+import type { Finding, Report, Review, ReviewsResponse, SourceWindow } from './types'
 
 export async function fetchReport(): Promise<Report> {
   const res = await fetch('/api/report')
@@ -48,8 +48,38 @@ export function aggregate(report: Report): Finding[] {
         detail: f.detail ?? '',
         snippet: f.snippet ?? '',
         engine: f.engine,
+        review_id: (f as { review_id?: string }).review_id,
       })
     }
   }
   return rows
+}
+
+export async function fetchReviews(): Promise<ReviewsResponse> {
+  const res = await fetch('/api/reviews')
+  if (!res.ok) throw new Error(`reviews request failed (HTTP ${res.status})`)
+  return res.json()
+}
+
+export async function putReview(
+  rid: string,
+  status: string,
+  note: string,
+): Promise<Review> {
+  const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, note }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.error ?? `save failed (HTTP ${res.status})`)
+  return body as Review
+}
+
+export async function deleteReview(rid: string): Promise<void> {
+  const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.error ?? `clear failed (HTTP ${res.status})`)
+  }
 }
