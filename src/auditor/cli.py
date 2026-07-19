@@ -143,7 +143,12 @@ def _scan(args) -> int:
     from auditor.core.models import Diagnostics
     from auditor.core.ownership import assign_findings, fs_case_insensitive, norm
     from auditor.core.patterns import dedupe, run_pattern_engine
-    from auditor.core.semgrep_runner import find_binary, run_semgrep
+    from auditor.core.semgrep_runner import (
+        find_binary,
+        note_uncataloged_semgrep_rules,
+        record_semgrep_execution,
+        run_semgrep_structured,
+    )
     from auditor.core.treesitter import register_adapters
     from auditor.discovery import discover_projects, project_files
     from auditor.fetch import resolve_target
@@ -198,6 +203,7 @@ def _scan(args) -> int:
         # per-project execution ledgers (B2-A): factual run records, kept in
         # memory only — NOT serialized into report.json in this slice.
         execution_ledgers: list[ExecutionLedger] = []
+        project_source_files: list[list] = []   # parallel: for S:* distribution
         for adapter, proot in projects:
             adapter.set_repo_root(root)   # confinement boundary = whole repo (CP-8.2)
             diag = Diagnostics()
@@ -217,6 +223,7 @@ def _scan(args) -> int:
             findings += run_pattern_engine(adapter, proot, files, fws, diag=diag,
                                            ledger=ledger)
             execution_ledgers.append(ledger)
+            project_source_files.append(files)
             idx = len(results)
             prefix = "" if rel_root == "." else rel_root + "/"
             prefixes[idx] = prefix
@@ -238,12 +245,34 @@ def _scan(args) -> int:
         # files we expect it to cover (completeness signal)
         sg = None if args.no_semgrep else find_binary(args.semgrep_bin)
         sg_findings: list = []
-        if sg:
-            sg_findings, sg_status = run_semgrep(sg[0], root, args.semgrep_config,
-                                                 expected_paths=expected_sg_paths)
-            global_diag.semgrep_status = f"{sg[1]}: {sg_status}"
+        sg_run = None
+        if args.no_semgrep:
+            # user CHOICE, distinct from an engine we could not find
+            global_diag.semgrep_status = "disabled by --no-semgrep (builtin rules only)"
+        elif sg:
+            sg_run = run_semgrep_structured(sg[0], root, args.semgrep_config,
+                                            expected_paths=expected_sg_paths)
+            sg_findings = sg_run.findings
+            global_diag.semgrep_status = f"{sg[1]}: {sg_run.status_text}"
         else:
             global_diag.semgrep_status = "not available (builtin rules only)"
+        # B2-C: distribute the ONE invocation's structured evidence onto the
+        # per-project ledgers (S:* descriptors from the shipped YAML — the
+        # same single source the catalog uses). Never touches Diagnostics
+        # rule counters; in-memory only, not serialized.
+        try:
+            from auditor.core.semgrep_rules_meta import shipped_semgrep_descriptors
+            sg_descriptors = shipped_semgrep_descriptors()
+        except Exception as e:  # noqa: BLE001 — a broken shipped YAML already
+            # fails the catalog loudly; execution recording must not crash scan
+            sg_descriptors = []
+            global_diag.notes.append(
+                f"semgrep execution recording skipped: {e.__class__.__name__}")
+        record_semgrep_execution(
+            zip(execution_ledgers, project_source_files), sg_descriptors,
+            run=sg_run, disabled=args.no_semgrep,
+            binary_missing=(not args.no_semgrep and not sg))
+        note_uncataloged_semgrep_rules(sg_findings, sg_descriptors, global_diag)
 
         assigned, repo_bucket, dropped = assign_findings(
             sg_findings, owner, proj_meta, prefixes, globs, insensitive)
