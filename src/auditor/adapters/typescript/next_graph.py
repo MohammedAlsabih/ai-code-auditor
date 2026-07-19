@@ -176,10 +176,14 @@ def _client_context_findings(sf: SourceFile) -> list[Finding]:
 
 
 def analyze(files: list[SourceFile],
-            alias_map: tuple[tuple[str, str], ...]) -> tuple[list[Finding], list[str]]:
+            alias_map: tuple[tuple[str, str], ...],
+            ) -> tuple[list[Finding], list[str], set[str]]:
     """Dual-state BFS over the import graph. BOTH (file, server) and
     (file, client) contexts are explored and reported — a server-path violation
-    stands even when a client path also reaches the same file.
+    stands even when a client path also reaches the same file. The third return
+    value is the set of rel paths the graph actually VISITED (entries, their
+    reachable imports, and app/ orphans) — the graph's true inputs, so callers
+    account partial-parse evidence from graph files only, without a second BFS.
 
     Coverage guarantee: EVERY app/ file is analyzed, so the global removal of
     per-file N003 loses nothing. Files reached from an entry inherit their
@@ -225,7 +229,7 @@ def analyze(files: list[SourceFile],
     if unresolved:
         notes.append(f"next-graph: {len(unresolved)} unresolved relative edge(s) "
                      f"(first: {unresolved[0]}) — not guessed")
-    return findings, notes
+    return findings, notes, {r for r, _ in visited}
 
 
 # ── Rule Capability Catalog (owned HERE) ────────────────────────────────────

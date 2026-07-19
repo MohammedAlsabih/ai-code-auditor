@@ -12,7 +12,7 @@ def _sf(rel: str, code: str) -> SourceFile:
 
 
 def _run(*files, alias_map=()):
-    return analyze(list(files), alias_map=alias_map)
+    return analyze(list(files), alias_map=alias_map)[:2]   # (findings, notes)
 
 
 def test_hooky_via_server_path_is_flagged_outside_app():

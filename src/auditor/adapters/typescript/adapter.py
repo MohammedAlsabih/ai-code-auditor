@@ -104,14 +104,33 @@ class TypeScriptAdapter(LanguageAdapter):
         # declared deps; per-file N003 is superseded when the graph is active
         self._graph_notes: list[str] = []
         self._graph_findings, self._graph_active = [], False
+        # B2-B execution facts, consumed by project_rules:
+        self._graph_applicable = False   # Next app graph applies to this project
+        self._graph_failed = False       # build/analyze raised (fallback stays)
+        self._graph_partial = False      # a graph input carried syntax errors
         names = {d.name for d in getattr(self, "_last_declared", []) or []}
         if "next" in names and ((root / "app").is_dir() or (root / "src" / "app").is_dir()):
+            self._graph_applicable = True
             from auditor.adapters.typescript.next_graph import analyze
             from auditor.core.treesitter import parse_source
-            for sf in files:
-                parse_source(sf)
-            self._graph_findings, self._graph_notes = analyze(files, self._alias_map)
-            self._graph_active = True
+            try:
+                for sf in files:
+                    parse_source(sf)
+                self._graph_findings, self._graph_notes, in_graph = \
+                    analyze(files, self._alias_map)
+                # partial is evidence about the GRAPH'S inputs: only a file the
+                # BFS actually visited counts — a broken file outside the graph
+                # (unreachable, not an app/ orphan) is not a graph fact
+                self._graph_partial = any(
+                    sf.rel in in_graph and sf.tree.root_node.has_error
+                    for sf in files)
+                self._graph_active = True
+            except Exception as e:  # noqa: BLE001 — graph failure must not sink the
+                # project; per-file N003 stays available (graph inactive)
+                self._graph_failed = True
+                self._graph_active = False
+                if self._diag is not None:
+                    self._note(f"next-graph: build failed ({e.__class__.__name__})")
             if self._diag is not None:
                 for n in self._graph_notes:
                     self._note(n)
@@ -217,11 +236,57 @@ class TypeScriptAdapter(LanguageAdapter):
             rules = [r for r in rules if r.id != "N003"]   # graph classification supersedes
         return rules
 
-    def project_rules(self, root: Path, frameworks: list[str]) -> list:
-        out = list(getattr(self, "_graph_findings", []))
+    _GRAPH_GROUP = ("N002", "N004", "N005", "N006")
+    _ENV_GROUP = ("N001",)
+
+    def project_rules(self, root: Path, frameworks: list[str],
+                      ledger=None, diag=None) -> list:
+        """Two project passes, each recording its OWN execution evidence (B2-B):
+        the Next module graph (built in prepare) and per-file .env scanning."""
+        from auditor.adapters.typescript.next_rules import (
+            list_env_files,
+            scan_one_env_file,
+        )
+        from auditor.core.execution import record_project_pass
+        out: list = []
+
+        # ── Next module-graph pass ──────────────────────────────────────────
+        if getattr(self, "_graph_applicable", False):
+            if getattr(self, "_graph_failed", False):
+                # one failure for the whole group; N003 fallback stays active
+                if ledger is not None:
+                    ledger.eligible(self._GRAPH_GROUP)
+                if diag is not None:
+                    diag.rule_attempted += 1
+                    diag.rule_failures += 1
+                if ledger is not None:
+                    ledger.attempted_failed(self._GRAPH_GROUP)
+            else:
+                out += record_project_pass(
+                    ledger, diag, self._GRAPH_GROUP,
+                    list(getattr(self, "_graph_findings", [])),
+                    partial=getattr(self, "_graph_partial", False))
+                # a SUCCESSFUL graph supersedes the per-file N003 fallback
+                if ledger is not None:
+                    ledger.not_applicable(
+                        ("N003",), "superseded by the N006 module-graph pass")
+        # (graph not applicable => we never claim it ran)
+
+        # ── .env pass (per file) ────────────────────────────────────────────
         if "next" in frameworks:
-            from auditor.adapters.typescript.next_rules import scan_env_files
-            out += scan_env_files(root)
+            env_files = list_env_files(root)
+            for env in env_files:
+                try:
+                    efindings = scan_one_env_file(env)
+                except Exception as e:  # noqa: BLE001 — next env file still runs
+                    if diag is not None and hasattr(diag, "rule_errors"):
+                        diag.rule_errors.append(
+                            f"N001 env {env.name}: {e.__class__.__name__}")
+                    record_project_pass(ledger, diag, self._ENV_GROUP, [], failed=True)
+                    continue
+                out += record_project_pass(ledger, diag, self._ENV_GROUP, efindings)
+            if not env_files and ledger is not None:
+                ledger.not_applicable(self._ENV_GROUP, "no .env* files in this project")
         return out
 
     def frameworks(self, root: Path, declared: list[DeclaredDep]) -> list[str]:

@@ -37,17 +37,23 @@ def test_project_rules_failure_counts_and_forbids_pass(tmp_path):
 
     class BoomAdapter:
         name = "python"
+        body_entered = False
         def syntax(self):
             from auditor.adapters.python.adapter import PythonAdapter
             return PythonAdapter().syntax()
         def language_rules(self):
             return []
-        def project_rules(self, root, frameworks):
+        def project_rules(self, root, frameworks, ledger=None, diag=None):
+            BoomAdapter.body_entered = True
             raise RuntimeError("project rule exploded")
 
     sf = SourceFile(path=tmp_path / "a.py", rel="a.py", language="python", text=b"x = 1\n")
     diag = Diagnostics()
     run_pattern_engine(BoomAdapter(), tmp_path, [sf], [], diag=diag)
+    # the body actually RAN and its own RuntimeError is what got recorded —
+    # not an unexpected-keyword TypeError from the call site
+    assert BoomAdapter.body_entered
+    assert any("project_rules(python): RuntimeError" in e for e in diag.rule_errors)
     assert diag.rule_failures >= 1 and diag.rule_attempted >= 1
     conf = analysis_confidence(diag, offline=False, files_read=1)
     assert conf < 100

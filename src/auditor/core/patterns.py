@@ -60,15 +60,45 @@ def run_pattern_engine(adapter, project_root: Path, files: list[SourceFile],
             diag.rule_attempted += 1
             diag.rule_failures += 1
         _note(diag, "rule_errors", f"complexity({adapter.name}): {e.__class__.__name__}")
-    if diag is not None:
-        diag.rule_attempted += 1
+    # project_rules OWNS its own per-pass accounting (B2-B): each declared pass
+    # (P008 / Next graph / .env) records itself in the ledger AND Diagnostics.
+    # No UNCONDITIONAL attempt here — an adapter with no passes must not look
+    # like it ran a rule, and a self-recorded pass must not be counted twice.
     try:
-        findings += adapter.project_rules(project_root, frameworks)
+        findings += adapter.project_rules(project_root, frameworks,
+                                          **_project_rules_kwargs(adapter, ledger, diag))
     except Exception as e:
+        # CATASTROPHIC raise only: a well-behaved pass records its own failure
+        # and continues, so it never reaches here. An adapter whose whole
+        # project_rules blows up did NOT self-record — count ONE failed
+        # invocation so confidence drops and the verdict cannot PASS.
         if diag is not None:
+            diag.rule_attempted += 1
             diag.rule_failures += 1
         _note(diag, "rule_errors", f"project_rules({adapter.name}): {e.__class__.__name__}")
     return dedupe(findings)
+
+
+def _project_rules_kwargs(adapter, ledger, diag) -> dict:
+    """Compatibility seam for adapter.project_rules: the ledger/diag kwargs go
+    only to adapters whose SIGNATURE accepts them, decided by inspection BEFORE
+    the call. A legacy `def project_rules(self, root, frameworks)` gets the old
+    call and never fails on unexpected kwargs — and no try/TypeError retry, so
+    a genuine TypeError inside an adapter body is never masked and the body is
+    never invoked twice."""
+    import inspect
+    try:
+        params = inspect.signature(adapter.project_rules).parameters
+    except (TypeError, ValueError):
+        return {"ledger": ledger, "diag": diag}   # uninspectable: assume current
+    accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                      for p in params.values())
+    kwargs = {}
+    if accepts_any or "ledger" in params:
+        kwargs["ledger"] = ledger
+    if accepts_any or "diag" in params:
+        kwargs["diag"] = diag
+    return kwargs
 
 
 def _invoke(rule, sf: SourceFile, diag: Diagnostics | None, ledger,
