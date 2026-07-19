@@ -123,9 +123,88 @@ def _collect_externals(adapter, imports, declared) -> tuple[list[ImportRef], lis
     return out, providers
 
 
+# Decision groups — DECLARED EXPLICITLY (never inferred from which findings a
+# given input happened to produce). Each group is the full set of ids that one
+# decision-path invocation can emit for that input.
+DECLARED_ONLINE = ("H001", "H004", "H005", "H006", "H007", "H009", "H010", "H012")
+IMPORT_ONLINE = ("H002", "H004", "H005", "H006", "H007", "H008", "H009", "H010", "H012")
+OFFLINE_DECLARED = ("H003",)
+OFFLINE_IMPORT = ("H007",)
+# rules that genuinely need the public registry — offline they are UNAVAILABLE,
+# never a silent attempted=0. (H007 is NOT here: it has a real offline path.)
+REGISTRY_DEPENDENT = ("H001", "H002", "H004", "H005", "H006", "H008",
+                      "H009", "H010", "H012")
+
+
+def _decide(ledger, diag, group: tuple, input_label: str, call):
+    """One decision-path invocation for a dep/import, accounted against the
+    WHOLE output group. Diagnostics is synced ONCE per invocation (not per
+    output id, and never mixed with registry_* counters): diag.rule_attempted
+    += 1 always; diag.rule_failures += 1 only on failure. A raising judge, a
+    non-list/None return, a non-Finding element, or a finding whose id is
+    outside the group is ONE failed invocation (attempted stays 1); valid
+    findings are always kept and the next input always continues."""
+    if ledger is not None:
+        ledger.eligible(group)
+    if diag is not None:
+        diag.rule_attempted += 1
+
+    def _note_diag(msg: str) -> None:
+        if diag is not None and msg not in diag.rule_errors:
+            diag.rule_errors.append(msg)
+
+    def _fail() -> None:
+        if diag is not None:
+            diag.rule_failures += 1
+        if ledger is not None:
+            ledger.attempted_failed(group)     # ledger attempted=1, failures=1
+
+    try:
+        out = call()
+    except Exception as e:  # noqa: BLE001 — a broken judge must not sink the audit
+        _note_diag(f"hallucination judge on {input_label}: {e.__class__.__name__}")
+        _fail()
+        return []
+    # shape contract: judge must return a list[Finding]
+    if not isinstance(out, list):
+        _note_diag(f"contract: hallucination judge on {input_label} returned "
+                   f"{type(out).__name__}, expected list[Finding]")
+        if ledger is not None:
+            ledger.contract_error(
+                f"hallucination judge on {input_label} returned "
+                f"{type(out).__name__}, expected list[Finding]")
+        _fail()
+        return []
+    valid: list[Finding] = []
+    contract_failed = False
+    for f in out:
+        if not isinstance(f, Finding):
+            contract_failed = True
+            _note_diag(f"contract: hallucination on {input_label} yielded a "
+                       f"non-Finding item ({type(f).__name__})")
+            if ledger is not None:
+                ledger.contract_error(
+                    f"hallucination on {input_label} yielded a non-Finding "
+                    f"item ({type(f).__name__})")
+            continue                           # dropped
+        if f.rule_id not in group:
+            contract_failed = True
+            _note_diag(f"contract: hallucination id {f.rule_id} outside group")
+            if ledger is not None:
+                ledger.contract_error(
+                    f"hallucination emitted id {f.rule_id} outside decision "
+                    f"group for {input_label} (allowed: {', '.join(group)})")
+        valid.append(f)                        # undeclared-id finding is KEPT
+    if contract_failed:
+        _fail()
+    elif ledger is not None:
+        ledger.attempted_ok(group)             # ledger attempted=1
+    return valid
+
+
 def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
                          declared: list[DeclaredDep], registry,
-                         diag=None) -> list[Finding]:
+                         diag=None, ledger=None) -> list[Finding]:
     findings: list[Finding] = []
     imports = adapter.extract_imports(files)
     if diag is not None:
@@ -134,13 +213,30 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     externals, providers = _collect_externals(adapter, imports, declared)
 
     if registry is None:
+        # OFFLINE: H003 runs on every checkable dep, H007 on every external
+        # import; the registry-dependent rules are UNAVAILABLE (not silent 0).
         for dep in checkable:
-            findings.append(_finding("H003", adapter, dep.source_file, dep.line,
-                                     f"{dep.name}: registry check skipped (--offline)", dep.raw))
+            findings += _decide(
+                ledger, diag, OFFLINE_DECLARED, f"{dep.name} (offline)",
+                lambda dep=dep: [_finding(
+                    "H003", adapter, dep.source_file, dep.line,
+                    f"{dep.name}: registry check skipped (--offline)", dep.raw)])
         for imp in externals:
-            findings.append(_finding("H007", adapter, imp.file, imp.line,
-                                     f"{imp.top_level or imp.module}: imported but not declared; "
-                                     "registry check skipped (--offline)", imp.module))
+            findings += _decide(
+                ledger, diag, OFFLINE_IMPORT, f"{imp.module} (offline)",
+                lambda imp=imp: [_finding(
+                    "H007", adapter, imp.file, imp.line,
+                    f"{imp.top_level or imp.module}: imported but not declared; "
+                    "registry check skipped (--offline)", imp.module)])
+        if ledger is not None:
+            if not checkable:
+                ledger.not_applicable(OFFLINE_DECLARED,
+                                      "no declarable dependencies in this project")
+            if not externals:
+                ledger.not_applicable(OFFLINE_IMPORT,
+                                      "no external undeclared imports in this project")
+            ledger.unavailable(REGISTRY_DEPENDENT,
+                               "offline mode: public registry was not consulted")
         return _sorted(findings)
 
     private_reason = adapter.private_registry_reason(root)
@@ -148,7 +244,9 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     dep_infos = _bulk_lookup(registry, [d.lookup_name for d in checkable])
     for dep in checkable:
         info = dep_infos[dep.lookup_name]
-        findings += _judge_declared(adapter, dep, info, private_reason)
+        findings += _decide(
+            ledger, diag, DECLARED_ONLINE, dep.name,
+            lambda dep=dep, info=info: _judge_declared(adapter, dep, info, private_reason))
     if private_reason is None:
         # a declared dep CONFIRMED absent from the registry (an H001 ghost)
         # cannot be installed, so it cannot provide any module — it must not
@@ -160,7 +258,23 @@ def audit_hallucinations(adapter, root: Path, files: list[SourceFile],
     cand_names = sorted({c for imp in externals for c in adapter.registry_candidates(imp)})
     cand_infos = _bulk_lookup(registry, cand_names)
     for imp in externals:
-        findings += _judge_import(adapter, imp, cand_infos, private_reason, providers)
+        findings += _decide(
+            ledger, diag, IMPORT_ONLINE, imp.module,
+            lambda imp=imp: _judge_import(adapter, imp, cand_infos, private_reason, providers))
+    if ledger is not None:
+        # online: H003 is never applicable (offline-only). The two groups get
+        # ACCURATE per-group reasons — a dep-present/no-imports project must not
+        # tell H002 "no declared dependencies OR external imports". The overlap
+        # guard (not_applicable rejected once eligible>0) keeps a reason off any
+        # id that actually ran via the other group.
+        ledger.not_applicable(OFFLINE_DECLARED,
+                              "declared-dependency verification runs only offline")
+        if not checkable:
+            ledger.not_applicable(DECLARED_ONLINE,
+                                  "no declarable dependencies in this project")
+        if not externals:
+            ledger.not_applicable(IMPORT_ONLINE,
+                                  "no external undeclared imports in this project")
     if diag is not None:
         # count UNIQUE lookups and their failures, not H004 findings — a single
         # crashed candidate shared by N imports must not inflate the failure
