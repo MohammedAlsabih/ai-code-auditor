@@ -863,13 +863,75 @@ class PythonAdapter(LanguageAdapter):
                 return f"custom index configured in {pyproject.as_posix()}"
         return None
 
-    def project_rules(self, root: Path, frameworks: list[str]) -> list:
-        """P008 (blue): stdlib drift in BOTH directions relative to the project's
-        OWN requires-python range. Emitted ONLY when requires-python is
-        parseable. A declared backport silences the finding."""
-        allowed = self._allowed_minors(root)
-        if not allowed:
+    def _requires_python_state(self, root: Path):
+        """(state, allowed_minors|None, unavailable_reason|None) where state is
+        'absent' | 'unparseable' | 'out_of_model' | 'ok'. Reads pyproject ONCE;
+        the parsed SpecifierSet feeds the minor computation directly. The states
+        are precise: the KEY being absent is the only not-applicable case; a
+        present-but-unusable value (non-string, empty, invalid specifier) is an
+        INABILITY; a VALID spec admitting no modeled Python 3 minor (e.g. >=4)
+        is out_of_model — never called 'invalid'."""
+        from packaging.specifiers import InvalidSpecifier, SpecifierSet
+        pyproject = root / "pyproject.toml"
+        if not pyproject.is_file():
+            return "absent", None, None
+        try:
+            data = tomllib.loads(self._read(pyproject))
+        except tomllib.TOMLDecodeError:
+            return ("unparseable", None,
+                    "pyproject.toml is not parseable (requires-python unknown)")
+        proj = data.get("project")
+        if not isinstance(proj, dict) or "requires-python" not in proj:
+            return "absent", None, None
+        spec = proj["requires-python"]
+        if not isinstance(spec, str) or not spec.strip():
+            return ("unparseable", None,
+                    "requires-python present but not analyzable "
+                    f"(expected a non-empty string, got {type(spec).__name__})")
+        try:
+            sset = SpecifierSet(spec.strip())
+        except InvalidSpecifier:
+            return ("unparseable", None,
+                    "requires-python present but not analyzable (invalid specifier)")
+        allowed = self._minors_from_spec(sset)
+        if allowed is None:
+            return ("out_of_model", None,
+                    "valid requires-python range is outside the modeled Python 3 minors")
+        return "ok", allowed, None
+
+    _P008_GROUP = ("P008",)
+
+    def project_rules(self, root: Path, frameworks: list[str],
+                      ledger=None, diag=None) -> list:
+        """P008 (blue): stdlib drift relative to the project's OWN
+        requires-python range. Records its OWN execution evidence (B2-B):
+        eligible/attempted when requires-python is usable, not_applicable when
+        absent, unavailable when present-but-unparseable — never a fabricated
+        finding. Detection logic and results are unchanged."""
+        from auditor.core.execution import record_project_pass
+        state, allowed, reason = self._requires_python_state(root)
+        if state == "absent":
+            if ledger is not None:
+                ledger.not_applicable(
+                    self._P008_GROUP, "no requires-python declared in this project")
             return []
+        if state != "ok":     # unparseable / out_of_model: an inability, with
+            if ledger is not None:      # the PRECISE reason — never fabricated
+                ledger.unavailable(self._P008_GROUP, reason)
+            if diag is not None and hasattr(diag, "rule_errors"):
+                note = f"P008: {reason}"
+                if note not in diag.rule_errors:
+                    diag.rule_errors.append(note)
+            return []
+        try:
+            out = self._p008_findings(root, allowed)
+        except Exception as e:  # noqa: BLE001 — a broken pass records + continues
+            if diag is not None and hasattr(diag, "rule_errors"):
+                diag.rule_errors.append(f"P008 on {root}: {e.__class__.__name__}")
+            return record_project_pass(ledger, diag, self._P008_GROUP, [], failed=True)
+        return record_project_pass(ledger, diag, self._P008_GROUP, out)
+
+    def _p008_findings(self, root: Path, allowed) -> list:
         cached = getattr(self, "_last_declared", None)
         declared = {d.name for d in (cached if cached is not None
                                      else self.parse_dependencies(root))}
@@ -923,34 +985,25 @@ class PythonAdapter(LanguageAdapter):
 
     _MAX_MINOR = 20
 
-    def _allowed_minors(self, root: Path):
-        """Which 3.x minors the requires-python range admits, judged via PEP 440
-        `packaging`. A minor counts as reachable if ANY patch of it satisfies the
-        spec. Candidate patches are boundary-derived — {0, a large sentinel, and
-        every patch literal in the spec ±1} — so exact/edge specs like
-        ==3.12.26 or >3.12.25,<3.13 are handled without a fixed patch cap (which
-        would have missed patch numbers above the cap). Returns sorted allowed
-        (3, minor) tuples, or None when unspecified/invalid => no P008 claims."""
-        from packaging.specifiers import InvalidSpecifier, SpecifierSet
-        pyproject = root / "pyproject.toml"
-        if not pyproject.is_file():
-            return None
-        try:
-            data = tomllib.loads(self._read(pyproject))
-        except tomllib.TOMLDecodeError:
-            return None
-        proj = data.get("project")
-        spec = proj.get("requires-python") if isinstance(proj, dict) else None
-        if not isinstance(spec, str) or not spec.strip():
-            return None   # absent or malformed (e.g. a list) => no P008 claims
-        spec = spec.strip()
-        try:
-            sset = SpecifierSet(spec)
-        except InvalidSpecifier:
-            return None
+    def _minors_from_spec(self, sset):
+        """Which 3.x minors an already-parsed SpecifierSet admits, judged via
+        PEP 440 `packaging`. A minor counts as reachable if ANY patch of it
+        satisfies the spec. Candidate patches are boundary-derived — {0, a large
+        sentinel, and every patch literal in the spec ±1} — so exact/edge specs
+        like ==3.12.26 or >3.12.25,<3.13 are handled without a fixed patch cap
+        (which would have missed patch numbers above the cap). Returns sorted
+        allowed (3, minor) tuples, or None when the range admits none."""
         reachable = _reachable_minors(sset, self._MAX_MINOR)
         allowed = sorted((3, m) for m in reachable)
         return allowed or None
+
+    def _allowed_minors(self, root: Path):
+        """Legacy convenience wrapper (standalone callers/tests): the allowed
+        minors, or None when unspecified/invalid/out-of-model => no P008 claims.
+        project_rules does NOT use this — it goes through
+        _requires_python_state, which reads pyproject exactly once."""
+        state, allowed, _reason = self._requires_python_state(root)
+        return allowed if state == "ok" else None
 
 
 # ── Rule Capability Catalog (owned HERE: P008 is a Python-project rule) ─────

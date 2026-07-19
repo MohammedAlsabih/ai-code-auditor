@@ -67,22 +67,32 @@ class PublicEnvSecret(Rule):
         return out
 
 
-def scan_env_files(root: Path) -> list[Finding]:
+def list_env_files(root: Path) -> list[Path]:
+    """The actual .env* FILES present — the eligible inputs for the env pass."""
+    return [env for env in sorted(root.glob(".env*")) if env.is_file()]
+
+
+def scan_one_env_file(env: Path) -> list[Finding]:
+    """N001 for a SINGLE .env file. The variable VALUE is never echoed — only
+    the (masked) name."""
     from auditor.core.walk import read_text_capped
-    rule = PublicEnvSecret()
+    title = PublicEnvSecret().title
     out: list[Finding] = []
-    for env in sorted(root.glob(".env*")):
-        if not env.is_file():
-            continue
-        for i, line in enumerate(read_text_capped(env).splitlines(), 1):
-            name = line.split("=", 1)[0].strip()
-            # the VALUE is never echoed into the report — only the name
-            if "=" in line and name.startswith("NEXT_PUBLIC_") \
-                    and _SENSITIVE.search(name) and not _SAFE.search(name):
-                out.append(Finding(rule_id="N001", severity=Severity.RED, title=rule.title,
-                                   file=env.name, line=i, snippet=name + "=***",
-                                   detail=f"{name} in {env.name} ships to the client bundle.",
-                                   language="typescript", engine="auditor"))
+    for i, line in enumerate(read_text_capped(env).splitlines(), 1):
+        name = line.split("=", 1)[0].strip()
+        if "=" in line and name.startswith("NEXT_PUBLIC_") \
+                and _SENSITIVE.search(name) and not _SAFE.search(name):
+            out.append(Finding(rule_id="N001", severity=Severity.RED, title=title,
+                               file=env.name, line=i, snippet=name + "=***",
+                               detail=f"{name} in {env.name} ships to the client bundle.",
+                               language="typescript", engine="auditor"))
+    return out
+
+
+def scan_env_files(root: Path) -> list[Finding]:
+    out: list[Finding] = []
+    for env in list_env_files(root):
+        out += scan_one_env_file(env)
     return out
 
 

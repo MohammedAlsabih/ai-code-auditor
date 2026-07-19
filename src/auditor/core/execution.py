@@ -13,9 +13,12 @@ Coverage so far:
   N001–N005, J001–J002, D001–D003 (wired through run_pattern_engine).
 - B2-A — the H/registry DECISION paths (H001–H010, H012) inside
   audit_hallucinations, including offline unavailable/not_applicable facts.
+- B2-B — the special builtin PROJECT passes: P008 (stdlib drift vs
+  requires-python), the Next module-graph group (N002/N004/N005/N006, with
+  N003 supersession), and N001 via .env* files (via record_project_pass).
 
-Still out of scope (later slices): P008, N006, N001-via-env, external
-Semgrep S:* rules, status computation, and writing analysis_manifest.execution.
+Still out of scope (later slices): external Semgrep/OpenGrep S:* rules,
+status computation, and writing analysis_manifest.execution.
 
 The ledger is NOT serialized into report.json yet — wiring a half-finished
 contract into asdict-driven reports would leak it; report integration is a
@@ -102,6 +105,64 @@ class ExecutionLedger:
     def contract_error(self, message: str) -> None:
         if message not in self.contract_errors:
             self.contract_errors.append(message)
+
+
+def record_project_pass(ledger, diag, group: Iterable[str], findings,
+                        *, failed: bool = False, partial: bool = False) -> list:
+    """Account ONE project-level pass against its WHOLE output group and return
+    the KEPT findings. Core-neutral: `group` is plain data, no rule-id or
+    language branching. eligible + attempted increment once per group id;
+    Diagnostics syncs ONCE (rule_attempted += 1, rule_failures += 1 only on
+    failure). `partial` marks partial_parse once for the group.
+
+    Output hardening — the SAME contract as the file-rule and H paths:
+    findings must be list[Finding]. None or any non-list is one contract
+    failure returning [] (never a crash); a non-Finding element is DROPPED;
+    a valid Finding with an id outside the group is KEPT (data is never
+    swallowed). However many violations one invocation contains — plus an
+    explicit `failed` — it is failed AT MOST ONCE (attempted stays 1) and
+    the next invocation always continues."""
+    from auditor.core.models import Finding
+    group = tuple(group)
+    if ledger is not None:
+        ledger.eligible(group)
+        if partial:
+            ledger.partial_parse(group)
+    if diag is not None:
+        diag.rule_attempted += 1
+    contract_failed = False
+
+    def _record(msg: str) -> None:
+        nonlocal contract_failed
+        contract_failed = True
+        if ledger is not None:
+            ledger.contract_error(msg)
+        if diag is not None and hasattr(diag, "rule_errors") \
+                and f"contract: {msg}" not in diag.rule_errors:
+            diag.rule_errors.append(f"contract: {msg}")
+
+    if not isinstance(findings, list):
+        _record(f"project pass returned {type(findings).__name__}, expected "
+                f"list[Finding] (group {group})")
+        findings = []
+    kept = []
+    for f in findings:
+        if not isinstance(f, Finding):
+            _record(f"project pass returned a non-Finding item "
+                    f"({type(f).__name__}) in group {group}")
+            continue
+        if f.rule_id not in group:
+            _record(f"project pass emitted id {f.rule_id} outside group {group}")
+        kept.append(f)                     # valid Finding: kept even undeclared
+    is_fail = failed or contract_failed
+    if ledger is not None:
+        if is_fail:
+            ledger.attempted_failed(group)
+        else:
+            ledger.attempted_ok(group)
+    if diag is not None and is_fail:
+        diag.rule_failures += 1
+    return kept
 
 
 def merge_ledgers(ledgers: Iterable[ExecutionLedger]) -> list[ExecutionLedger]:

@@ -206,9 +206,13 @@ class LanguageAdapter(ABC):
     def language_rules(self) -> list[Rule]:
         return []
 
-    def project_rules(self, root: Path, frameworks: list[str]) -> list[Finding]:
+    def project_rules(self, root: Path, frameworks: list[str],
+                      ledger=None, diag=None) -> list[Finding]:
         """Project-level checks that need the root, not a single source file
-        (e.g. .env scanning). Core calls this; core never imports adapter modules."""
+        (e.g. .env scanning, stdlib-drift, module-graph). Core calls this and
+        never imports adapter modules. An adapter that runs project passes
+        records its OWN execution evidence into `ledger`/`diag` (B2-B); the
+        base has no passes, so it records nothing."""
         return []
 
     def private_registry_reason(self, root: Path) -> str | None:

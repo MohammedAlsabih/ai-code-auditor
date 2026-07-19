@@ -195,7 +195,7 @@ def test_p4_member_hook_in_server_graph_flagged():
               "export default function P(){ return <H/>; }")
     comp = sf("components/H.tsx",
               "export default function H(){ const [v]=React.useState(0); return <b>{v}</b>; }")
-    findings, _ = analyze([page, comp], alias_map=())
+    findings, _, _ = analyze([page, comp], alias_map=())
     assert any(f.rule_id == "N006" and f.file == "components/H.tsx" for f in findings)
 
 
