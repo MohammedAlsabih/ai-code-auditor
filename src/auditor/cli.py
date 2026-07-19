@@ -138,6 +138,7 @@ def _relativize_diag(diag_dict: dict, root) -> dict:
 
 def _scan(args) -> int:
     from auditor.adapters import default_adapters
+    from auditor.core.execution import ExecutionLedger
     from auditor.core.hallucination import audit_hallucinations
     from auditor.core.models import Diagnostics
     from auditor.core.ownership import assign_findings, fs_case_insensitive, norm
@@ -194,9 +195,14 @@ def _scan(args) -> int:
         owner: dict[str, int] = {}
         languages_seen: set[str] = set()
         expected_sg_paths: set[str] = set()   # for semgrep completeness reconciliation
+        # per-project execution ledgers (B2-A): factual run records, kept in
+        # memory only — NOT serialized into report.json in this slice.
+        execution_ledgers: list[ExecutionLedger] = []
         for adapter, proot in projects:
             adapter.set_repo_root(root)   # confinement boundary = whole repo (CP-8.2)
             diag = Diagnostics()
+            rel_root = proot.relative_to(root).as_posix() or "."   # before engines run
+            ledger = ExecutionLedger(language=adapter.name, root=rel_root)
             files = project_files(proot, adapter, projects, diag=diag)
             expected_sg_paths.update(str(f.path) for f in files)
             declared = adapter.parse_dependencies(proot, diag=diag)
@@ -206,9 +212,11 @@ def _scan(args) -> int:
             adapter.prepare(proot, files)
             fws = adapter.frameworks(proot, declared)
             registry = registries.get(adapter.ecosystem) if registries else None
-            findings = audit_hallucinations(adapter, proot, files, declared, registry, diag=diag)
-            findings += run_pattern_engine(adapter, proot, files, fws, diag=diag)
-            rel_root = proot.relative_to(root).as_posix() or "."
+            findings = audit_hallucinations(adapter, proot, files, declared, registry,
+                                            diag=diag, ledger=ledger)
+            findings += run_pattern_engine(adapter, proot, files, fws, diag=diag,
+                                           ledger=ledger)
+            execution_ledgers.append(ledger)
             idx = len(results)
             prefix = "" if rel_root == "." else rel_root + "/"
             prefixes[idx] = prefix
