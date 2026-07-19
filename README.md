@@ -55,22 +55,28 @@ Reports land in `--output` (default `auditor-report/`): `report.md`
 
 | Family | Rules | What it catches |
 |---|---|---|
-| **H** hallucination | H001 red declared-not-in-registry · H002 yellow undeclared-but-exists · H003 blue offline-unverified · H004 blue registry-unreachable · H005 yellow brand-new+no-downloads · H006 yellow fresh package · **H007 yellow unverified undeclared import** (unmappable OR probable-hallucination whose registry name came from a *heuristic* mapping — Python identity, Java/.NET prefix; never a hard block) · **H008 red hallucinated import** (only when the mapping is *exact* — npm literal — and the name is absent) · H009 red quarantined · H010 yellow private-source unverifiable · H012 blue archived | Engine 1, all four ecosystems |
-| **P** common | P001 empty catch · P002 red known secret tokens (masked) · P003 yellow credential literal · P004/P005 SQL string composition (P005 red at execution sink) · P006 cyclomatic complexity >10 · P007 blue AI-incompleteness comments · P008 blue stdlib drift vs requires-python | language-neutral core, syntax via adapter profiles |
-| **R** React | R001 red conditional hook (if/loop/ternary/&&/try + early-return) · R002 red hook in hook-callback · R003 yellow hook outside component/custom-hook (memo/forwardRef exempt) · R004 yellow effect without deps array · R005 yellow obviously missing deps · R006 yellow key={index} · R007 red non-literal dangerouslySetInnerHTML | corpus-compared vs eslint-plugin-react-hooks 7.1.1: 16/18 agree, 2 documented intentional divergences |
-| **N** Next.js | N001 red NEXT_PUBLIC secret (code + .env*, value never echoed) · N002 yellow private env in client · N003 red client API in server component (per-file fallback) · N004 red server-only import in client · N005 yellow async client component · N006 red client API in server **module-graph** path (dual-state BFS, orphans analyzed as server default) | graph excludes middleware/instrumentation/metadata routes (documented) |
-| **J/D** | J001 String == · J002 missing try-with-resources · D001 async void · D002 .Result/.Wait blocking · D003 red raw-SQL interpolation | Java / .NET |
+| **H** hallucination | H001 error declared-not-in-registry · H002 warning undeclared-but-exists · H003 note offline-unverified · H004 note registry-unreachable · H005 warning brand-new+no-downloads · H006 warning fresh package · **H007 warning unverified undeclared import** (unmappable OR probable-hallucination whose registry name came from a *heuristic* mapping — Python identity, Java/.NET prefix; never a hard block) · **H008 error hallucinated import** (only when the mapping is *exact* — npm literal — and the name is absent) · H009 error quarantined · H010 warning private-source unverifiable · H012 note archived | Engine 1, all four ecosystems |
+| **P** common | P001 empty catch · P002 error known secret tokens (masked) · P003 warning credential literal · P004/P005 SQL string composition (P005 error at execution sink) · P006 cyclomatic complexity >10 · P007 note AI-incompleteness comments · P008 note stdlib drift vs requires-python | language-neutral core, syntax via adapter profiles |
+| **R** React | R001 error conditional hook (if/loop/ternary/&&/try + early-return) · R002 error hook in hook-callback · R003 warning hook outside component/custom-hook (memo/forwardRef exempt) · R004 warning effect without deps array · R005 warning obviously missing deps · R006 warning key={index} · R007 error non-literal dangerouslySetInnerHTML | corpus-compared vs eslint-plugin-react-hooks 7.1.1: 16/18 agree, 2 documented intentional divergences |
+| **N** Next.js | N001 error NEXT_PUBLIC secret (code + .env*, value never echoed) · N002 warning private env in client · N003 error client API in server component (per-file fallback) · N004 error server-only import in client · N005 warning async client component · N006 error client API in server **module-graph** path (dual-state BFS, orphans analyzed as server default) | graph excludes middleware/instrumentation/metadata routes (documented) |
+| **J/D** | J001 String == · J002 missing try-with-resources · D001 async void · D002 .Result/.Wait blocking · D003 error raw-SQL interpolation | Java / .NET |
+
+Finding classification uses SARIF-compatible **levels**: `error` / `warning` /
+`note` (OASIS SARIF 2.1.0 `result.level`, §3.27.10). The red/yellow/blue
+colors that appear in reports and the web UI are **presentation only** — a
+visual derivation of the level, never the contract value. Legacy `severity`
+fields remain in report.json temporarily for backward compatibility.
 | **S:** | prefixed semgrep/opengrep findings (optional layer) | bundled MIT rules only by default |
 
 ## Scoring | الدرجات
 
-`code_health = max(0, 100 − 15·🔴 − 5·🟡)` per language (🔵 informational,
+`code_health = max(0, 100 − 15·error − 5·warning)` per language (`note` informational,
 never counted), overall = file-count-weighted average **always shown next to
-the lowest language** so the average can never hide a red project.
+the lowest language** so the average can never hide a error project.
 `analysis_confidence` is a **separate axis** — how *complete* the checks were
 (coverage-v2: file/manifest/registry/rule/parse/semgrep ratios), not how risky
-the code is. Verdict: `block` (any red, confidence < 40, or total rule
-collapse) / `review` (any yellow OR any manifest/rule/parse failure) / `pass`.
+the code is. Verdict: `block` (any error, confidence < 40, or total rule
+collapse) / `review` (any warning OR any manifest/rule/parse failure) / `pass`.
 
 ## Architecture | البنية
 
@@ -98,12 +104,12 @@ src/auditor/
 
 - **Java/.NET mapping accuracy:** import→artifact resolution rests on curated
   prefix maps + declared-id prefixes. Unmapped imports degrade to **H007
-  (unresolved)** — never a guessed red. All mapping-based findings carry
+  (unresolved)** — never a guessed error. All mapping-based findings carry
   `precision: heuristic`.
-- **Hallucination severity contract:** a definitive **red H008** fires only for
+- **Hallucination severity contract:** a definitive **error H008** fires only for
   an *exact* mapping (npm, where the import literally is the package name). Every
   *heuristic* mapping (Python import↔dist convention, Java/.NET prefix maps) that
-  resolves to an absent name is a **yellow H007** "unverified undeclared import" —
+  resolves to an absent name is a **warning H007** "unverified undeclared import" —
   it always surfaces for review but never blocks on a guess. A declared package
   never silently suppresses it; an unlinked declared distribution is named in the
   finding as a possible (unverified) provider.

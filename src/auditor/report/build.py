@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from auditor import __version__
+from auditor.core.levels import LEGACY_SEVERITY_TO_LEVEL
 from auditor.core.models import Finding, Severity
 from auditor.core.scoring import FORMULA, language_score, overall_score, verdict
 # ONE redaction policy tool-wide (CP-3): the ENTIRE userinfo goes (a token in
@@ -48,8 +49,19 @@ def build_report(target: str, projects: list[dict], engines: dict,
             "language": proj["language"], "root": proj["root"],
             "frameworks": proj.get("frameworks", []),
             "file_count": proj.get("file_count", 0),
-            "score": score, "counts": counts,
-            "findings": [dict(asdict(f), severity=f.severity.value) for f in findings],
+            "score": score,
+            # DEPRECATED per-project color counts (compat) + canonical levels
+            "counts": counts,
+            "level_counts": {LEGACY_SEVERITY_TO_LEVEL[k]: v
+                             for k, v in counts.items()},
+            # `level` (SARIF-compatible error/warning/note) is the semantic
+            # contract; `severity` (red/yellow/blue) is DEPRECATED and kept
+            # only for backward compatibility with older readers. The identity
+            # fields (rule/title/file/line/engine) are untouched, so review_id
+            # is stable across this migration.
+            "findings": [dict(asdict(f), severity=f.severity.value,
+                              level=LEGACY_SEVERITY_TO_LEVEL[f.severity.value])
+                         for f in findings],
         })
     report = {
         "tool": "ai-code-auditor",
@@ -61,8 +73,14 @@ def build_report(target: str, projects: list[dict], engines: dict,
             "overall_score": overall_score(parts),
             "score_kind": "code_health (higher = safer; experimental indicator)",
             "lowest_language": {"language": lowest[0], "score": lowest[1]} if lowest else None,
+            # DEPRECATED: color-keyed counts, kept for old readers only —
+            # `level_counts` below is the canonical summary.
             "counts": all_counts,
+            "level_counts": {LEGACY_SEVERITY_TO_LEVEL[k]: v
+                             for k, v in all_counts.items()},
             "analysis_confidence": confidence,
+            # scoring/verdict deliberately still consume the legacy counts —
+            # numerically identical either way (1:1 mapping); asserted by test.
             "verdict": verdict(all_counts, confidence if confidence is not None else 100,
                                diagnostics or {}),
         },

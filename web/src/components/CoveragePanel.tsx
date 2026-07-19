@@ -231,7 +231,7 @@ export function CoveragePanel() {
               <th>Count</th>
               <th>Languages</th>
               <th>Precision</th>
-              <th>Severities</th>
+              <th>Levels</th>
             </tr>
           </thead>
           <tbody>
@@ -241,7 +241,7 @@ export function CoveragePanel() {
                 <td>{r.count}</td>
                 <td>{r.languages.join(', ')}</td>
                 <td>{r.precisions.join(', ')}</td>
-                <td>{r.severities.join(', ')}</td>
+                <td>{r.levels.join(', ')}</td>
               </tr>
             ))}
           </tbody>

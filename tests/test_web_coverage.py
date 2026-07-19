@@ -268,7 +268,7 @@ def test_observed_rules_only_and_disclaimer_present(tmp_path):
     rules = {r["rule_id"]: r for r in cov["observed_rules"]}
     assert set(rules) == {"P006", "H002"}          # ONLY rules that produced findings
     assert rules["P006"]["count"] == 2
-    assert rules["P006"]["severities"] == ["red", "yellow"]
+    assert rules["P006"]["levels"] == ["error", "warning"]   # SARIF-compatible levels
     assert cov["observed_rules_disclaimer"] == OBSERVED_RULES_DISCLAIMER
     assert "produced findings only" in cov["observed_rules_disclaimer"]
 

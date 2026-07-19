@@ -300,7 +300,7 @@ def _scan(args) -> int:
         low_txt = f", lowest {low['language']}={low['score']}" if low else ""
         print(f"scan complete | اكتمل الفحص: verdict={s['verdict'].upper()}, "
               f"health {overall if overall is not None else 'N/A'}{low_txt}, "
-              f"🔴={s['counts']['red']}, confidence {confidence}/100 "
+              f"errors={s['counts']['red']}, confidence {confidence}/100 "
               f"— reports in {out_dir / 'report.md'} + report.json")
         if s["verdict"] == "block":
             return 1

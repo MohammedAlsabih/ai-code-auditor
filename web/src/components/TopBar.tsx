@@ -8,31 +8,38 @@ function verdictIcon(v?: string) {
   return <ShieldQuestion size={16} />
 }
 
+const CHIP_COLOR: Record<string, string> = { error: 'red', warning: 'yellow', note: 'blue' }
+
 export function TopBar({
   summary,
   target,
   total,
   shown,
-  activeSeverities,
-  onToggleSeverity,
+  activeLevels,
+  onToggleLevel,
 }: {
   summary: Summary
   target?: string
   total: number
   shown: number
-  activeSeverities: Set<string>
-  onToggleSeverity: (s: string) => void
+  activeLevels: Set<string>
+  onToggleLevel: (s: string) => void
 }) {
-  const c = summary.counts ?? {}
+  const legacy = summary.counts ?? {}
+  const lc = summary.level_counts ?? {
+    error: legacy.red,
+    warning: legacy.yellow,
+    note: legacy.blue,
+  }
   const verdict = summary.verdict ?? 'review'
 
-  const chip = (sev: 'red' | 'yellow' | 'blue', n: number) => (
+  const chip = (level: 'error' | 'warning' | 'note', n: number) => (
     <button
-      className={`count count-${sev} ${activeSeverities.has(sev) ? 'active' : ''}`}
-      onClick={() => onToggleSeverity(sev)}
-      title={`${sev} findings — click to toggle filter (multi-select)`}
+      className={`count count-${CHIP_COLOR[level]} ${activeLevels.has(level) ? 'active' : ''}`}
+      onClick={() => onToggleLevel(level)}
+      title={`${level} findings — click to toggle filter (multi-select)`}
     >
-      <span className="dot" /> {n}
+      <span className="dot" /> {level} {n}
     </button>
   )
 
@@ -51,9 +58,9 @@ export function TopBar({
         <Gauge size={15} /> confidence <b>{summary.analysis_confidence ?? '—'}</b>
       </div>
       <div className="counts">
-        {chip('red', c.red ?? 0)}
-        {chip('yellow', c.yellow ?? 0)}
-        {chip('blue', c.blue ?? 0)}
+        {chip('error', lc.error ?? 0)}
+        {chip('warning', lc.warning ?? 0)}
+        {chip('note', lc.note ?? 0)}
       </div>
       <div className="showing">
         {shown}/{total} findings{target ? ` · ${target}` : ''}

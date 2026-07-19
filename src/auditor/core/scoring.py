@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from auditor.core.models import Diagnostics, Finding, Severity
 
+# internal weights still keyed by the legacy Severity enum (unmigrated this
+# round); numerically identical to 15*error + 5*warning via the 1:1 mapping.
 WEIGHTS = {Severity.RED: 15, Severity.YELLOW: 5}
 FORMULA = (
-    "code_health per language = max(0, 100 - 15*red - 5*yellow) — HIGHER is "
-    "safer (this is a health/safety score, deliberately NOT named 'risk'); blue "
+    "code_health per language = max(0, 100 - 15*error - 5*warning) — HIGHER is "
+    "safer (this is a health/safety score, deliberately NOT named 'risk'); note "
     "findings are informational and never affect health; overall = file-count-"
-    "weighted average, ALWAYS reported alongside lowest language and red count. "
+    "weighted average, ALWAYS reported alongside lowest language and error count. "
     "analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage "
     "* manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * "
     "parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), "
@@ -18,8 +20,8 @@ FORMULA = (
     "rule_health = 1 - rule_failures/rule_attempted (uncapped), "
     "parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), "
     "semgrep_factor = 1.0 success / 0.97 partial / 0.95 otherwise. "
-    "verdict: block if red>0 or confidence<40 or ALL rule invocations failed; "
-    "review if yellow>0 or confidence<70 or any manifest/rule/parse failure; "
+    "verdict: block if error>0 or confidence<40 or ALL rule invocations failed; "
+    "review if warning>0 or confidence<70 or any manifest/rule/parse failure; "
     "else pass — any rule failure forbids pass."
 )
 

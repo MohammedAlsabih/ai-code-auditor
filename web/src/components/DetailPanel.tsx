@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
 
-import { SourceUnavailable, deleteReview, fetchSource, putReview, sourcePathFor } from '../api'
+import { SourceUnavailable, deleteReview, fetchSource, levelColor, putReview, sourcePathFor } from '../api'
 import type { Finding, Review, SourceWindow } from '../types'
 
 type SrcState = 'idle' | 'loading' | 'ok' | 'unavailable' | 'error'
@@ -102,7 +102,9 @@ export function DetailPanel({
   return (
     <section className="detail">
       <div className="detail-head">
-        <span className={`sev sev-${finding.severity}`}>{finding.severity}</span>
+        <span className={`sev sev-${levelColor(finding.level)}`}>
+          {finding.level || finding.severity || 'unclassified'}
+        </span>
         <span className="mono">{finding.rule_id}</span>
         <button className="close" onClick={onClose} title="Close details">
           <X size={16} />
