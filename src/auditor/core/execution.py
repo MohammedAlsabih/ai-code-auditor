@@ -16,9 +16,15 @@ Coverage so far:
 - B2-B — the special builtin PROJECT passes: P008 (stdlib drift vs
   requires-python), the Next module-graph group (N002/N004/N005/N006, with
   N003 supersession), and N001 via .env* files (via record_project_pass).
+- B2-C — external Semgrep/OpenGrep S:* rules (record_semgrep_execution in
+  semgrep_runner.py): per-project, per-descriptor facts driven by the
+  STRUCTURED SemgrepRun evidence, never by parsing the human status text and
+  never inferred from findings. S:* attempts are NOT added to
+  Diagnostics.rule_attempted/rule_failures — those counters belong to the
+  builtin rules and semgrep already carries its own confidence factor.
 
-Still out of scope (later slices): external Semgrep/OpenGrep S:* rules,
-status computation, and writing analysis_manifest.execution.
+Still out of scope (later slices): status computation and writing
+analysis_manifest.execution.
 
 The ledger is NOT serialized into report.json yet — wiring a half-finished
 contract into asdict-driven reports would leak it; report integration is a
@@ -42,6 +48,12 @@ class RuleExecution:
     # NEVER recorded once the rule actually ran (see the ledger guards).
     not_applicable_reasons: list[str] = field(default_factory=list)
     unavailable_reasons: list[str] = field(default_factory=list)
+    # facts about HOW an attempted run went (require attempted>0), and the
+    # user's own choice to disable an engine (mutually exclusive with
+    # unavailable — a deliberate skip is not an inability):
+    partial_reasons: list[str] = field(default_factory=list)
+    failure_reasons: list[str] = field(default_factory=list)
+    skipped_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -61,9 +73,9 @@ class ExecutionLedger:
         for rid in output_ids:
             self._rec(rid).eligible_inputs += n
 
-    def blocked(self, output_ids: Iterable[str]) -> None:
+    def blocked(self, output_ids: Iterable[str], n: int = 1) -> None:
         for rid in output_ids:
-            self._rec(rid).blocked_inputs += 1
+            self._rec(rid).blocked_inputs += n
 
     def attempted_ok(self, output_ids: Iterable[str]) -> None:
         for rid in output_ids:
@@ -95,12 +107,44 @@ class ExecutionLedger:
         # attempted==0 (e.g. 5 files ready but the external engine is not
         # installed) is exactly when an unavailable reason IS valid. blocked
         # stays an independent fact and never becomes unavailable on its own.
+        # A user-DISABLED engine (skipped) is not an inability: never both.
         for rid in output_ids:
             rec = self._rec(rid)
-            if rec.attempted > 0:
+            if rec.attempted > 0 or rec.skipped_reasons:
                 continue
             if reason not in rec.unavailable_reasons:
                 rec.unavailable_reasons.append(reason)
+
+    def skipped(self, output_ids: Iterable[str], reason: str) -> None:
+        # skipped = the USER disabled the engine (e.g. --no-semgrep): work
+        # existed, the engine was never asked to run. Rejected after any
+        # attempt, and never alongside an unavailable fact (a deliberate skip
+        # is not an inability).
+        for rid in output_ids:
+            rec = self._rec(rid)
+            if rec.attempted > 0 or rec.unavailable_reasons:
+                continue
+            if reason not in rec.skipped_reasons:
+                rec.skipped_reasons.append(reason)
+
+    def partial_reason(self, output_ids: Iterable[str], reason: str) -> None:
+        # partial describes HOW an attempted run went — meaningless (and
+        # rejected) without an attempt.
+        for rid in output_ids:
+            rec = self._rec(rid)
+            if rec.attempted == 0:
+                continue
+            if reason not in rec.partial_reasons:
+                rec.partial_reasons.append(reason)
+
+    def failure_reason(self, output_ids: Iterable[str], reason: str) -> None:
+        # a failure reason requires a recorded failure (attempted_failed first)
+        for rid in output_ids:
+            rec = self._rec(rid)
+            if rec.failures == 0:
+                continue
+            if reason not in rec.failure_reasons:
+                rec.failure_reasons.append(reason)
 
     def contract_error(self, message: str) -> None:
         if message not in self.contract_errors:

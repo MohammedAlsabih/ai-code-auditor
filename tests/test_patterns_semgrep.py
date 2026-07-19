@@ -81,7 +81,7 @@ def test_run_semgrep_parses_json(monkeypatch, tmp_path):
         "path": str(tmp_path / "x.py"),
         "start": {"line": 3},
         "extra": {"message": "eval bad", "severity": "ERROR"},
-    }]}
+    }], "errors": [], "paths": {"scanned": [str(tmp_path / "x.py")]}}
 
     class P:
         returncode = 0
