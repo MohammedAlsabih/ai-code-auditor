@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Loader2, TriangleAlert } from 'lucide-react'
 
 import {
-  RedConfirmationRequired,
+  ErrorConfirmationRequired,
   aggregate,
   fetchReport,
   fetchReviews,
@@ -29,7 +29,7 @@ import {
 } from './selection'
 import type { Finding, Report, Review } from './types'
 
-const SEV_ORDER: Record<string, number> = { red: 0, yellow: 1, blue: 2 }
+const LEVEL_ORDER: Record<string, number> = { error: 0, warning: 1, note: 2 }
 const REVIEW_ORDER: Record<string, number> = {
   confirmed: 0,
   false_positive: 1,
@@ -56,7 +56,7 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [projectF, setProjectF] = useState<Set<string>>(new Set())
   const [languageF, setLanguageF] = useState<Set<string>>(new Set())
-  const [severityF, setSeverityF] = useState<Set<string>>(new Set())
+  const [levelF, setLevelF] = useState<Set<string>>(new Set())
   const [precisionF, setPrecisionF] = useState<Set<string>>(new Set())
   const [ruleF, setRuleF] = useState<Set<string>>(new Set())
   const [reviewF, setReviewF] = useState<Set<string>>(new Set())
@@ -64,7 +64,7 @@ export default function App() {
   const [pathInput, setPathInput] = useState('')
   const [pathInvalid, setPathInvalid] = useState(false)
 
-  const [sortKey, setSortKey] = useState('severity')
+  const [sortKey, setSortKey] = useState('level')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
@@ -131,7 +131,7 @@ export default function App() {
       }
       if (projectF.size && !projectF.has(r.project)) return false
       if (languageF.size && !languageF.has(r.language)) return false
-      if (severityF.size && !severityF.has(r.severity)) return false
+      if (levelF.size && !levelF.has(r.level)) return false
       if (precisionF.size && !precisionF.has(r.precision)) return false
       if (ruleF.size && !ruleF.has(r.rule_id)) return false
       if (reviewF.size) {
@@ -145,15 +145,15 @@ export default function App() {
       }
       return true
     })
-  }, [allRows, query, projectF, languageF, severityF, precisionF, ruleF, reviewF,
+  }, [allRows, query, projectF, languageF, levelF, precisionF, ruleF, reviewF,
       pathFilters, reviews])
 
   const sorted = useMemo(() => {
     const dir = sortDir === 'asc' ? 1 : -1
     const key = (r: Finding): Array<string | number> => {
       switch (sortKey) {
-        case 'severity':
-          return [SEV_ORDER[r.severity] ?? 9]
+        case 'level':
+          return [LEVEL_ORDER[r.level] ?? 9]
         case 'rule':
           return [r.rule_id]
         case 'precision':
@@ -203,7 +203,7 @@ export default function App() {
 
   // any search/filter/page-size change returns to page 1 AND clears selection
   const filterStamp = JSON.stringify([
-    query, [...projectF], [...languageF], [...severityF], [...precisionF],
+    query, [...projectF], [...languageF], [...levelF], [...precisionF],
     [...ruleF], [...reviewF], pathFilters, pageSize,
   ])
   useEffect(() => {
@@ -229,7 +229,7 @@ export default function App() {
     setQuery('')
     setProjectF(new Set())
     setLanguageF(new Set())
-    setSeverityF(new Set())
+    setLevelF(new Set())
     setPrecisionF(new Set())
     setRuleF(new Set())
     setReviewF(new Set())
@@ -240,7 +240,7 @@ export default function App() {
   }
   const anyFilterActive =
     Boolean(query.trim()) || projectF.size > 0 || languageF.size > 0 ||
-    severityF.size > 0 || precisionF.size > 0 || ruleF.size > 0 ||
+    levelF.size > 0 || precisionF.size > 0 || ruleF.size > 0 ||
     reviewF.size > 0 || pathFilters.length > 0
 
   const applyBulk = async (confirmRed: boolean) => {
@@ -256,18 +256,18 @@ export default function App() {
       setBulkMsg(`Applied "${res.status}" to ${res.applied} finding(s).`)
       setSel(emptySelection())
     } catch (e) {
-      if (e instanceof RedConfirmationRequired) {
+      if (e instanceof ErrorConfirmationRequired) {
         const go = window.confirm(
-          `${e.redCount} RED finding(s) are in this selection. ` +
-          `Marking red findings as ${bulkStatus.replace('_', ' ')} dismisses ` +
-          'real-defect candidates. Proceed?',
+          `${e.errorCount} ERROR-level finding(s) are in this selection. ` +
+          `Marking error-level findings as ${bulkStatus.replace('_', ' ')} ` +
+          'dismisses real-defect candidates. Proceed?',
         )
         if (go) {
           setBulkBusy(false)
           await applyBulk(true)
           return
         }
-        setBulkErr('Cancelled — red findings kept.')
+        setBulkErr('Cancelled — error-level findings kept.')
       } else {
         setBulkErr(String((e as Error)?.message ?? e))
       }
@@ -319,8 +319,8 @@ export default function App() {
         target={report.target}
         total={allRows.length}
         shown={sorted.length}
-        activeSeverities={severityF}
-        onToggleSeverity={(s) => setSeverityF(toggleSet(severityF, s))}
+        activeLevels={levelF}
+        onToggleLevel={(s) => setLevelF(toggleSet(levelF, s))}
       />
       <nav className="tabs">
         <button

@@ -2,7 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_ICON = {"red": "🔴", "yellow": "🟡", "blue": "🔵"}
+from auditor.core.levels import LEGACY_SEVERITY_TO_LEVEL, normalize_level
+
+# icons are DISPLAY ONLY — the contract value is the SARIF-compatible level
+_LEVEL_ICON = {"error": "🔴", "warning": "🟡", "note": "🔵"}
+
+
+def _level_counts(container: dict) -> dict:
+    """Canonical level counts; legacy reports (counts only) are translated."""
+    lc = container.get("level_counts")
+    if isinstance(lc, dict):
+        return {k: lc.get(k, 0) for k in ("error", "warning", "note")}
+    c = container.get("counts") or {}
+    return {LEGACY_SEVERITY_TO_LEVEL[k]: c.get(k, 0)
+            for k in ("red", "yellow", "blue")}
 
 
 def _md_escape(s: str) -> str:
@@ -25,8 +38,9 @@ def write_markdown(data: dict, path: Path) -> None:
     score_txt = "N/A (no supported languages detected)" if overall is None else f"**{overall}/100**"
     L.append(f"Overall code-health score (higher = safer) | درجة سلامة الكود: {score_txt}")
     L.append(f"**Verdict | الحكم الآلي: `{s.get('verdict', 'n/a').upper()}`**")
-    c = s["counts"]
-    L.append(f"- 🔴 Critical: {c['red']}   🟡 Warning: {c['yellow']}   🔵 Info: {c['blue']}")
+    lc = _level_counts(s)
+    L.append(f"- 🔴 Error: {lc['error']}   🟡 Warning: {lc['warning']}   "
+             f"🔵 Note: {lc['note']}")
     low = s.get("lowest_language")
     if low and overall is not None and low["score"] < overall:
         L.append(f"- ⚠️ Lowest language | أدنى لغة: **{low['language']} = {low['score']}/100** "
@@ -44,17 +58,17 @@ def write_markdown(data: dict, path: Path) -> None:
     L.append("")
     L.append("## Scores per language")
     L.append("")
-    L.append("| Language | Files | Score | 🔴 | 🟡 | 🔵 |")
+    L.append("| Language | Files | Score | Error | Warning | Note |")
     L.append("|---|---|---|---|---|---|")
     for p in data["projects"]:
-        pc = p["counts"]
+        pc = _level_counts(p)
         L.append(f"| {p['language']} (`{p['root']}`) | {p['file_count']} | "
-                 f"**{p['score']}/100** | {pc['red']} | {pc['yellow']} | {pc['blue']} |")
+                 f"**{p['score']}/100** | {pc['error']} | {pc['warning']} | {pc['note']} |")
     L.append("")
     L.append(f"**Scoring contract | عقد الدرجات:** `{data['scoring_formula']}` "
-             "— i.e. `max(0, 100 - 15*🔴 - 5*🟡)` per language; 🔵 is informational "
-             "and never changes the score. Findings marked `*` are heuristic "
-             "(`precision: heuristic`), not proofs.")
+             "— i.e. `max(0, 100 - 15*error - 5*warning)` per language; `note` "
+             "is informational and never changes the score. Findings marked "
+             "`*` are heuristic (`precision: heuristic`), not proofs.")
     L.append("")
     for p in data["projects"]:
         L.append(f"## {p['language'].capitalize()} — `{p['root']}` "
@@ -66,12 +80,14 @@ def write_markdown(data: dict, path: Path) -> None:
             L.append("No findings. | لا توجد ملاحظات.")
             L.append("")
             continue
-        L.append("| Sev | Rule | Location | Snippet | Detail |")
+        L.append("| Level | Rule | Location | Snippet | Detail |")
         L.append("|---|---|---|---|---|")
         for f in p["findings"]:
             loc = f"{f['file']}:{f['line']}" if f["line"] else f["file"]
             marker = "*" if f.get("precision") == "heuristic" else ""
-            L.append(f"| {_ICON[f['severity']]} | {f['rule_id']}{marker} | `{loc}` | "
+            lvl = normalize_level(f.get("level"), f.get("severity"))
+            cell = f"{_LEVEL_ICON[lvl]} {lvl}" if lvl else "unclassified"
+            L.append(f"| {cell} | {f['rule_id']}{marker} | `{loc}` | "
                      f"`{_md_escape(f['snippet'][:60]) or '-'}` | "
                      f"{_md_escape(f['detail'][:200] or f['title'])} |")
         L.append("")

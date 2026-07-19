@@ -12,6 +12,11 @@ export async function fetchReport(): Promise<Report> {
   return res.json()
 }
 
+// level normalization lives in the pure module ./levels (Node-testable);
+// re-exported here for existing importers.
+export { CANONICAL_LEVELS, levelColor, normalizeLevel } from './levels'
+import { normalizeLevel } from './levels'
+
 // Thrown by fetchSource so the panel can distinguish "server has no --repo"
 // (unavailable) from a real error.
 export class SourceUnavailable extends Error {}
@@ -45,6 +50,7 @@ export function aggregate(report: Report): Finding[] {
       rows.push({
         rule_id: f.rule_id ?? '',
         severity: f.severity ?? '',
+        level: normalizeLevel(f.level, f.severity ?? ''),
         precision: f.precision ?? '',
         language: f.language || p.language || '',
         project: p.root ?? '',
@@ -88,11 +94,11 @@ export interface BatchResult {
   updated_at: string
 }
 
-export class RedConfirmationRequired extends Error {
-  redCount: number
-  constructor(message: string, redCount: number) {
+export class ErrorConfirmationRequired extends Error {
+  errorCount: number
+  constructor(message: string, errorCount: number) {
     super(message)
-    this.redCount = redCount
+    this.errorCount = errorCount
   }
 }
 
@@ -101,7 +107,7 @@ export async function putReviewBatch(
   status: string,
   noteMode: string,
   note: string,
-  confirmRed: boolean,
+  confirmError: boolean,
 ): Promise<BatchResult> {
   const res = await fetch('/api/review-batch', {
     method: 'PUT',
@@ -111,12 +117,13 @@ export async function putReviewBatch(
       status,
       note_mode: noteMode,
       note,
-      confirm_red: confirmRed,
+      confirm_error: confirmError, // canonical name; server also accepts legacy confirm_red
     }),
   })
   const body = await res.json().catch(() => ({}))
-  if (res.status === 409 && typeof body.red_count === 'number')
-    throw new RedConfirmationRequired(body.error ?? 'red confirmation required', body.red_count)
+  const count = body.error_count ?? body.red_count
+  if (res.status === 409 && typeof count === 'number')
+    throw new ErrorConfirmationRequired(body.error ?? 'error-level confirmation required', count)
   if (!res.ok) throw new Error(body.error ?? `batch failed (HTTP ${res.status})`)
   return body as BatchResult
 }

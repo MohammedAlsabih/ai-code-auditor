@@ -1,6 +1,7 @@
 export interface RawFinding {
   rule_id: string
-  severity: string
+  severity: string // DEPRECATED legacy color (red/yellow/blue)
+  level?: string // SARIF-compatible: error/warning/note
   title: string
   file: string
   line: number
@@ -25,7 +26,8 @@ export interface Summary {
   overall_score?: number
   analysis_confidence?: number
   verdict?: string
-  counts?: { red?: number; yellow?: number; blue?: number }
+  counts?: { red?: number; yellow?: number; blue?: number } // DEPRECATED
+  level_counts?: { error?: number; warning?: number; note?: number }
 }
 
 export interface Report {
@@ -56,7 +58,8 @@ export interface SourceWindow {
 // by the table (project + resolved language).
 export interface Finding {
   rule_id: string
-  severity: string
+  severity: string // DEPRECATED legacy color, display fallback only
+  level: string // canonical: error/warning/note, or '' when unclassified
   precision: string
   language: string
   project: string
@@ -106,7 +109,7 @@ export interface ObservedRule {
   count: number
   languages: string[]
   precisions: string[]
-  severities: string[]
+  levels: string[]
 }
 
 export interface Coverage {

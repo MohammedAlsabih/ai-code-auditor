@@ -1,10 +1,11 @@
 import { BadgeCheck, CircleAlert, Info, Sparkle, TriangleAlert } from 'lucide-react'
 
+import { levelColor } from '../api'
 import type { Finding, Review } from '../types'
 
-function sevIcon(s: string) {
-  if (s === 'red') return <CircleAlert size={15} />
-  if (s === 'yellow') return <TriangleAlert size={15} />
+function levelIcon(level: string) {
+  if (level === 'error') return <CircleAlert size={15} />
+  if (level === 'warning') return <TriangleAlert size={15} />
   return <Info size={15} />
 }
 
@@ -51,7 +52,7 @@ export function FindingsTable({
                 title="Select current page"
               />
             </th>
-            <th>Severity</th>
+            <th>Level</th>
             <th>Rule</th>
             <th>Precision</th>
             <th>Language</th>
@@ -66,10 +67,11 @@ export function FindingsTable({
             const review = f.review_id ? reviews[f.review_id] : undefined
             const badge = review ? REVIEW_BADGE[review.status] : undefined
             const checked = Boolean(f.review_id && isRowSelected(f.review_id))
+            const color = levelColor(f.level)
             return (
               <tr
                 key={f.review_id ?? `${f.file}:${f.line}:${i}`}
-                className={`sev-${f.severity} ${selected === f ? 'selected' : ''}`}
+                className={`sev-${color} ${selected === f ? 'selected' : ''}`}
                 onClick={() => onSelect(f)}
               >
                 <td className="c-check" onClick={(e) => e.stopPropagation()}>
@@ -87,8 +89,8 @@ export function FindingsTable({
                   )}
                 </td>
                 <td className="c-sev">
-                  <span className={`sev sev-${f.severity}`}>
-                    {sevIcon(f.severity)} {f.severity}
+                  <span className={`sev sev-${color}`}>
+                    {levelIcon(f.level)} {f.level || f.severity || 'unclassified'}
                   </span>
                 </td>
                 <td className="mono">{f.rule_id}</td>

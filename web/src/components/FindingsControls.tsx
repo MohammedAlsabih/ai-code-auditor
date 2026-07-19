@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, Search, X } from 'lucide-react'
 
 export const SORT_KEYS: Array<[string, string]> = [
-  ['severity', 'Severity'],
+  ['level', 'Level'],
   ['rule', 'Rule'],
   ['precision', 'Precision'],
   ['language', 'Language'],

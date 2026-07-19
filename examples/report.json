@@ -1,8 +1,8 @@
 {
   "tool": "ai-code-auditor",
   "version": "0.1.0",
-  "generated_at": "2026-07-18T13:49:30.028716+00:00",
-  "target": "tests\\fixtures\\monorepo",
+  "generated_at": "2026-07-19T07:56:54.984398+00:00",
+  "target": "tests/fixtures/monorepo",
   "engines": {
     "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",
     "registry": "offline",
@@ -21,10 +21,15 @@
       "yellow": 9,
       "blue": 8
     },
+    "level_counts": {
+      "error": 7,
+      "warning": 9,
+      "note": 8
+    },
     "analysis_confidence": 48,
     "verdict": "block"
   },
-  "scoring_formula": "code_health per language = max(0, 100 - 15*red - 5*yellow) — HIGHER is safer (this is a health/safety score, deliberately NOT named 'risk'); blue findings are informational and never affect health; overall = file-count-weighted average, ALWAYS reported alongside lowest language and red count. analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage * manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), manifest_coverage = 1 - affected_manifest_files/unique_manifest_files where affected = union(errored, incomplete) by canonical path (a partially-extracted manifest or a missing/outside include counts too), registry_coverage = 0 offline else 1 - failures/attempted, rule_health = 1 - rule_failures/rule_attempted (uncapped), parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), semgrep_factor = 1.0 success / 0.97 partial / 0.95 otherwise. verdict: block if red>0 or confidence<40 or ALL rule invocations failed; review if yellow>0 or confidence<70 or any manifest/rule/parse failure; else pass — any rule failure forbids pass.",
+  "scoring_formula": "code_health per language = max(0, 100 - 15*error - 5*warning) — HIGHER is safer (this is a health/safety score, deliberately NOT named 'risk'); note findings are informational and never affect health; overall = file-count-weighted average, ALWAYS reported alongside lowest language and error count. analysis_confidence = coverage-v2 (experimental): round(100 * file_coverage * manifest_coverage * (0.5 + 0.5*registry_coverage) * rule_health * parse_factor * semgrep_factor) where file_coverage = read/(read+skipped), manifest_coverage = 1 - affected_manifest_files/unique_manifest_files where affected = union(errored, incomplete) by canonical path (a partially-extracted manifest or a missing/outside include counts too), registry_coverage = 0 offline else 1 - failures/attempted, rule_health = 1 - rule_failures/rule_attempted (uncapped), parse_factor = 1 - min(1, parse_errors/files_read) (uncapped), semgrep_factor = 1.0 success / 0.97 partial / 0.95 otherwise. verdict: block if error>0 or confidence<40 or ALL rule invocations failed; review if warning>0 or confidence<70 or any manifest/rule/parse failure; else pass — any rule failure forbids pass.",
   "projects": [
     {
       "language": "python",
@@ -37,6 +42,11 @@
         "yellow": 4,
         "blue": 4
       },
+      "level_counts": {
+        "error": 2,
+        "warning": 4,
+        "note": 4
+      },
       "findings": [
         {
           "rule_id": "H007",
@@ -48,7 +58,8 @@
           "detail": "yaml: imported but not declared; registry check skipped (--offline)",
           "language": "python",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "warning"
         },
         {
           "rule_id": "H007",
@@ -60,7 +71,8 @@
           "detail": "superjsonify: imported but not declared; registry check skipped (--offline)",
           "language": "python",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "warning"
         },
         {
           "rule_id": "P002",
@@ -72,7 +84,8 @@
           "detail": "AWS access key committed in source.",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "error"
         },
         {
           "rule_id": "P001",
@@ -84,7 +97,8 @@
           "detail": "Exception is silently swallowed — failures become invisible.",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "warning"
         },
         {
           "rule_id": "P007",
@@ -96,7 +110,8 @@
           "detail": "Marker 'TODO: implement' suggests incomplete/demo-grade code left by generation.",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         },
         {
           "rule_id": "P007",
@@ -108,7 +123,8 @@
           "detail": "Marker 'In a real app' suggests incomplete/demo-grade code left by generation.",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         },
         {
           "rule_id": "P005",
@@ -120,7 +136,8 @@
           "detail": "Composed SQL is passed to 'cursor.execute' — SQL injection risk; use parameterized queries.",
           "language": "python",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "error"
         },
         {
           "rule_id": "P006",
@@ -132,7 +149,8 @@
           "detail": "classify has cyclomatic complexity 11 (> 10).",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "warning"
         },
         {
           "rule_id": "H003",
@@ -144,7 +162,8 @@
           "detail": "requests: registry check skipped (--offline)",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         },
         {
           "rule_id": "H003",
@@ -156,7 +175,8 @@
           "detail": "ghost-ai-utils: registry check skipped (--offline)",
           "language": "python",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         }
       ]
     },
@@ -174,6 +194,11 @@
         "yellow": 5,
         "blue": 4
       },
+      "level_counts": {
+        "error": 5,
+        "warning": 5,
+        "note": 4
+      },
       "findings": [
         {
           "rule_id": "N001",
@@ -185,7 +210,8 @@
           "detail": "NEXT_PUBLIC_API_SECRET in .env.local ships to the client bundle.",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "error"
         },
         {
           "rule_id": "N006",
@@ -197,7 +223,8 @@
           "detail": "useState runs in a SERVER import path (module-graph); add \"use client\" at the boundary that should own this file.",
           "language": "tsx",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "error"
         },
         {
           "rule_id": "N006",
@@ -209,7 +236,8 @@
           "detail": "onClick event handler in a SERVER import path (module-graph).",
           "language": "tsx",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "error"
         },
         {
           "rule_id": "R001",
@@ -221,7 +249,8 @@
           "detail": "useState is called inside a if statement; hooks must run unconditionally at the top level.",
           "language": "tsx",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "error"
         },
         {
           "rule_id": "R004",
@@ -233,7 +262,8 @@
           "detail": "useEffect has no dependency array; it re-runs after every render.",
           "language": "tsx",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "warning"
         },
         {
           "rule_id": "R007",
@@ -245,7 +275,8 @@
           "detail": "__html is not a proven string literal; any user-influenced content here is an XSS vector (heuristic — no taint analysis).",
           "language": "tsx",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "error"
         },
         {
           "rule_id": "R006",
@@ -257,7 +288,8 @@
           "detail": "key={index} is the .map() index; reordering or deleting items will confuse React reconciliation.",
           "language": "tsx",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "warning"
         },
         {
           "rule_id": "H007",
@@ -269,7 +301,8 @@
           "detail": "pg: imported but not declared; registry check skipped (--offline)",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "warning"
         },
         {
           "rule_id": "H007",
@@ -281,7 +314,8 @@
           "detail": "axios-retry-ai: imported but not declared; registry check skipped (--offline)",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "warning"
         },
         {
           "rule_id": "P004",
@@ -293,7 +327,8 @@
           "detail": "SQL assembled from dynamic strings; prefer parameterized queries.",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "heuristic"
+          "precision": "heuristic",
+          "level": "warning"
         },
         {
           "rule_id": "H003",
@@ -305,7 +340,8 @@
           "detail": "left-pad-ai-super: registry check skipped (--offline)",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         },
         {
           "rule_id": "H003",
@@ -317,7 +353,8 @@
           "detail": "next: registry check skipped (--offline)",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         },
         {
           "rule_id": "H003",
@@ -329,7 +366,8 @@
           "detail": "react: registry check skipped (--offline)",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         },
         {
           "rule_id": "H003",
@@ -341,7 +379,8 @@
           "detail": "@types/node: registry check skipped (--offline)",
           "language": "typescript",
           "engine": "auditor",
-          "precision": "exact"
+          "precision": "exact",
+          "level": "note"
         }
       ]
     }

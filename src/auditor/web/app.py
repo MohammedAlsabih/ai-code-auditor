@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from auditor.core.levels import LEGACY_SEVERITY_TO_LEVEL, normalize_level
 from auditor.core.walk import MAX_FILE_BYTES
 from auditor.web.coverage import build_coverage
 from auditor.web.reviews import (
@@ -133,7 +134,8 @@ def aggregate_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             rows.append({
                 "rule_id": f.get("rule_id", ""),
-                "severity": f.get("severity", ""),
+                "severity": f.get("severity", ""),   # DEPRECATED legacy color
+                "level": normalize_level(f.get("level"), f.get("severity")),
                 "precision": f.get("precision", ""),
                 "language": f.get("language", "") or proj_lang,
                 "project": proj_root,
@@ -196,6 +198,9 @@ class BatchIn(BaseModel):
     status: str
     note_mode: str = "keep"
     note: str = ""
+    # canonical confirmation flag for dismissing error-level findings;
+    # confirm_red is the DEPRECATED legacy alias, accepted for compatibility.
+    confirm_error: bool = False
     confirm_red: bool = False
 
 
@@ -219,7 +224,7 @@ def create_app(report_path: Path, repo_root: Path | None = None,
     # original dict and report.json on disk are never touched.
     enriched: dict[str, Any] = json.loads(json.dumps(report))
     valid_review_ids: set[str] = set()
-    red_review_ids: set[str] = set()   # server-side gate for bulk FP/AR on red
+    error_review_ids: set[str] = set()  # server gate for bulk FP/AR on error-level
     for _proj in enriched.get("projects", []):
         if not isinstance(_proj, dict) or not isinstance(_proj.get("root"), str):
             continue
@@ -227,12 +232,18 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             continue
         for _f in _proj["findings"]:
             if isinstance(_f, dict):
+                # normalized SARIF-compatible level in the SERVED copy only
+                # (report.json on disk is never touched). Unknown values stay
+                # unclassified — never silently promoted.
+                _lvl = normalize_level(_f.get("level"), _f.get("severity"))
+                if _lvl is not None:
+                    _f["level"] = _lvl
                 _rid = _finding_review_id(_proj["root"], _f)
                 if _rid is not None:
                     _f["review_id"] = _rid
                     valid_review_ids.add(_rid)
-                    if _f.get("severity") == "red":
-                        red_review_ids.add(_rid)
+                    if _lvl == "error":
+                        error_review_ids.add(_rid)
 
     store = ReviewStore(reviews_path if reviews_path is not None
                         else report_path.parent / (report_path.stem + ".reviews.json"))
@@ -274,6 +285,13 @@ def create_app(report_path: Path, repo_root: Path | None = None,
     def health() -> JSONResponse:
         counts = report.get("summary", {}).get("counts", {}) \
             if isinstance(report.get("summary"), dict) else {}
+        # canonical level_counts: the report's own summary.level_counts when
+        # present, else translated from the legacy color counts.
+        lc = report.get("summary", {}).get("level_counts") \
+            if isinstance(report.get("summary"), dict) else None
+        if not isinstance(lc, dict):
+            lc = {LEGACY_SEVERITY_TO_LEVEL[k]: v for k, v in counts.items()
+                  if k in LEGACY_SEVERITY_TO_LEVEL and isinstance(v, int)}
         # deliberately NO absolute machine paths here (or anywhere the browser
         # sees): source_available carries everything the UI needs.
         return _AsciiJSON({
@@ -281,7 +299,8 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             "report_loaded": True,
             "projects": len(report.get("projects", [])),
             "findings": len(aggregate_findings(report)),
-            "counts": counts,
+            "level_counts": lc,
+            "counts": counts,   # DEPRECATED legacy colors, kept temporarily
             "source_available": repo is not None,
         })
 
@@ -354,15 +373,18 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             return _err(400, f"invalid note_mode (expected one of {', '.join(_NOTE_MODES)})")
         if len(body.note) > NOTE_MAX_CHARS:
             return _err(400, f"note exceeds {NOTE_MAX_CHARS} characters")
-        if body.status in ("false_positive", "accepted_risk") and not body.confirm_red:
-            reds = sum(1 for r in ids if r in red_review_ids)
-            if reds:
-                # enforced HERE, not just in the UI: dismissing red findings in
-                # bulk needs an explicit second confirmation
+        confirmed = body.confirm_error or body.confirm_red   # legacy alias accepted
+        if body.status in ("false_positive", "accepted_risk") and not confirmed:
+            errors_n = sum(1 for r in ids if r in error_review_ids)
+            if errors_n:
+                # enforced HERE, not just in the UI: dismissing ERROR-level
+                # findings in bulk needs an explicit second confirmation.
+                # red_count is the DEPRECATED alias of error_count.
                 return JSONResponse(
-                    {"error": f"batch touches {reds} red finding(s); resend "
-                              "with confirm_red=true to proceed",
-                     "red_count": reds}, status_code=409)
+                    {"error": f"batch touches {errors_n} error-level finding(s); "
+                              "resend with confirm_error=true to proceed",
+                     "error_count": errors_n, "red_count": errors_n},
+                    status_code=409)
         try:
             result = store.apply_batch(
                 ids, None if body.status == "unreviewed" else body.status,

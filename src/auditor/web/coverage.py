@@ -197,6 +197,7 @@ def _stage_semgrep(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _observed_rules(report: dict[str, Any]) -> list[dict[str, Any]]:
+    from auditor.core.levels import normalize_level
     groups: dict[str, dict[str, Any]] = {}
     for p in _projects(report):
         findings = p.get("findings")
@@ -207,17 +208,30 @@ def _observed_rules(report: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             g = groups.setdefault(f["rule_id"], {
                 "rule_id": f["rule_id"], "count": 0,
-                "languages": set(), "precisions": set(), "severities": set()})
+                "languages": set(), "precisions": set(), "levels": set()})
             g["count"] += 1
             for field, target in (("language", "languages"),
-                                  ("precision", "precisions"),
-                                  ("severity", "severities")):
+                                  ("precision", "precisions")):
                 v = f.get(field)
                 if isinstance(v, str) and v:
                     g[target].add(v)
+            # SARIF-compatible level (normalized); an illegal value is shown
+            # VERBATIM as unclassified — the offending level itself when one
+            # is present ("unclassified(none)"), the raw severity only when
+            # level is absent — never dropped, never promoted.
+            lvl = normalize_level(f.get("level"), f.get("severity"))
+            if lvl is not None:
+                g["levels"].add(lvl)
+            else:
+                raw = f.get("level")
+                if raw is not None:
+                    shown = raw if isinstance(raw, str) and raw else "invalid"
+                    g["levels"].add(f"unclassified({shown})")
+                elif isinstance(f.get("severity"), str) and f["severity"]:
+                    g["levels"].add(f"unclassified({f['severity']})")
     return [{**g, "languages": sorted(g["languages"]),
              "precisions": sorted(g["precisions"]),
-             "severities": sorted(g["severities"])}
+             "levels": sorted(g["levels"])}
             for g in sorted(groups.values(),
                             key=lambda g: (-g["count"], g["rule_id"]))]
 
