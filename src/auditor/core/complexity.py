@@ -35,3 +35,14 @@ def complexity_findings(files: list[SourceFile], threshold: int = THRESHOLD,
                            f"{fn.cyclomatic_complexity} (> {threshold}).",
                     language=sf.language, engine="auditor"))
     return out
+
+
+# ── Rule Capability Catalog (owned HERE) ────────────────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+DESCRIPTORS = [
+    _RD("P006", "Cyclomatic complexity above 10",
+        "A function's cyclomatic complexity exceeds 10 (measured by lizard).",
+        category="complexity", default_level="warning", default_precision="exact",
+        engine="complexity-lizard", scope="file", source="builtin"),
+]

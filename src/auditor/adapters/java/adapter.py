@@ -199,3 +199,14 @@ class JavaAdapter(LanguageAdapter):
                     if re.search(r"maven\s*[{(]\s*(url|setUrl)", text):
                         return f"custom maven repository configured in {g.as_posix()}"
         return None
+
+
+# ── Rule Capability Catalog hook (owner: java rules module) ─────────────────
+from auditor.adapters.java import rules as _jrules  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+
+def _java_rule_descriptors(self):
+    return list(_jrules.DESCRIPTORS)
+
+
+JavaAdapter.rule_descriptors = _java_rule_descriptors  # type: ignore[method-assign]

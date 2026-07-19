@@ -95,9 +95,20 @@ def run_semgrep(binary: str, project_root: Path, extra_configs: list[str],
         missing = exp - scanned if scanned else exp
         if missing:
             reasons.append(f"{len(missing)}/{len(exp)} expected files not scanned")
+    results = data.get("results")
+    if not isinstance(results, list):
+        # a results block that is not a list at all is unusable OUTPUT — this
+        # is different from one malformed result, which only degrades
+        return [], "invalid_output"
     out: list[Finding] = []
     escaped = 0
-    for res in data.get("results", []):
+    malformed = 0
+    for res in results:
+        # one malformed RESULT never sinks the audit: keep the good ones,
+        # skip the broken one, and surface the count as a partial reason
+        if not isinstance(res, dict) or not isinstance(res.get("path", ""), str):
+            malformed += 1
+            continue
         raw = res.get("path", "")
         p = Path(raw)
         if not p.is_absolute():
@@ -113,15 +124,38 @@ def run_semgrep(binary: str, project_root: Path, extra_configs: list[str],
             # bare basename that would masquerade as an in-repo finding (CP-8.6)
             escaped += 1
             continue
-        extra = res.get("extra", {})
-        out.append(Finding(
-            rule_id="S:" + res.get("check_id", "unknown"),
-            severity=_SEV_MAP.get(extra.get("severity", "WARNING"), Severity.YELLOW),
-            title=(extra.get("message") or "semgrep finding").splitlines()[0][:100],
-            file=rel, line=int(res.get("start", {}).get("line", 0)),
-            snippet="", detail=extra.get("message", ""), language="",
-            engine="semgrep"))
+        extra = res.get("extra")
+        if not isinstance(extra, dict):
+            malformed += 1                  # no usable severity/message payload
+            continue
+        # semgrep's spec types extra.metadata as raw_json: dict/string/list/
+        # null are ALL legal shapes — a non-dict simply means "no declared
+        # precision"; it is neither an error nor invalid_output
+        meta = extra.get("metadata")
+        precision = meta.get("auditor-precision") if isinstance(meta, dict) else None
+        if precision not in ("exact", "heuristic"):
+            # rules without vetted metadata (e.g. third-party packs) are
+            # pattern matches, not proofs — never silently exact
+            precision = "heuristic"
+        try:
+            start = res.get("start")
+            line = int(start.get("line", 0)) if isinstance(start, dict) else 0
+            message = extra.get("message")
+            message = message if isinstance(message, str) else ""
+            out.append(Finding(
+                rule_id="S:" + str(res.get("check_id", "unknown")),
+                severity=_SEV_MAP.get(extra.get("severity", "WARNING"),
+                                      Severity.YELLOW),
+                title=(message or "semgrep finding").splitlines()[0][:100],
+                file=rel, line=line,
+                snippet="", detail=message, language="",
+                engine="semgrep", precision=precision))
+        except (TypeError, ValueError):
+            malformed += 1
+            continue
     if escaped:
         reasons.append(f"{escaped} result(s) outside scan root dropped")
+    if malformed:
+        reasons.append(f"{malformed} malformed result(s) skipped")
     status = "success" if not reasons else "partial (" + ", ".join(reasons) + ")"
     return out, status

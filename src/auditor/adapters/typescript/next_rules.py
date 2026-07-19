@@ -179,3 +179,30 @@ class AsyncClientComponent(Rule):
 NEXT_RULES: list[Rule] = [PublicEnvSecret(), PrivateEnvInClient(),
                           ClientApiInServerComponent(), ServerImportInClient(),
                           AsyncClientComponent()]
+
+
+# ── Rule Capability Catalog (owned HERE) ────────────────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+from typing import Any as _Any  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+_N: "dict[str, _Any]" = dict(category="next", engine="pattern-engine", scope="file",
+          source="builtin", languages=("typescript", "tsx"),
+          frameworks=("next",))
+DESCRIPTORS = [
+    _RD("N001", "Secret exposed via NEXT_PUBLIC_*",
+        "A secret-named NEXT_PUBLIC_ variable is defined in code or .env* (value never echoed).",
+        default_level="error", default_precision="exact", **_N),
+    _RD("N002", "Private env read in client code",
+        "A non-public environment variable is read from a client component.",
+        default_level="warning", default_precision="exact", **_N),
+    _RD("N003", "Client API in a server component (per-file)",
+        "Browser/client-only APIs are used in a file treated as a server component by the per-file fallback.",
+        default_level="error", default_precision="heuristic", **_N),
+    _RD("N004", "server-only import in client code",
+        "A module marked server-only is imported from a client component.",
+        default_level="error", default_precision="exact", **_N),
+    _RD("N005", "Async client component",
+        "A client component is declared async, which React does not support.",
+        default_level="warning", default_precision="exact", **_N),
+]

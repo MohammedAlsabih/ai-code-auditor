@@ -184,6 +184,13 @@ class LanguageAdapter(ABC):
     def frameworks(self, root: Path, declared: list[DeclaredDep]) -> list[str]:
         return []
 
+    def rule_descriptors(self):
+        """Rule Capability Catalog hook: the descriptors this adapter's
+        package OWNS (defined next to the rule implementations). Capability
+        only — never an execution claim. Core stays neutral: the base returns
+        nothing and never names adapters."""
+        return []
+
     def language_rules(self) -> list[Rule]:
         return []
 

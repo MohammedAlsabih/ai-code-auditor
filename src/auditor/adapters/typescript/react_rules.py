@@ -443,3 +443,37 @@ class DangerousInnerHtml(Rule):
 REACT_RULES: list[Rule] = [HookInConditional(), HookInNestedCallback(),
                            HookOutsideComponent(), EffectDeps(), IndexAsKey(),
                            DangerousInnerHtml()]
+
+
+# ── Rule Capability Catalog (owned HERE; the R004 check emits R004 AND R005 —
+#    each id is described separately) ───────────────────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+from typing import Any as _Any  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+_R: "dict[str, _Any]" = dict(category="react", engine="pattern-engine", scope="file",
+          source="builtin", languages=("typescript", "tsx"),
+          frameworks=("react",))
+DESCRIPTORS = [
+    _RD("R001", "Conditional hook call",
+        "A React hook is called inside if/loop/ternary/&&/try or after an early return.",
+        default_level="error", default_precision="heuristic", **_R),
+    _RD("R002", "Hook inside a hook callback",
+        "A hook is called inside a callback passed to another hook.",
+        default_level="error", default_precision="heuristic", **_R),
+    _RD("R003", "Hook outside component or custom hook",
+        "A hook is called from a function that is neither a component nor a use* hook (memo/forwardRef exempt).",
+        default_level="warning", default_precision="heuristic", **_R),
+    _RD("R004", "useEffect without dependency array",
+        "An effect omits its dependency array and re-runs on every render.",
+        default_level="warning", default_precision="heuristic", **_R),
+    _RD("R005", "Obviously missing effect dependencies",
+        "Identifiers used inside the effect are absent from its dependency array.",
+        default_level="warning", default_precision="heuristic", **_R),
+    _RD("R006", "List key uses array index",
+        "key={index} defeats React reconciliation for reorderable lists.",
+        default_level="warning", default_precision="exact", **_R),
+    _RD("R007", "Non-literal dangerouslySetInnerHTML",
+        "dangerouslySetInnerHTML receives a non-literal __html value (XSS vector pattern).",
+        default_level="error", default_precision="heuristic", **_R),
+]

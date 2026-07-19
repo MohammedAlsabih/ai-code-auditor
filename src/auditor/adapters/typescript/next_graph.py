@@ -226,3 +226,15 @@ def analyze(files: list[SourceFile],
         notes.append(f"next-graph: {len(unresolved)} unresolved relative edge(s) "
                      f"(first: {unresolved[0]}) — not guessed")
     return findings, notes
+
+
+# ── Rule Capability Catalog (owned HERE) ────────────────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+DESCRIPTORS = [
+    _RD("N006", "Client API on a server module-graph path",
+        "Dual-state BFS over the app/ module graph proves a client-only API is reachable in a server context (orphans analyzed as server default).",
+        category="next", default_level="error", default_precision="exact",
+        engine="next-graph", scope="module_graph", source="builtin",
+        languages=("typescript", "tsx"), frameworks=("next",)),
+]

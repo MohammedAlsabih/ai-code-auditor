@@ -177,3 +177,32 @@ class SmellComments(Rule):
 
 def common_rules(profile) -> list[Rule]:
     return [EmptyCatch(profile), SecretsRule(), SqlStringBuild(profile), SmellComments()]
+
+
+# ── Rule Capability Catalog (owned HERE; multi-output checks describe EVERY
+#    emitted id separately: P002/P003 and P004/P005) ────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+from typing import Any as _Any  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+_P: "dict[str, _Any]" = dict(engine="pattern-engine", scope="file", source="builtin")
+DESCRIPTORS = [
+    _RD("P001", "Empty or exception-swallowing catch/except block",
+        "A catch/except block silently swallows errors (empty or bare pass/ignore).",
+        category="quality", default_level="warning", default_precision="exact", **_P),
+    _RD("P002", "Hardcoded secret (known token format)",
+        "A literal matches a known credential/token shape; the value is masked in reports.",
+        category="security", default_level="error", default_precision="exact", **_P),
+    _RD("P003", "Suspicious credential assignment",
+        "A credential-named variable is assigned a literal value.",
+        category="security", default_level="warning", default_precision="exact", **_P),
+    _RD("P004", "String-composed SQL",
+        "SQL text is built via string concatenation/interpolation.",
+        category="security", default_level="warning", default_precision="exact", **_P),
+    _RD("P005", "String-composed SQL reaches an execution sink",
+        "String-built SQL flows into an execution call (injection candidate).",
+        category="security", default_level="error", default_precision="heuristic", **_P),
+    _RD("P007", "AI-style incompleteness comment",
+        "A TODO/placeholder comment typical of AI-generated incomplete code.",
+        category="hygiene", default_level="note", default_precision="exact", **_P),
+]

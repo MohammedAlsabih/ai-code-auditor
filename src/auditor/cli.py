@@ -152,6 +152,7 @@ def _scan(args) -> int:
     from auditor.registries.npm import NpmClient
     from auditor.registries.nuget import NuGetClient
     from auditor.registries.pypi import PyPIClient
+    from auditor.core.catalog import collect_catalog
     from auditor.report.build import build_report
     from auditor.report.json_out import write_json
     from auditor.report.markdown import write_markdown
@@ -286,7 +287,8 @@ def _scan(args) -> int:
         # CP-8b round 3)
         diag_dict = _relativize_diag(dc_asdict(global_diag), root)
         data = build_report(args.target, results, engines, limitations,
-                            diagnostics=diag_dict, confidence=confidence)
+                            diagnostics=diag_dict, confidence=confidence,
+                          catalog=collect_catalog(adapters.values() if isinstance(adapters, dict) else adapters))
         out_dir = Path(args.output)
         write_json(data, out_dir / "report.json")
         write_markdown(data, out_dir / "report.md")
