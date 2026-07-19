@@ -20,6 +20,7 @@ dependencies = [
     "lizard>=1.23",
     "defusedxml>=0.7",
     "packaging>=24.0",
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -40,6 +41,7 @@ dev = [
     "mypy>=1.13,<2",
     "ruff>=0.8,<0.9",
     "types-defusedxml>=0.7,<0.8",
+    "types-PyYAML>=6.0,<7",
     "types-requests>=2.32,<3",
     "httpx>=0.26",             # FastAPI TestClient transport for the web tests
 ]

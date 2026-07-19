@@ -261,3 +261,17 @@ class TypeScriptAdapter(LanguageAdapter):
                     where = ".npmrc" if d == root.resolve() else f"{npmrc.as_posix()}"
                     return f"custom registry configured in {where}"
         return None
+
+
+# ── Rule Capability Catalog hook (owners: react_rules / next_rules /
+#    next_graph — this only AGGREGATES its own package's descriptors) ────────
+from auditor.adapters.typescript import next_graph as _ng  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+from auditor.adapters.typescript import next_rules as _nr  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+from auditor.adapters.typescript import react_rules as _rr  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+
+def _ts_rule_descriptors(self):
+    return list(_rr.DESCRIPTORS) + list(_nr.DESCRIPTORS) + list(_ng.DESCRIPTORS)
+
+
+TypeScriptAdapter.rule_descriptors = _ts_rule_descriptors  # type: ignore[method-assign]

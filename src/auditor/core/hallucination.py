@@ -321,3 +321,48 @@ def _judge_import(adapter, imp: ImportRef, cand_infos: dict[str, PackageInfo],
 
 def _sorted(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: (f.file, f.line, f.rule_id))
+
+
+# ── Rule Capability Catalog (owned HERE, next to the engine that emits them;
+#    capability statements only — never proof of execution) ─────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+from typing import Any as _Any  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+_H: "dict[str, _Any]" = dict(category="hallucination", engine="engine1-hallucination",
+          scope="dependency", source="builtin")
+DESCRIPTORS = [
+    _RD("H001", "Declared dependency not in registry",
+        "A definitely-declared dependency does not exist in its public registry.",
+        default_level="error", default_precision="exact", **_H),
+    _RD("H002", "Undeclared import (package exists in registry)",
+        "An import is not declared in any manifest but a same-named public package exists.",
+        default_level="warning", default_precision="exact", **_H),
+    _RD("H003", "Registry check skipped (offline)",
+        "Offline mode: the external import could not be verified against a registry.",
+        default_level="note", default_precision="exact", **_H),
+    _RD("H004", "Registry unreachable",
+        "The registry lookup failed (network/service error); existence unknown.",
+        default_level="note", default_precision="exact", **_H),
+    _RD("H005", "Brand-new package with no downloads",
+        "The resolved package is very recently published with no adoption signal.",
+        default_level="warning", default_precision="exact", **_H),
+    _RD("H006", "Fresh package",
+        "The resolved package is newer than the freshness threshold.",
+        default_level="warning", default_precision="exact", **_H),
+    _RD("H007", "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
+        "The import cannot be mapped exactly; any registry name came from a heuristic mapping, or the declaration is conditional.",
+        default_level="warning", default_precision="heuristic", **_H),
+    _RD("H008", "Hallucinated import (exact mapping, absent from registry)",
+        "An import whose registry name comes from an EXACT (literal) mapping does not exist in the public registry.",
+        default_level="error", default_precision="exact", **_H),
+    _RD("H009", "Quarantined package",
+        "The declared/resolved package is quarantined by the registry (PEP 792).",
+        default_level="error", default_precision="exact", **_H),
+    _RD("H010", "Private source configured — unverifiable",
+        "A private registry/source is configured; the package is classified unverifiable, and the public registry is not treated as its source of truth.",
+        default_level="warning", default_precision="exact", **_H),
+    _RD("H012", "Archived package",
+        "The resolved package is archived by the registry (PEP 792).",
+        default_level="note", default_precision="exact", **_H),
+]

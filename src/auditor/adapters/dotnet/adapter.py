@@ -381,3 +381,14 @@ class DotnetAdapter(LanguageAdapter):
 
     def file_language(self, path: Path) -> str:
         return "csharp"
+
+
+# ── Rule Capability Catalog hook (owner: dotnet rules module) ───────────────
+from auditor.adapters.dotnet import rules as _drules  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+
+def _dotnet_rule_descriptors(self):
+    return list(_drules.DESCRIPTORS)
+
+
+DotnetAdapter.rule_descriptors = _dotnet_rule_descriptors  # type: ignore[method-assign]

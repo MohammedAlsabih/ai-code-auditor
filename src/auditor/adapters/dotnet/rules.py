@@ -93,3 +93,23 @@ class RawSqlInterpolation(Rule):
                                     "SQL injection; use parameters (e.g. FromSqlInterpolated "
                                     "or SqlParameter)."))
         return out
+
+
+# ── Rule Capability Catalog (owned HERE) ────────────────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+from typing import Any as _Any  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+_D: "dict[str, _Any]" = dict(category="dotnet", engine="pattern-engine", scope="file",
+          source="builtin", languages=("csharp",))
+DESCRIPTORS = [
+    _RD("D001", "async void method",
+        "async void methods hide exceptions from callers; use async Task.",
+        default_level="warning", default_precision="exact", **_D),
+    _RD("D002", "Blocking on async (.Result/.Wait)",
+        ".Result/.Wait() on tasks risks deadlocks in sync contexts.",
+        default_level="warning", default_precision="exact", **_D),
+    _RD("D003", "Raw SQL string interpolation",
+        "Interpolated/concatenated strings flow into raw SQL APIs.",
+        default_level="error", default_precision="exact", **_D),
+]

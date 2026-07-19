@@ -951,3 +951,22 @@ class PythonAdapter(LanguageAdapter):
         reachable = _reachable_minors(sset, self._MAX_MINOR)
         allowed = sorted((3, m) for m in reachable)
         return allowed or None
+
+
+# ── Rule Capability Catalog (owned HERE: P008 is a Python-project rule) ─────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+DESCRIPTORS = [
+    _RD("P008", "Stdlib drift vs requires-python",
+        "Imports use stdlib modules added after (or removed before) the project's declared requires-python range.",
+        category="stdlib", default_level="note", default_precision="exact",
+        engine="pattern-engine", scope="project", source="builtin",
+        languages=("python",)),
+]
+
+
+def _python_rule_descriptors(self):
+    return list(DESCRIPTORS)
+
+
+PythonAdapter.rule_descriptors = _python_rule_descriptors  # type: ignore[method-assign]

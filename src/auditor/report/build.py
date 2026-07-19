@@ -31,7 +31,8 @@ def _counts(findings: list[Finding]) -> dict[str, int]:
 
 def build_report(target: str, projects: list[dict], engines: dict,
                  limitations: list[str], diagnostics: dict | None = None,
-                 confidence: int | None = None) -> dict:
+                 confidence: int | None = None,
+                 catalog: list[dict] | None = None) -> dict:
     out_projects = []
     parts = []
     all_counts = {"red": 0, "yellow": 0, "blue": 0}
@@ -89,6 +90,12 @@ def build_report(target: str, projects: list[dict], engines: dict,
         "diagnostics": diagnostics or {},
         "limitations": limitations,
     }
+    if catalog is not None:
+        # analysis_manifest.catalog = TOOL CAPABILITY AT SCAN TIME (the rules
+        # this build ships) — NOT proof that any rule executed; execution
+        # status is a later, separate contract.
+        from auditor.core.catalog import analysis_manifest
+        report["analysis_manifest"] = analysis_manifest(catalog)
     # redact EVERY outgoing string in one pass — target, findings, diagnostics,
     # limitations, engines (CP-8.7). Numbers/verdict are untouched by _redact.
     return _redact_tree(report)

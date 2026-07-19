@@ -65,3 +65,20 @@ class MissingTryWithResources(Rule):
                                     f"new {simple}(...) outside try-with-resources; the handle "
                                     "leaks if an exception occurs before close()."))
         return out
+
+
+# ── Rule Capability Catalog (owned HERE) ────────────────────────────────────
+from auditor.core.catalog import RuleDescriptor as _RD  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+from typing import Any as _Any  # noqa: E402  (deliberate late import: catalog block lives next to its rules)
+
+_J: "dict[str, _Any]" = dict(category="java", engine="pattern-engine", scope="file",
+          source="builtin", languages=("java",))
+DESCRIPTORS = [
+    _RD("J001", "String comparison with ==",
+        "Strings compared with ==/!= instead of equals().",
+        default_level="warning", default_precision="exact", **_J),
+    _RD("J002", "Missing try-with-resources",
+        "An AutoCloseable resource is opened outside try-with-resources.",
+        default_level="warning", default_precision="heuristic", **_J),
+]
