@@ -68,6 +68,8 @@ class EmptyCatch(Rule):
 
 class SecretsRule(Rule):
     id = "P002"  # emits P002 and P003
+    output_ids = ("P002", "P003")
+    requires_syntax_tree = False   # scans sf.text line-by-line; parse-independent
     severity = Severity.RED
     title = "Hardcoded secret (known token format)"
 
@@ -94,6 +96,7 @@ class SecretsRule(Rule):
 
 class SqlStringBuild(Rule):
     id = "P004"  # emits P004 and P005
+    output_ids = ("P004", "P005")
     severity = Severity.YELLOW
     title = "SQL built via string composition"
     precision = "heuristic"   # syntactic — no data-flow; documented in reports
@@ -161,6 +164,7 @@ class SqlStringBuild(Rule):
 
 class SmellComments(Rule):
     id = "P007"
+    requires_syntax_tree = False   # scans sf.text line-by-line; parse-independent
     severity = Severity.BLUE
     title = "AI-style incompleteness comment"
 

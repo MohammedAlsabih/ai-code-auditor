@@ -14,6 +14,18 @@ class Rule(ABC):
     title: str
     frameworks: tuple[str, ...] = ()   # () = applies regardless of framework
     precision: str = "exact"           # "exact" | "heuristic" — printed in reports
+    # True (default): the check reads sf.tree and cannot run if parsing failed.
+    # False: the check reads only sf.text, so a parse failure does NOT block it.
+    # Declared explicitly per rule — never inferred from the rule name or from
+    # whether it happens to touch sf.tree.
+    requires_syntax_tree: bool = True
+
+    @property
+    def output_ids(self) -> tuple[str, ...]:
+        """EVERY rule_id this check can emit — declared, never inferred from
+        findings (zero findings must still prove all declared ids ran).
+        Multi-output checks override with a class attribute."""
+        return (self.id,)
 
     @abstractmethod
     def check(self, sf: SourceFile) -> list[Finding]: ...

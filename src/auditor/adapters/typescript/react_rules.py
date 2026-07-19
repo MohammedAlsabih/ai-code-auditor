@@ -287,6 +287,7 @@ def _component_reactive_names(fn_node, lang: str, exclude=None) -> set[str]:
 
 class EffectDeps(Rule):
     id = "R004"  # emits R004 and R005
+    output_ids = ("R004", "R005")
     severity = Severity.YELLOW
     title = "useEffect dependency-array problems"
     frameworks = ("react",)
