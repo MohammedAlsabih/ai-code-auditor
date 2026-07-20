@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, Search, X } from 'lucide-react'
 
 export const SORT_KEYS: Array<[string, string]> = [
@@ -34,6 +34,7 @@ export function Toolbar({
   onSortDir,
   anyFilterActive,
   onClearAllFilters,
+  resetToken,
 }: {
   query: string
   onQuery: (q: string) => void
@@ -44,7 +45,9 @@ export function Toolbar({
   onRemovePath: (p: string) => void
   pathInvalid: boolean
   pathSuggestions: string[]
-  ruleOptions: string[]
+  // "<rule_id> — <short title>" labels (catalog first, finding-title fallback
+  // for old reports); `full` feeds the tooltip
+  ruleOptions: Array<{ id: string; label: string; full: string }>
   ruleFilter: Set<string>
   onToggleRule: (r: string) => void
   precisionFilter: Set<string>
@@ -55,8 +58,16 @@ export function Toolbar({
   onSortDir: () => void
   anyFilterActive: boolean
   onClearAllFilters: () => void
+  // Clear-all bumps this: rule search text + popover are LOCAL state
+  // that the parent must still be able to reset
+  resetToken: number
 }) {
   const [rulesOpen, setRulesOpen] = useState(false)
+  const [ruleSearch, setRuleSearch] = useState('')
+  useEffect(() => {
+    setRuleSearch('')
+    setRulesOpen(false)
+  }, [resetToken])
   return (
     <div className="toolbar">
       <div className="tb-row">
@@ -144,16 +155,28 @@ export function Toolbar({
           </button>
           {rulesOpen && (
             <div className="tb-rules-pop">
-              {ruleOptions.map((r) => (
-                <label key={r}>
-                  <input
-                    type="checkbox"
-                    checked={ruleFilter.has(r)}
-                    onChange={() => onToggleRule(r)}
-                  />{' '}
-                  <span className="mono">{r}</span>
-                </label>
-              ))}
+              <input
+                className="tb-rules-search"
+                placeholder="Filter by ID or title…"
+                value={ruleSearch}
+                onChange={(e) => setRuleSearch(e.target.value)}
+              />
+              {ruleOptions
+                .filter((r) => {
+                  const q = ruleSearch.trim().toLowerCase()
+                  return !q || r.id.toLowerCase().includes(q) ||
+                    r.full.toLowerCase().includes(q)
+                })
+                .map((r) => (
+                  <label key={r.id} title={r.full}>
+                    <input
+                      type="checkbox"
+                      checked={ruleFilter.has(r.id)}
+                      onChange={() => onToggleRule(r.id)}
+                    />{' '}
+                    <span className="mono">{r.label}</span>
+                  </label>
+                ))}
             </div>
           )}
         </span>

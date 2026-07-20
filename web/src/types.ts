@@ -35,6 +35,9 @@ export interface Report {
   projects: Project[]
   target?: string
   generated_at?: string
+  // deliberately unknown-shaped: old reports lack it, malformed reports may
+  // carry anything — rulecov.ts type-guards every access
+  analysis_manifest?: unknown
 }
 
 // One numbered line of a source window from /api/source.

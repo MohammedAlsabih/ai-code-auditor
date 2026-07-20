@@ -15,8 +15,10 @@ import { CoveragePanel } from './components/CoveragePanel'
 import { DetailPanel } from './components/DetailPanel'
 import { BulkBar, PaginationBar, Toolbar } from './components/FindingsControls'
 import { FindingsTable } from './components/FindingsTable'
+import { RulesPanel } from './components/RulesPanel'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
+import { buildRuleCoverage, ruleFilterOptions } from './rulecov'
 import {
   type Selection,
   dedupeIds,
@@ -50,7 +52,7 @@ export default function App() {
   const [reviews, setReviews] = useState<Record<string, Review>>({})
   const [reviewsOk, setReviewsOk] = useState(true)
   const [reviewsError, setReviewsError] = useState('')
-  const [tab, setTab] = useState<'findings' | 'coverage'>('findings')
+  const [tab, setTab] = useState<'findings' | 'rules' | 'coverage'>('findings')
 
   // multi-value filters: OR inside a category, AND across categories
   const [query, setQuery] = useState('')
@@ -64,6 +66,8 @@ export default function App() {
   const [pathInput, setPathInput] = useState('')
   const [pathInvalid, setPathInvalid] = useState(false)
 
+  // bumped by Clear-all: resets Toolbar-local state (rule search/popover)
+  const [filterResetToken, setFilterResetToken] = useState(0)
   const [sortKey, setSortKey] = useState('level')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [page, setPage] = useState(1)
@@ -104,10 +108,20 @@ export default function App() {
     () => Array.from(new Set(allRows.map((r) => r.language).filter(Boolean))).sort(),
     [allRows],
   )
-  const ruleOptions = useMemo(
-    () => Array.from(new Set(allRows.map((r) => r.rule_id).filter(Boolean))).sort(),
-    [allRows],
+  // Rules-tab model: catalog x execution from the REPORT only (rulecov.ts)
+  const ruleCoverage = useMemo(
+    () => buildRuleCoverage(report?.analysis_manifest),
+    [report],
   )
+  const ruleOptions = useMemo(() => {
+    const ids = Array.from(new Set(allRows.map((r) => r.rule_id).filter(Boolean))).sort()
+    // fallback for OLD reports without a catalog: the first finding title
+    const titles: Record<string, string> = {}
+    for (const r of allRows) {
+      if (r.rule_id && r.title && !(r.rule_id in titles)) titles[r.rule_id] = r.title
+    }
+    return ruleFilterOptions(ids, ruleCoverage.rows, titles)
+  }, [allRows, ruleCoverage])
   const pathSuggestions = useMemo(() => {
     // derived from existing findings ONLY — never walks the repository
     const set = new Set<string>()
@@ -212,6 +226,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterStamp])
 
+  // the DetailPanel must never keep showing a finding the filters hid
+  useEffect(() => {
+    if (selected && !filtered.includes(selected)) setSelected(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered])
+
   // DEDUPLICATED visible selectable ids — the single base for payload/counter
   const filteredSelectable = useMemo(
     () => dedupeIds(filtered.filter((r) => r.review_id).map((r) => r.review_id as string)),
@@ -226,6 +246,7 @@ export default function App() {
   const allMode = sel.mode === 'all'
 
   const clearAllFilters = () => {
+    setFilterResetToken((n) => n + 1)   // rule search cleared + popover closed
     setQuery('')
     setProjectF(new Set())
     setLanguageF(new Set())
@@ -320,7 +341,7 @@ export default function App() {
         total={allRows.length}
         shown={sorted.length}
         activeLevels={levelF}
-        onToggleLevel={(s) => setLevelF(toggleSet(levelF, s))}
+        onToggleLevel={(s) => setLevelF((prev) => toggleSet(prev, s))}
       />
       <nav className="tabs">
         <button
@@ -330,13 +351,25 @@ export default function App() {
           Findings
         </button>
         <button
+          className={`tab ${tab === 'rules' ? 'active' : ''}`}
+          onClick={() => setTab('rules')}
+        >
+          Rules
+        </button>
+        <button
           className={`tab ${tab === 'coverage' ? 'active' : ''}`}
           onClick={() => setTab('coverage')}
         >
           Coverage
         </button>
       </nav>
-      {tab === 'coverage' ? (
+      {tab === 'rules' ? (
+        <div className="body">
+          <main className="main">
+            <RulesPanel coverage={ruleCoverage} />
+          </main>
+        </div>
+      ) : tab === 'coverage' ? (
         <div className="body">
           <main className="main">
             <CoveragePanel />
@@ -350,9 +383,9 @@ export default function App() {
             projectF={projectF}
             languageF={languageF}
             reviewF={reviewF}
-            onToggleProject={(p) => setProjectF(toggleSet(projectF, p))}
-            onToggleLanguage={(l) => setLanguageF(toggleSet(languageF, l))}
-            onToggleReview={(s) => setReviewF(toggleSet(reviewF, s))}
+            onToggleProject={(p) => setProjectF((prev) => toggleSet(prev, p))}
+            onToggleLanguage={(l) => setLanguageF((prev) => toggleSet(prev, l))}
+            onToggleReview={(s) => setReviewF((prev) => toggleSet(prev, s))}
             onClearProjects={() => setProjectF(new Set())}
             onClearLanguages={() => setLanguageF(new Set())}
             onClearReviews={() => setReviewF(new Set())}
@@ -373,15 +406,16 @@ export default function App() {
               pathSuggestions={pathSuggestions}
               ruleOptions={ruleOptions}
               ruleFilter={ruleF}
-              onToggleRule={(r) => setRuleF(toggleSet(ruleF, r))}
+              onToggleRule={(r) => setRuleF((prev) => toggleSet(prev, r))}
               precisionFilter={precisionF}
-              onTogglePrecision={(p) => setPrecisionF(toggleSet(precisionF, p))}
+              onTogglePrecision={(p) => setPrecisionF((prev) => toggleSet(prev, p))}
               sortKey={sortKey}
               sortDir={sortDir}
               onSortKey={setSortKey}
               onSortDir={() => setSortDir(sortDir === 'asc' ? 'desc' : 'asc')}
               anyFilterActive={anyFilterActive}
               onClearAllFilters={clearAllFilters}
+              resetToken={filterResetToken}
             />
             {selectedIds.length > 0 && (
               <BulkBar
