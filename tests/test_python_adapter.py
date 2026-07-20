@@ -571,7 +571,7 @@ def test_symlinked_manifest_outside_scan_root_is_refused(tmp_path):
     diag = Diagnostics()
     deps = PythonAdapter().parse_dependencies(root, diag=diag)
     assert all(d.name != "leaked-dep-name" for d in deps)
-    assert any("outside the scan root" in e for e in diag.manifest_errors)
+    assert any("outside the repository root" in e for e in diag.manifest_errors)
 
 
 def test_partial_parse_recorded_in_diagnostics(tmp_path):
