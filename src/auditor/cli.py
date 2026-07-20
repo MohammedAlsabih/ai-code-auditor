@@ -323,9 +323,18 @@ def _scan(args) -> int:
         # the REPORT shows repository-relative paths (privacy + reproducibility,
         # CP-8b round 3)
         diag_dict = _relativize_diag(dc_asdict(global_diag), root)
+        # catalog collected ONCE; execution serialized AFTER every engine has
+        # recorded (builtin file rules, H, project passes, semgrep) — derived
+        # from the ledgers only, never recomputed from diagnostics/findings.
+        # Scoring/confidence/verdict above are already computed and unaffected.
+        from auditor.core.execution import execution_manifest
+        catalog = collect_catalog(adapters.values()
+                                  if isinstance(adapters, dict) else adapters)
+        execution = execution_manifest(execution_ledgers,
+                                       {d["rule_id"] for d in catalog})
         data = build_report(args.target, results, engines, limitations,
                             diagnostics=diag_dict, confidence=confidence,
-                          catalog=collect_catalog(adapters.values() if isinstance(adapters, dict) else adapters))
+                            catalog=catalog, execution=execution)
         out_dir = Path(args.output)
         write_json(data, out_dir / "report.json")
         write_markdown(data, out_dir / "report.md")

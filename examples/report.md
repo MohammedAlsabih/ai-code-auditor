@@ -1,6 +1,6 @@
 # AI Code Auditor Report
 
-**Target:** `tests/fixtures/monorepo` · **Generated:** 2026-07-19T07:56:54.984398+00:00 · **Tool:** ai-code-auditor v0.1.0
+**Target:** `tests/fixtures/monorepo` · **Generated:** 2026-07-20T08:17:47.058937+00:00 · **Tool:** ai-code-auditor v0.1.0
 
 ## Executive Summary | الملخص التنفيذي
 
@@ -17,7 +17,7 @@ Overall code-health score (higher = safer) | درجة سلامة الكود: **1
 | ast | tree-sitter 0.26 (python/java/csharp/typescript/tsx) |
 | registry | offline |
 | complexity | lizard |
-| semgrep | not available (builtin rules only) |
+| semgrep | disabled by --no-semgrep (builtin rules only) |
 
 ## Scores per language
 
@@ -66,6 +66,6 @@ Frameworks: react, next
 ## Limitations | حدود الفحص
 
 - Offline mode: no registry verification was performed.
-- semgrep layer: not available (builtin rules only).
+- semgrep layer: disabled by --no-semgrep (builtin rules only).
 - Undetectable private-source channels (env vars, ~/.m2/settings.xml mirrors, CI config) cannot be ruled out for not-found packages.
 - Private registries are NEVER contacted; packages behind them are classified unverified (H010), and the public registry is not treated as the source of truth for them.

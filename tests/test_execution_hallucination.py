@@ -232,12 +232,12 @@ def test_real_pipeline_run_fills_b1_and_h_counters(tmp_path, monkeypatch):
                for led in captured)
     assert any(led.rules.get("H001") and led.rules["H001"].unavailable_reasons
                for led in captured)
-    # report.json still free of execution keys in this slice
-    text = (out / "report.json").read_text(encoding="utf-8")
-    for banned in ("eligible_inputs", "unavailable_reasons",
-                   "not_applicable_reasons", "execution_ledger"):
-        assert banned not in text
-    json.loads(text)                                 # valid report
+    # B2-D: the H facts are serialized under analysis_manifest.execution ONLY
+    data = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    execution = data["analysis_manifest"]["execution"]
+    assert any("H001" in p["rules"] and p["rules"]["H001"]["unavailable_reasons"]
+               for p in execution["projects"])
+    assert "eligible_inputs" not in json.dumps(data["projects"])
 
 
 def test_ledger_guard_never_contradicts_a_rule_that_ran():

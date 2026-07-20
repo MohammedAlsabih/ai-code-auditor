@@ -522,17 +522,20 @@ def test_ledger_recording_never_changes_scoring(tmp_path, descriptors):
                              "semgrep_status": diag.semgrep_status}))
 
 
-def test_pipeline_report_still_free_of_execution_keys(tmp_path):
+def test_pipeline_serializes_semgrep_execution_under_manifest(tmp_path):
     from auditor import cli
     out = tmp_path / "rep"
     cli.main(["scan", "tests/fixtures/monorepo", "--output", str(out),
               "--offline", "--no-semgrep"])
-    text = (out / "report.json").read_text(encoding="utf-8")
-    for banned in ("eligible_inputs", "unavailable_reasons", "not_applicable_reasons",
-                   "execution_ledger", "skipped_reasons", "partial_reasons",
-                   "failure_reasons"):
-        assert banned not in text
-    data = json.loads(text)
-    manifest = data["analysis_manifest"]
-    assert "execution" not in manifest             # contract unchanged this slice
+    data = json.loads((out / "report.json").read_text(encoding="utf-8"))
     assert "disabled by --no-semgrep" in data["diagnostics"]["semgrep_status"]
+    # B2-D: the S:* ledger facts now appear ONLY under analysis_manifest.execution
+    manifest = data["analysis_manifest"]
+    assert manifest["schema_version"] == 2
+    py = next(p for p in manifest["execution"]["projects"]
+              if p["language"] == "python")
+    rec = py["rules"]["S:auditor-python-eval-input"]
+    assert rec["status"] == "skipped" and rec["attempted"] == 0
+    assert rec["skipped_reasons"] == ["semgrep engine disabled by --no-semgrep"]
+    # execution facts never leak into the findings/projects block
+    assert "skipped_reasons" not in json.dumps(data["projects"])

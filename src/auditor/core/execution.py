@@ -23,12 +23,19 @@ Coverage so far:
   Diagnostics.rule_attempted/rule_failures — those counters belong to the
   builtin rules and semgrep already carries its own confidence factor.
 
-Still out of scope (later slices): status computation and writing
-analysis_manifest.execution.
+- B2-D — status derivation (derive_execution_status: a PURE function of one
+  RuleExecution's counters/reasons, never of findings) and serialization
+  (execution_manifest -> analysis_manifest.execution, explicit allowlist).
+  An execution status describes whether and how a rule RAN — never code
+  safety: a rule that ran and returned zero findings is "executed", not
+  "passed"; pass/clean/safe are not statuses.
 
-The ledger is NOT serialized into report.json yet — wiring a half-finished
-contract into asdict-driven reports would leak it; report integration is a
-later slice.
+Still out of scope: the Rule Coverage UI.
+
+Since B2-D the ledgers ARE serialized: execution_manifest() emits
+analysis_manifest.execution (its own schema_version) through an explicit
+field allowlist — repo-relative roots only, legal reason strings only, and
+derive_execution_status() computed per record at serialization time.
 """
 from __future__ import annotations
 
@@ -207,6 +214,178 @@ def record_project_pass(ledger, diag, group: Iterable[str], findings,
     if diag is not None and is_fail:
         diag.rule_failures += 1
     return kept
+
+
+EXECUTION_SCHEMA_VERSION = 1
+EXECUTION_STATUSES = ("executed", "partial", "failed", "blocked", "unavailable",
+                      "skipped", "not_applicable", "not_recorded", "inconsistent")
+_COUNTER_FIELDS = ("eligible_inputs", "attempted", "failures", "blocked_inputs",
+                   "partial_parse_inputs")
+_REASON_FIELDS = ("not_applicable_reasons", "unavailable_reasons",
+                  "partial_reasons", "failure_reasons", "skipped_reasons")
+
+
+def derive_execution_status(record: RuleExecution) -> str:
+    """PURE derivation of an execution status from ONE record's counters and
+    reasons. Describes whether and how the rule RAN — never code safety, and
+    findings play no part in the decision (executed+0 findings is still just
+    "executed"). Contradictory facts are reported as "inconsistent" — the data
+    is never repaired or silently dropped."""
+    counters = [getattr(record, f) for f in _COUNTER_FIELDS]
+    if any(isinstance(v, bool) or not isinstance(v, int) or v < 0
+           for v in counters):
+        return "inconsistent"
+    for f in _REASON_FIELDS:
+        if not _valid_reasons(getattr(record, f)):
+            return "inconsistent"
+    if record.failures > record.attempted:
+        return "inconsistent"
+    if record.blocked_inputs > record.eligible_inputs:
+        return "inconsistent"
+    if record.partial_parse_inputs > record.attempted:
+        return "inconsistent"
+    if record.failure_reasons and record.failures == 0:
+        return "inconsistent"
+    if record.partial_reasons and record.attempted == 0:
+        return "inconsistent"
+    if record.attempted > 0 and (record.unavailable_reasons
+                                 or record.skipped_reasons
+                                 or record.not_applicable_reasons):
+        return "inconsistent"
+    # the three NON-execution explanations are mutually exclusive categories:
+    # ANY two (or all three) together are contradictory facts. blocked_inputs
+    # stays an independent fact — it never conflicts with them by itself.
+    categories = sum(1 for reasons in (record.not_applicable_reasons,
+                                       record.unavailable_reasons,
+                                       record.skipped_reasons) if reasons)
+    if categories > 1:
+        return "inconsistent"
+    if record.not_applicable_reasons and (record.eligible_inputs > 0
+                                          or record.blocked_inputs > 0):
+        return "inconsistent"
+    if record.attempted > 0:
+        if record.failures == record.attempted:
+            return "failed"
+        if record.failures or record.blocked_inputs \
+                or record.partial_parse_inputs or record.partial_reasons:
+            return "partial"
+        return "executed"
+    if record.skipped_reasons:
+        return "skipped"
+    if record.unavailable_reasons:
+        return "unavailable"
+    if record.not_applicable_reasons:
+        return "not_applicable"
+    if record.blocked_inputs > 0:
+        return "blocked"
+    return "not_recorded"    # eligible with no attempt and no explanation,
+    #                          or no facts at all — both are unrecorded gaps
+
+
+def _encodable(s: str) -> bool:
+    """A lone surrogate cannot be written as UTF-8 JSON — such a string is
+    not serializable evidence."""
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _valid_reasons(value) -> bool:
+    """A reasons field is a list of NON-EMPTY, UTF-8-encodable strings with
+    no duplicates — anything else is a contradictory record, never repaired
+    in derive."""
+    if not isinstance(value, list):
+        return False
+    if any(not isinstance(x, str) or not x.strip() or not _encodable(x)
+           for x in value):
+        return False
+    return len(set(value)) == len(value)
+
+
+def _safe_root(root) -> tuple[str, bool]:
+    """Repository-relative POSIX roots only: '.' or sane '/'-separated
+    components (no drive/colon, no backslash, no leading '/', no '..' or
+    empty parts). Anything else is replaced by a fixed placeholder — the raw
+    value never reaches the JSON."""
+    if root == ".":
+        return ".", True
+    if not isinstance(root, str) or not root or not _encodable(root):
+        return "<invalid-project-root>", False
+    if "\\" in root or ":" in root or root.startswith("/"):
+        return "<invalid-project-root>", False
+    parts = root.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return "<invalid-project-root>", False
+    return root, True
+
+
+def _clean_reasons(value) -> tuple[list[str], bool]:
+    """(serializable_reasons, was_valid): legal strings only, deterministic
+    dedupe preserving first occurrence. Non-list input or non-string/empty
+    elements are NEVER printed — they are dropped from the JSON and flagged
+    by the caller via a value-free contract error."""
+    if not isinstance(value, list):
+        return [], False
+    ok = True
+    out: list[str] = []
+    for x in value:
+        if isinstance(x, str) and x.strip() and _encodable(x):
+            if x not in out:
+                out.append(x)
+            else:
+                ok = False                      # duplicate: deduped + flagged
+        else:
+            ok = False      # junk / unencodable (lone surrogate): dropped + flagged
+    return out, ok
+
+
+def execution_manifest(ledgers: Iterable[ExecutionLedger],
+                       catalog_ids: Iterable[str]) -> dict:
+    """analysis_manifest.execution (schema v1): the per-project ledgers as
+    JSON-ready facts. EXPLICIT allowlist (never a bare asdict), deterministic
+    order (projects by root then language; rule ids sorted), repo-relative
+    roots only, and no findings/snippets/source. Every ledger record appears —
+    even inconsistent ones; a recorded id absent from the catalog is kept with
+    status=inconsistent plus a visible contract error, never dropped."""
+    known = set(catalog_ids)
+    projects = []
+    for led in sorted(ledgers, key=lambda led: (str(led.root), led.language)):
+        contract_errors = list(led.contract_errors)
+        root, root_ok = _safe_root(led.root)
+        if not root_ok:
+            # project-level metadata fault: the placeholder replaces the raw
+            # value and the rule statuses are NOT punished for it
+            msg = "execution project root is not repository-relative"
+            if msg not in contract_errors:
+                contract_errors.append(msg)
+        rules = {}
+        for rid in sorted(led.rules):
+            rec = led.rules[rid]
+            status = derive_execution_status(rec)
+            if rid not in known:
+                status = "inconsistent"
+                msg = (f"rule {rid} recorded in the execution ledger but "
+                       "absent from the rule catalog")
+                if msg not in contract_errors:
+                    contract_errors.append(msg)
+            entry: dict = {"status": status}
+            for f in _COUNTER_FIELDS:
+                entry[f] = getattr(rec, f)
+            for f in _REASON_FIELDS:
+                cleaned, ok = _clean_reasons(getattr(rec, f))
+                entry[f] = cleaned          # legal strings only, deduped
+                if not ok:
+                    # names the rule and the FIELD only — the offending value
+                    # (which may carry a path or a secret) is never echoed
+                    msg = f"rule {rid}: invalid entries in {f}"
+                    if msg not in contract_errors:
+                        contract_errors.append(msg)
+            rules[rid] = entry
+        projects.append({"language": led.language, "root": root,
+                         "rules": rules, "contract_errors": contract_errors})
+    return {"schema_version": EXECUTION_SCHEMA_VERSION, "projects": projects}
 
 
 def merge_ledgers(ledgers: Iterable[ExecutionLedger]) -> list[ExecutionLedger]:
