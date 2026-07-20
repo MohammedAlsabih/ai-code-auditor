@@ -332,7 +332,15 @@ def _scan(args) -> int:
                                   if isinstance(adapters, dict) else adapters)
         execution = execution_manifest(execution_ledgers,
                                        {d["rule_id"] for d in catalog})
-        data = build_report(args.target, results, engines, limitations,
+        # the report's `target` never echoes an ABSOLUTE machine path (privacy,
+        # CP-8b round 3 — surfaced by Linux CI where as_posix == str): URLs and
+        # relative paths pass through, a local absolute path shows as
+        # <local>/<basename> only.
+        display_target = args.target
+        if "://" not in display_target and not display_target.startswith("git@") \
+                and Path(display_target).is_absolute():
+            display_target = f"<local>/{Path(display_target).name}"
+        data = build_report(display_target, results, engines, limitations,
                             diagnostics=diag_dict, confidence=confidence,
                             catalog=catalog, execution=execution)
         out_dir = Path(args.output)
