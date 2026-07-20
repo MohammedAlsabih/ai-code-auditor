@@ -403,13 +403,16 @@ def test_r5_packageversion_is_catalog_not_dependency(tmp_path):
     assert {d.name for d in DotnetAdapter().parse_dependencies(d2)} == set()
 
 
-def test_r5_relativize_is_field_aware():
+def test_r5_relativize_is_field_aware(tmp_path):
     from auditor.cli import _relativize_diag
-    root = Path("C:/My Repo")     # a repo path WITH a space
+    root = tmp_path / "My Repo"   # a repo path WITH a space (platform-neutral)
+    root.mkdir()
+    base = root.resolve().as_posix()
+    outside = (tmp_path / "outside" / "x").resolve().as_posix()
     d = {"notes": ["failed https://registry.example/a/b"],   # URL untouched
-         "manifest_errors": ["C:/My Repo/app/pyproject.toml: bad",
-                             "C:/outside/x/pyproject.toml: unreadable"],
-         "manifest_files": ["C:/My Repo/app/pyproject.toml"]}
+         "manifest_errors": [f"{base}/app/pyproject.toml: bad",
+                             f"{outside}/pyproject.toml: unreadable"],
+         "manifest_files": [f"{base}/app/pyproject.toml"]}
     out = _relativize_diag(d, root)
     assert out["notes"] == ["failed https://registry.example/a/b"]     # URL intact
     assert out["manifest_errors"][0] == "app/pyproject.toml: bad"      # space-safe, repo-relative

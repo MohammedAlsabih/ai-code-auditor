@@ -24,8 +24,11 @@ def _auditor(name: str) -> set[str]:
 
 
 def _eslint():
+    # the recorded baseline stores BARE file names (publish hygiene: no machine
+    # paths); PureWindowsPath handles both separators for any older snapshot
+    from pathlib import PureWindowsPath
     data = json.loads((_ROOT / "eslint-results.json").read_text(encoding="utf-8-sig"))
-    return {Path(e["filePath"]).name:
+    return {PureWindowsPath(e["filePath"]).name:
             sorted({m["ruleId"].split("/")[-1] for m in e["messages"]}) for e in data}
 
 

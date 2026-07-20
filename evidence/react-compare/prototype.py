@@ -1,6 +1,6 @@
 """Standalone prototype of the planned tree-sitter React rules.
 
-Source of truth: <repo>\\docs\\superpowers\\plans\\2026-07-17-ai-code-auditor-mvp.md
+Source of truth: the internal MVP implementation plan (Tasks 3/12/13)
   - Task 3  -> tree-sitter helpers (get_language/get_parser/parse_source/captures/node_text/line_of)
   - Task 12 -> R001 HookInConditional, R002 HookInNestedCallback, R003 HookOutsideComponent + helpers
   - Task 13 -> R004/R005 EffectDeps (+_component_reactive_names)
