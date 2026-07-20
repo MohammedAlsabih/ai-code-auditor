@@ -10,7 +10,8 @@ from auditor.core.treesitter import parse_source
 
 def run_pattern_engine(adapter, project_root: Path, files: list[SourceFile],
                        frameworks: list[str], diag: Diagnostics | None = None,
-                       ledger=None) -> list[Finding]:
+                       ledger=None,
+                       complexity_threshold: int | None = None) -> list[Finding]:
     rules = [*common_rules(adapter.syntax()), *adapter.language_rules()]
     # a framework-gated rule with no matching framework is NOT ELIGIBLE — it
     # never appears in the ledger at all (0 attempts must not read as "ran")
@@ -54,7 +55,11 @@ def run_pattern_engine(adapter, project_root: Path, files: list[SourceFile],
     # touch the ledger — the per-file counters already recorded must not be
     # double-counted by the wrapper.
     try:
-        findings += complexity_findings(files, diag=diag, ledger=ledger)
+        if complexity_threshold is None:
+            findings += complexity_findings(files, diag=diag, ledger=ledger)
+        else:
+            findings += complexity_findings(files, complexity_threshold,
+                                            diag=diag, ledger=ledger)
     except Exception as e:
         if diag is not None:
             diag.rule_attempted += 1

@@ -66,6 +66,33 @@ class LanguageAdapter(ABC):
     def set_repo_root(self, path: Path) -> None:
         self._repo_root = path.resolve()
 
+    # ── project configuration hooks (W2-B2.8A) ──────────────────────────────
+    _config_internal: tuple[str, ...] = ()   # user-declared internal names/prefixes
+
+    def apply_config(self, config) -> None:
+        """Consume the loaded AuditorConfig. The base stores this ecosystem's
+        internal package names/prefixes; adapters extend for runtime builtins
+        and npm roots. Core stays neutral: `config` is plain data."""
+        self._config_internal = tuple(
+            config.internal_packages.get(self.ecosystem, ()))
+
+    def _config_internal_match(self, name: str) -> bool:
+        """User-declared internal package: exact name, or a prefix on a real
+        component boundary ('.', '/', or npm-scope) — 'acme' never swallows
+        'acmex'."""
+        for p in self._config_internal:
+            if name == p or name.startswith(p + ".") or name.startswith(p + "/"):
+                return True
+        return False
+
+    def dependency_audit_reason(self, root: Path) -> str | None:
+        """None => the dependency hallucination audit applies to this project.
+        A string => the audit is NOT APPLICABLE here (the reason is recorded in
+        the execution ledger; code rules still run). A file suffix alone never
+        proves registry ownership — adapters override where a legal package
+        root is required (npm)."""
+        return None
+
     def _confinement_root(self):
         return getattr(self, "_repo_root", None) or getattr(self, "_scan_root", None)
 

@@ -34,8 +34,15 @@ class TypeScriptAdapter(LanguageAdapter):
     ecosystem = "npm"
     source_globs = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
+    # runtime environments whose imports are NOT npm packages: k6 load-test
+    # scripts import `k6` / `k6/*` from the k6 runtime itself (field-verified
+    # false H002s). Extended per-repo via config runtime_builtins.npm.
+    _RUNTIME_BUILTINS = frozenset({"k6"})
+
     def __init__(self) -> None:
         self._self_name = ""
+        self._runtime_builtins: frozenset[str] = self._RUNTIME_BUILTINS
+        self._npm_roots: tuple[str, ...] = ()   # config-authorized manifestless roots
         self._alias_prefixes: tuple[str, ...] = ()
         # (import-prefix, project-relative target base) — graph resolution needs
         # the TARGET, not just the prefix: "@/*":["./src/*"] maps @/x to src/x
@@ -47,7 +54,24 @@ class TypeScriptAdapter(LanguageAdapter):
         return "tsx" if path.suffix.lower() in (".tsx", ".jsx") else "typescript"
 
     def detect(self, root: Path) -> bool:
-        return (root / "package.json").is_file()
+        if (root / "package.json").is_file():
+            return True
+        # a config-authorized npm root IS a package root: it becomes a real
+        # project in discovery, so nearest-root ownership and the dependency
+        # audit apply to it exactly like a manifest-bearing package
+        return self._is_configured_npm_root(root)
+
+    def _is_configured_npm_root(self, root: Path) -> bool:
+        if not self._npm_roots:
+            return False
+        repo = self._confinement_root()
+        if repo is None:
+            return False
+        try:
+            rel = root.resolve().relative_to(repo).as_posix()
+        except (ValueError, OSError):
+            return False
+        return rel in self._npm_roots or (rel == "." and "." in self._npm_roots)
 
     def parse_dependencies(self, root: Path, diag=None) -> list[DeclaredDep]:
         self._diag = diag
@@ -207,9 +231,34 @@ class TypeScriptAdapter(LanguageAdapter):
         top = "/".join(parts[:2]) if spec.startswith("@") and len(parts) >= 2 else parts[0]
         return ImportRef(module=spec, file=rel, line=line_of(string_node), top_level=top)
 
+    def apply_config(self, config) -> None:
+        super().apply_config(config)
+        extra = config.runtime_builtins.get("npm", ())
+        if extra:
+            self._runtime_builtins = self._RUNTIME_BUILTINS | set(extra)
+        self._npm_roots = config.npm_roots
+
+    def dependency_audit_reason(self, root: Path) -> str | None:
+        """npm dependency auditing requires a LEGAL package root: a
+        `package.json` at the project root, or an explicit config npm_roots
+        entry. A `.js/.ts` suffix alone (Phoenix asset pipelines, k6 scripts,
+        loose tooling) never proves the file is npm-owned — such projects get
+        code rules only, and no import is sent to the npm registry."""
+        if (root / "package.json").is_file():
+            return None
+        if self._is_configured_npm_root(root):
+            return None
+        return ("no npm package root owns these files (no package.json and no "
+                "configured npm root) — code rules ran; npm dependency audit "
+                "disabled")
+
     def is_internal(self, imp: ImportRef) -> bool:
         top = imp.top_level
         if top.startswith("node:") or top in NODE_BUILTINS:
+            return True
+        if top in self._runtime_builtins:
+            return True   # runtime-provided (k6/...), not an npm package
+        if self._config_internal_match(imp.module) or self._config_internal_match(top):
             return True
         if self._self_name and top == self._self_name:
             return True   # package self-reference (imports its own name)

@@ -46,9 +46,27 @@ class DotnetAdapter(LanguageAdapter):
     source_globs = (".cs",)
     mapping_precision = "heuristic"   # namespace->package-id guessing => mapping findings are heuristic
 
+    # Shared-framework providers (W2-B2.8A). SOURCE: the official
+    # Microsoft.AspNetCore.App reference-pack / "ASP.NET Core shared framework"
+    # asset list (learn.microsoft.com, aspnet/AspNetCore shared-framework
+    # manifest): its assemblies live under EXACTLY these namespace roots.
+    # Deliberately narrow — never a blanket "Microsoft.*" family guess.
+    _FRAMEWORK_PROVIDES: dict[str, tuple[str, ...]] = {
+        "microsoft.aspnetcore.app": (
+            "Microsoft.AspNetCore", "Microsoft.Extensions",
+            "Microsoft.Net.Http.Headers", "Microsoft.JSInterop"),
+    }
+    # SDKs that imply a FrameworkReference without writing one (official docs:
+    # "Microsoft.NET.Sdk.Web implicitly references Microsoft.AspNetCore.App")
+    _SDK_IMPLICIT_FRAMEWORKS: dict[str, str] = {
+        "microsoft.net.sdk.web": "microsoft.aspnetcore.app",
+    }
+
     def __init__(self) -> None:
         self._own_namespaces: tuple[str, ...] = ()
         self._old_tfm = False   # any TargetFramework < netcore3 / netstandard?
+        self._fw_provides_definite: tuple[str, ...] = ()
+        self._fw_provides_possible: tuple[str, ...] = ()
 
     def detect(self, root: Path) -> bool:
         if (root / "packages.config").is_file() or (root / "Directory.Packages.props").is_file():
@@ -152,17 +170,41 @@ class DotnetAdapter(LanguageAdapter):
         props = [m for m in manifests if m.name.endswith(".props") and m.is_file()]
         csprojs = [m for m in manifests if m.name.endswith(".csproj") and m.is_file()]
         baseline: dict[str, tuple[DeclaredDep, str]] = {}
-        for p in props:
-            self._apply_msbuild_events(p, baseline)
+        fw_baseline: dict[str, str] = {}
+        for pr in props:
+            self._apply_msbuild_events(pr, baseline, fw_baseline)
         # each csproj is evaluated INDEPENDENTLY on the props baseline; with no
-        # csproj the baseline itself is the state
-        per_project = [self._project_state(baseline, cs) for cs in csprojs] \
-            or [dict(baseline)]
+        # csproj the baseline itself is the state. FrameworkReference follows
+        # the SAME evaluation order (W2-B2.8A) — csproj isolation included.
+        per_project: list[dict] = []
+        per_project_fw: list[dict] = []
+        for cs in csprojs:
+            state = dict(baseline)
+            fw = dict(fw_baseline)
+            self._apply_msbuild_events(cs, state, fw)
+            per_project.append(state)
+            per_project_fw.append(fw)
+        if not per_project:
+            per_project = [dict(baseline)]
+            per_project_fw = [dict(fw_baseline)]
         merged: dict[str, tuple[DeclaredDep, str]] = {}
         for state in per_project:
             for key, (dep, kind) in state.items():
                 if key not in merged or kind == "definite":
                     merged[key] = (dep, kind)
+        fw_merged: dict[str, str] = {}
+        for fw in per_project_fw:
+            for key, kind in fw.items():
+                if key not in fw_merged or kind == "definite":
+                    fw_merged[key] = kind
+        # FrameworkReference flows TRANSITIVELY through ProjectReference
+        # (dotnet/sdk FrameworkReferenceResolution.targets; NU1510): walk the
+        # static project graph — repo-confined, cycle-safe, no MSBuild run.
+        for cs in csprojs:
+            for name, kind in self._transitive_framework_refs(cs).items():
+                if fw_merged.get(name) != "definite":
+                    fw_merged[name] = kind
+        self._finish_framework_refs(fw_merged, csprojs)
         # carry the definite/possible KIND onto the DeclaredDep so the engine can
         # gate H001 on it (CP-8b round 8: dropping kind here lost 'possible')
         declared = {k: replace(dep, presence=kind) for k, (dep, kind) in merged.items()}
@@ -178,12 +220,8 @@ class DotnetAdapter(LanguageAdapter):
         # a literal always-false condition (Condition="false", "'a'!='a'")
         return c in ("false", "'false'") or c in ("'a'!='a'", "'x'!='x'")
 
-    def _project_state(self, baseline: dict, csproj: Path) -> dict:
-        state = dict(baseline)
-        self._apply_msbuild_events(csproj, state)
-        return state
-
-    def _apply_msbuild_events(self, path: Path, state: dict) -> None:
+    def _apply_msbuild_events(self, path: Path, state: dict,
+                              fw_state: dict | None = None) -> None:
         """Fold this file's PackageReference Include/Remove into `state`
         (name -> (DeclaredDep, "definite"|"possible")). Only Include DECLARES;
         Update alone declares nothing; statically-false conditions (element OR
@@ -199,8 +237,16 @@ class DotnetAdapter(LanguageAdapter):
         except (ET.ParseError, DefusedXmlException) as e:
             self._manifest_error(path, e)
             return
+        if fw_state is None:
+            fw_state = {}
+        # <Project Sdk="Microsoft.NET.Sdk.Web"> IMPLIES Microsoft.AspNetCore.App
+        # (official SDK contract) — an implicit definite FrameworkReference
+        sdk = (root.get("Sdk") or "").strip().lower()
+        implied = self._SDK_IMPLICIT_FRAMEWORKS.get(sdk)
+        if implied:
+            fw_state[implied] = "definite"
         possible_names: list[str] = []
-        self._walk_msbuild(root, False, path, state, possible_names)
+        self._walk_msbuild(root, False, path, state, possible_names, fw_state)
         if possible_names:
             self._mark_incomplete(path)
             self._note(f"{path.name}: conditional PackageReference "
@@ -208,7 +254,7 @@ class DotnetAdapter(LanguageAdapter):
                        "statically provable; treated as POSSIBLE, not exact")
 
     def _walk_msbuild(self, el, dynamic: bool, path: Path, state: dict,
-                      possible_names: list) -> None:
+                      possible_names: list, fw_state: dict | None = None) -> None:
         """Recursive MSBuild walk carrying CONDITIONAL context from ancestors
         (CP-8b round 8): a PackageReference under an unresolved Condition — on the
         element, an ItemGroup, OR a Choose/When/Otherwise ancestor — is POSSIBLE,
@@ -224,8 +270,12 @@ class DotnetAdapter(LanguageAdapter):
         if tag == "PackageReference":
             self._pkgref_event(el, here_dynamic, path, state, possible_names)
             return
+        if tag == "FrameworkReference" and fw_state is not None:
+            self._fwref_event(el, here_dynamic, fw_state)
+            return
         for child in el:
-            self._walk_msbuild(child, here_dynamic, path, state, possible_names)
+            self._walk_msbuild(child, here_dynamic, path, state, possible_names,
+                               fw_state)
 
     def _pkgref_event(self, el, dynamic: bool, path: Path, state: dict,
                       possible_names: list) -> None:
@@ -248,6 +298,162 @@ class DotnetAdapter(LanguageAdapter):
             else:
                 state[inc.lower()] = (dep, "definite")
         # Update="X" alone modifies an existing reference — declares nothing
+
+    _PROJREF_DEPTH_CAP = 32
+
+    def _fw_and_projrefs(self, path: Path) -> tuple[dict, list]:
+        """STATIC read of one MSBuild file: (framework refs incl. the Sdk
+        implicit one, ProjectReference edges as (raw_include, kind)). The
+        conditional context of ItemGroup/Choose ancestors is inherited; a
+        statically-false subtree is pruned; ReferenceOutputAssembly="false"
+        (static) carries no compile-time framework, a DYNAMIC one degrades
+        the edge to possible. No MSBuild, restore, or project code runs."""
+        try:
+            root = ET.fromstring(self._read(path))
+        except (ET.ParseError, DefusedXmlException):
+            return {}, []
+        fw: dict[str, str] = {}
+        sdk = (root.get("Sdk") or "").strip().lower()
+        implied = self._SDK_IMPLICIT_FRAMEWORKS.get(sdk)
+        if implied:
+            fw[implied] = "definite"
+        refs: list[tuple[str, str]] = []
+
+        def walk(el, dynamic: bool) -> None:
+            tag = el.tag.rsplit("}", 1)[-1]
+            if self._const_false_condition(el):
+                return
+            here = dynamic or bool((el.get("Condition") or "").strip())                 or tag in ("When", "Otherwise")
+            if tag == "FrameworkReference":
+                self._fwref_event(el, here, fw)
+                return
+            if tag == "ProjectReference":
+                inc = el.get("Include")
+                if inc:
+                    # ReferenceOutputAssembly is legal as an ATTRIBUTE and as
+                    # CHILD METADATA (<ReferenceOutputAssembly>false</...>) —
+                    # msbuild#1916; both forms must stop compile-time flow
+                    roa = (el.get("ReferenceOutputAssembly") or "").strip()
+                    for child in el:
+                        ctag = child.tag.rsplit("}", 1)[-1]
+                        if ctag == "ReferenceOutputAssembly":
+                            roa = (child.text or "").strip()
+                            if (child.get("Condition") or "").strip():
+                                roa += "$("      # conditional metadata: dynamic
+                    if roa.lower() == "false":
+                        return          # static: no compile-time reference flows
+                    dynamic_edge = here or "$(" in roa                         or (bool(roa) and roa.lower() != "true")
+                    refs.append((inc, "possible" if dynamic_edge else "definite"))
+                return
+            for child in el:
+                walk(child, here)
+
+        walk(root, False)
+        return fw, refs
+
+    def _transitive_framework_refs(self, csproj: Path,
+                                   visited: frozenset | None = None,
+                                   depth: int = 0) -> dict:
+        """Framework references REACHABLE from this csproj through its
+        ProjectReference graph (its own file + its nearest ancestor
+        Directory.Build.props, then each referenced csproj recursively).
+        Repo-confined (the central _read symlink guard + an explicit escape
+        check), cycle-safe via a resolved-path visited set, depth-capped.
+        definite stays definite only through an all-definite chain; any
+        conditional edge or conditional child ref degrades to possible. A
+        DYNAMIC $(...) reference path cannot be followed statically: nothing
+        is claimed, but the manifest is marked incomplete with a note that
+        names the FILE NAME only (never a machine path)."""
+        if visited is None:
+            visited = frozenset()
+        out: dict[str, str] = {}
+        if depth > self._PROJREF_DEPTH_CAP:
+            return out
+        try:
+            key = csproj.resolve().as_posix().lower()
+        except OSError:
+            return out
+        if key in visited:
+            return out                # CYCLE on the current recursion path only
+        # recursion STACK, not a global visited: a diamond (A->B->D, A->C->D)
+        # must evaluate D on BOTH paths so one definite chain wins — a global
+        # set silently downgraded definite to possible (closing-round bug)
+        visited = visited | {key}
+        sources: list[tuple[dict, list]] = [self._fw_and_projrefs(csproj)]
+        props, _ = self._nearest_ancestor_file(csproj.parent, "Directory.Build.props")
+        if props is not None:
+            sources.append(self._fw_and_projrefs(props))
+        repo = self._confinement_root()
+        for fw, refs in sources:
+            for name, kind in fw.items():
+                if out.get(name) != "definite":
+                    out[name] = kind
+            for raw, edge_kind in refs:
+                if "$(" in raw:
+                    self._note(f"{csproj.name}: dynamic ProjectReference path "
+                               "($(...)) — transitive framework references "
+                               "cannot be proven statically")
+                    self._mark_incomplete(csproj)
+                    continue
+                target = (csproj.parent / raw.replace("\\", "/")).resolve()
+                if target.suffix.lower() != ".csproj" or not target.is_file():
+                    continue
+                if repo is not None and target != repo                         and repo not in target.parents:
+                    self._note(f"{csproj.name}: ProjectReference to "
+                               f"{target.name} resolves outside the repository "
+                               "— not followed")
+                    continue
+                child = self._transitive_framework_refs(target, visited, depth + 1)
+                for name, ckind in child.items():
+                    eff = "possible" if "possible" in (edge_kind, ckind)                         else "definite"
+                    if out.get(name) != "definite":
+                        out[name] = eff
+        return out
+
+    def _fwref_event(self, el, dynamic: bool, fw_state: dict) -> None:
+        """FrameworkReference Include/Remove with the SAME conditional
+        semantics as PackageReference: an unresolved condition yields
+        POSSIBLE (never a silent definite fact), a statically-false subtree
+        was already pruned by the walk. A FrameworkReference is a shared
+        framework, NOT a NuGet package — it is never sent to any registry."""
+        inc, rem = el.get("Include"), el.get("Remove")
+        if rem:
+            key = rem.strip().lower()
+            if not dynamic:
+                fw_state.pop(key, None)
+            elif fw_state.get(key) == "definite":
+                fw_state[key] = "possible"
+        elif inc and "$(" not in inc:
+            key = inc.strip().lower()
+            if dynamic:
+                if fw_state.get(key) != "definite":
+                    fw_state[key] = "possible"
+            else:
+                fw_state[key] = "definite"
+
+    def _finish_framework_refs(self, fw_merged: dict, csprojs: list) -> None:
+        """Resolve the directory's framework references into provided-namespace
+        prefixes. A POSSIBLE (conditional) reference suppresses definitive
+        H002 for its namespaces but marks the manifest incomplete with a
+        visible note — never a silent exact claim."""
+        definite: list[str] = []
+        possible: list[str] = []
+        for key, kind in sorted(fw_merged.items()):
+            prefixes = self._FRAMEWORK_PROVIDES.get(key)
+            if prefixes is None:
+                continue   # unmodeled framework: no namespace claims, no guess
+            (definite if kind == "definite" else possible).extend(prefixes)
+        self._fw_provides_definite = tuple(definite)
+        self._fw_provides_possible = tuple(possible)
+        if possible:
+            proj = csprojs[0] if csprojs else None
+            names = ", ".join(sorted(k for k, v in fw_merged.items()
+                                     if v == "possible"))
+            self._note(f"{proj.name if proj else 'project'}: conditional "
+                       f"FrameworkReference ({names}) — presence not statically "
+                       "provable; its namespaces are treated as POSSIBLY provided")
+            if proj is not None:
+                self._mark_incomplete(proj)
 
     def _parse_packages_config(self, path: Path) -> list[DeclaredDep]:
         try:
@@ -319,6 +525,15 @@ class DotnetAdapter(LanguageAdapter):
         if any(m == e or m.startswith(e + ".") for e in exceptions):
             return False   # System.*-named but NuGet-delivered => normal declared/registry path
         if m == "System" or m.startswith(_BCL_PREFIXES):
+            return True
+        # shared-framework provided namespaces (FrameworkReference / Sdk.Web):
+        # provided by the runtime, never a NuGet lookup. POSSIBLE references
+        # also suppress definitive H002 (the manifest is already flagged
+        # incomplete with a visible note at parse time).
+        for prefix in self._fw_provides_definite + self._fw_provides_possible:
+            if m == prefix or m.startswith(prefix + "."):
+                return True
+        if self._config_internal_match(m):
             return True
         return any(m == ns or m.startswith(ns + ".") or ns.startswith(m + ".")
                    for ns in self._own_namespaces)

@@ -23,6 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--semgrep-bin", default=None)
     scan.add_argument("--semgrep-config", action="append", default=[],
                       help="extra semgrep config (registry packs are YOUR license responsibility)")
+    scan.add_argument("--config", default=None,
+                      help="path to a .auditor.toml (default: auto-discover at "
+                           "the target root)")
     scan.add_argument("--strict", action="store_true",
                       help="exit non-zero on 'review' verdicts too (incomplete analysis never passes)")
     scan.add_argument("--verbose", "-v", action="store_true")
@@ -163,11 +166,25 @@ def _scan(args) -> int:
     from auditor.report.json_out import write_json
     from auditor.report.markdown import write_markdown
 
+    from auditor.config import any_match, is_vendored, load_config
+
     root, cleanup = resolve_target(args.target)
     try:
+        # project configuration (W2-B2.8A): explicit --config or .auditor.toml
+        # at the target root; malformed config fails LOUDLY (AuditorError)
+        config = load_config(root, args.config)
         adapters = default_adapters()
+        for _a in adapters:
+            _a.set_repo_root(root)      # npm_roots resolve repo-relatively
+            _a.apply_config(config)
         projects = discover_projects(root, adapters)
         limitations: list[str] = []
+        if config.loaded_from:
+            limitations.append(
+                f"project config loaded ({config.loaded_from}): "
+                f"{len(config.exclude_paths)} exclude, "
+                f"{len(config.dependency_exclude_paths)} dependency-exclude "
+                "path pattern(s).")
         registries = None
         if args.offline:
             limitations.append("Offline mode: no registry verification was performed.")
@@ -210,18 +227,46 @@ def _scan(args) -> int:
             rel_root = proot.relative_to(root).as_posix() or "."   # before engines run
             ledger = ExecutionLedger(language=adapter.name, root=rel_root)
             files = project_files(proot, adapter, projects, diag=diag)
+            _pfx = "" if rel_root == "." else rel_root + "/"
+            # config exclude_paths: fully out of the scan (repo-relative match)
+            if config.exclude_paths:
+                files = [sf for sf in files
+                         if not any_match(_pfx + sf.rel, config.exclude_paths)]
             expected_sg_paths.update(str(f.path) for f in files)
             declared = adapter.parse_dependencies(proot, diag=diag)
-            if not declared and files and not adapter.detect(proot):
+            # dependency-audit OWNERSHIP gate (W2-B2.8A): a file suffix alone
+            # never proves registry ownership. When the adapter says the audit
+            # does not apply here (e.g. manifestless npm fallback), code rules
+            # still run but nothing is sent to the registry — recorded as a
+            # not_applicable FACT, never a silent skip.
+            dep_reason = adapter.dependency_audit_reason(proot)
+            # per-file dependency exclusion: vendored assets (builtin) + config
+            dep_files = [sf for sf in files
+                         if not is_vendored(_pfx + sf.rel)
+                         and not any_match(_pfx + sf.rel,
+                                           config.dependency_exclude_paths)]
+            if dep_reason is None and not declared and files \
+                    and not adapter.detect(proot):
                 limitations.append(f"{adapter.name}: source files found but no dependency "
                                    "manifest — every external import is reported as undeclared.")
             adapter.prepare(proot, files)
             fws = adapter.frameworks(proot, declared)
             registry = registries.get(adapter.ecosystem) if registries else None
-            findings = audit_hallucinations(adapter, proot, files, declared, registry,
-                                            diag=diag, ledger=ledger)
+            if dep_reason is not None:
+                from auditor.core.hallucination import DESCRIPTORS as _H_DESCRIPTORS
+                ledger.not_applicable(
+                    tuple(d.rule_id for d in _H_DESCRIPTORS), dep_reason)
+                note = f"{adapter.name} ({rel_root}): {dep_reason}"
+                if note not in limitations:
+                    limitations.append(note)
+                findings = []
+            else:
+                findings = audit_hallucinations(adapter, proot, dep_files,
+                                                declared, registry,
+                                                diag=diag, ledger=ledger)
             findings += run_pattern_engine(adapter, proot, files, fws, diag=diag,
-                                           ledger=ledger)
+                                           ledger=ledger,
+                                           complexity_threshold=config.complexity_threshold)
             execution_ledgers.append(ledger)
             project_source_files.append(files)
             idx = len(results)
