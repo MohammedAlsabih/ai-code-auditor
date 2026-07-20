@@ -750,11 +750,22 @@ class PythonAdapter(LanguageAdapter):
     # Removed modules that a declared dist legitimately re-provides:
     REMOVED_BACKPORTS = {"distutils": "setuptools"}
 
+    def apply_config(self, config) -> None:
+        super().apply_config(config)
+        # accept both spellings: the ecosystem key (pypi) and the runtime (python)
+        self._extra_builtins = frozenset(
+            (*config.runtime_builtins.get("pypi", ()),
+             *config.runtime_builtins.get("python", ())))
+
+    _extra_builtins: frozenset = frozenset()
+
     def is_internal(self, imp: ImportRef) -> bool:
         import sys
         top = imp.top_level
         if top in sys.stdlib_module_names or top == "__future__" \
-                or top in self.REMOVED_STDLIB:
+                or top in self.REMOVED_STDLIB or top in self._extra_builtins:
+            return True
+        if self._config_internal_match(imp.module) or self._config_internal_match(top):
             return True
         mod = imp.module
         # module FILES and namespace dirs own only names that actually exist on

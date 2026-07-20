@@ -137,6 +137,8 @@ class JavaAdapter(LanguageAdapter):
         m = imp.module
         if m.startswith(_JDK_PREFIXES):
             return True
+        if self._config_internal_match(m):
+            return True
         if m.startswith("javax."):
             if any(m == p or m.startswith(p + ".") for p in _EXTERNAL_JAVAX_OVERRIDES):
                 return False
