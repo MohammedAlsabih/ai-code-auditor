@@ -1,13 +1,13 @@
 {
   "tool": "ai-code-auditor",
   "version": "0.1.0",
-  "generated_at": "2026-07-19T07:56:54.984398+00:00",
+  "generated_at": "2026-07-20T08:17:47.058937+00:00",
   "target": "tests/fixtures/monorepo",
   "engines": {
     "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",
     "registry": "offline",
     "complexity": "lizard",
-    "semgrep": "not available (builtin rules only)"
+    "semgrep": "disabled by --no-semgrep (builtin rules only)"
   },
   "summary": {
     "overall_score": 14,
@@ -396,18 +396,1626 @@
     "skipped_files": [],
     "parse_error_files": [],
     "rule_errors": [],
-    "rule_attempted": 87,
+    "rule_attempted": 97,
     "rule_failures": 0,
     "registry_attempted": 0,
     "registry_failures": 0,
-    "semgrep_status": "not available (builtin rules only)",
+    "semgrep_status": "disabled by --no-semgrep (builtin rules only)",
     "notes": [],
     "include_gaps": []
   },
   "limitations": [
     "Offline mode: no registry verification was performed.",
-    "semgrep layer: not available (builtin rules only).",
+    "semgrep layer: disabled by --no-semgrep (builtin rules only).",
     "Undetectable private-source channels (env vars, ~/.m2/settings.xml mirrors, CI config) cannot be ruled out for not-found packages.",
     "Private registries are NEVER contacted; packages behind them are classified unverified (H010), and the public registry is not treated as the source of truth for them."
-  ]
+  ],
+  "analysis_manifest": {
+    "schema_version": 2,
+    "catalog": [
+      {
+        "rule_id": "D001",
+        "title": "async void method",
+        "description": "async void methods hide exceptions from callers; use async Task.",
+        "category": "dotnet",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "D002",
+        "title": "Blocking on async (.Result/.Wait)",
+        "description": ".Result/.Wait() on tasks risks deadlocks in sync contexts.",
+        "category": "dotnet",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "D003",
+        "title": "Raw SQL string interpolation",
+        "description": "Interpolated/concatenated strings flow into raw SQL APIs.",
+        "category": "dotnet",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H001",
+        "title": "Declared dependency not in registry",
+        "description": "A definitely-declared dependency does not exist in its public registry.",
+        "category": "hallucination",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H002",
+        "title": "Undeclared import (package exists in registry)",
+        "description": "An import is not declared in any manifest but a same-named public package exists.",
+        "category": "hallucination",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H003",
+        "title": "Registry check skipped (offline)",
+        "description": "Offline mode: the external import could not be verified against a registry.",
+        "category": "hallucination",
+        "default_level": "note",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H004",
+        "title": "Registry unreachable",
+        "description": "The registry lookup failed (network/service error); existence unknown.",
+        "category": "hallucination",
+        "default_level": "note",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H005",
+        "title": "Brand-new package with no downloads",
+        "description": "The resolved package is very recently published with no adoption signal.",
+        "category": "hallucination",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H006",
+        "title": "Fresh package",
+        "description": "The resolved package is newer than the freshness threshold.",
+        "category": "hallucination",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H007",
+        "title": "Unverified undeclared import (unmappable, or probable-hallucination via a heuristic mapping)",
+        "description": "The import cannot be mapped exactly; any registry name came from a heuristic mapping, or the declaration is conditional.",
+        "category": "hallucination",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H008",
+        "title": "Hallucinated import (exact mapping, absent from registry)",
+        "description": "An import whose registry name comes from an EXACT (literal) mapping does not exist in the public registry.",
+        "category": "hallucination",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H009",
+        "title": "Quarantined package",
+        "description": "The declared/resolved package is quarantined by the registry (PEP 792).",
+        "category": "hallucination",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H010",
+        "title": "Private source configured — unverifiable",
+        "description": "A private registry/source is configured; the package is classified unverifiable, and the public registry is not treated as its source of truth.",
+        "category": "hallucination",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "H012",
+        "title": "Archived package",
+        "description": "The resolved package is archived by the registry (PEP 792).",
+        "category": "hallucination",
+        "default_level": "note",
+        "default_precision": "exact",
+        "engine": "engine1-hallucination",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "dependency",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "J001",
+        "title": "String comparison with ==",
+        "description": "Strings compared with ==/!= instead of equals().",
+        "category": "java",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "java"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "J002",
+        "title": "Missing try-with-resources",
+        "description": "An AutoCloseable resource is opened outside try-with-resources.",
+        "category": "java",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "java"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "N001",
+        "title": "Secret exposed via NEXT_PUBLIC_*",
+        "description": "A secret-named NEXT_PUBLIC_ variable is defined in code or .env* (value never echoed).",
+        "category": "next",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "next"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "N002",
+        "title": "Private env read in client code",
+        "description": "A non-public environment variable is read from a client component.",
+        "category": "next",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "next"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "N003",
+        "title": "Client API in a server component (per-file)",
+        "description": "Browser/client-only APIs are used in a file treated as a server component by the per-file fallback.",
+        "category": "next",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "next"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "N004",
+        "title": "server-only import in client code",
+        "description": "A module marked server-only is imported from a client component.",
+        "category": "next",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "next"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "N005",
+        "title": "Async client component",
+        "description": "A client component is declared async, which React does not support.",
+        "category": "next",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "next"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "N006",
+        "title": "Client API on a server module-graph path",
+        "description": "Dual-state BFS over the app/ module graph proves a client-only API is reachable in a server context (orphans analyzed as server default).",
+        "category": "next",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "next-graph",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "next"
+        ],
+        "scope": "module_graph",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P001",
+        "title": "Empty or exception-swallowing catch/except block",
+        "description": "A catch/except block silently swallows errors (empty or bare pass/ignore).",
+        "category": "quality",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P002",
+        "title": "Hardcoded secret (known token format)",
+        "description": "A literal matches a known credential/token shape; the value is masked in reports.",
+        "category": "security",
+        "default_level": "error",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P003",
+        "title": "Suspicious credential assignment",
+        "description": "A credential-named variable is assigned a literal value.",
+        "category": "security",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P004",
+        "title": "String-composed SQL",
+        "description": "SQL text is built via string concatenation/interpolation.",
+        "category": "security",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P005",
+        "title": "String-composed SQL reaches an execution sink",
+        "description": "String-built SQL flows into an execution call (injection candidate).",
+        "category": "security",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P006",
+        "title": "Cyclomatic complexity above 10",
+        "description": "A function's cyclomatic complexity exceeds 10 (measured by lizard).",
+        "category": "complexity",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "complexity-lizard",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P007",
+        "title": "AI-style incompleteness comment",
+        "description": "A TODO/placeholder comment typical of AI-generated incomplete code.",
+        "category": "hygiene",
+        "default_level": "note",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "tsx",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "P008",
+        "title": "Stdlib drift vs requires-python",
+        "description": "Imports use stdlib modules added after (or removed before) the project's declared requires-python range.",
+        "category": "stdlib",
+        "default_level": "note",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "python"
+        ],
+        "frameworks": [],
+        "scope": "project",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R001",
+        "title": "Conditional hook call",
+        "description": "A React hook is called inside if/loop/ternary/&&/try or after an early return.",
+        "category": "react",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R002",
+        "title": "Hook inside a hook callback",
+        "description": "A hook is called inside a callback passed to another hook.",
+        "category": "react",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R003",
+        "title": "Hook outside component or custom hook",
+        "description": "A hook is called from a function that is neither a component nor a use* hook (memo/forwardRef exempt).",
+        "category": "react",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R004",
+        "title": "useEffect without dependency array",
+        "description": "An effect omits its dependency array and re-runs on every render.",
+        "category": "react",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R005",
+        "title": "Obviously missing effect dependencies",
+        "description": "Identifiers used inside the effect are absent from its dependency array.",
+        "category": "react",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R006",
+        "title": "List key uses array index",
+        "description": "key={index} defeats React reconciliation for reorderable lists.",
+        "category": "react",
+        "default_level": "warning",
+        "default_precision": "exact",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "R007",
+        "title": "Non-literal dangerouslySetInnerHTML",
+        "description": "dangerouslySetInnerHTML receives a non-literal __html value (XSS vector pattern).",
+        "category": "react",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "pattern-engine",
+        "languages": [
+          "typescript",
+          "tsx"
+        ],
+        "frameworks": [
+          "react"
+        ],
+        "scope": "file",
+        "source": "builtin"
+      },
+      {
+        "rule_id": "S:auditor-java-runtime-exec-concat",
+        "title": "Runtime.exec with concatenated input (command injection).",
+        "description": "Runtime.exec with concatenated input (command injection).",
+        "category": "semgrep",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "semgrep",
+        "languages": [
+          "java"
+        ],
+        "frameworks": [],
+        "scope": "external",
+        "source": "semgrep-or-opengrep"
+      },
+      {
+        "rule_id": "S:auditor-js-child-process-concat",
+        "title": "Shell command built from dynamic strings (command injection).",
+        "description": "Shell command built from dynamic strings (command injection).",
+        "category": "semgrep",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "semgrep",
+        "languages": [
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "external",
+        "source": "semgrep-or-opengrep"
+      },
+      {
+        "rule_id": "S:auditor-python-eval-input",
+        "title": "eval()/exec() on dynamic input executes arbitrary code.",
+        "description": "eval()/exec() on dynamic input executes arbitrary code.",
+        "category": "semgrep",
+        "default_level": "error",
+        "default_precision": "heuristic",
+        "engine": "semgrep",
+        "languages": [
+          "python"
+        ],
+        "frameworks": [],
+        "scope": "external",
+        "source": "semgrep-or-opengrep"
+      },
+      {
+        "rule_id": "S:auditor-python-pickle-load",
+        "title": "pickle.load/loads on untrusted data enables code execution.",
+        "description": "pickle.load/loads on untrusted data enables code execution.",
+        "category": "semgrep",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "semgrep",
+        "languages": [
+          "python"
+        ],
+        "frameworks": [],
+        "scope": "external",
+        "source": "semgrep-or-opengrep"
+      },
+      {
+        "rule_id": "S:auditor-weak-hash",
+        "title": "MD5/SHA1 are broken for security purposes.",
+        "description": "MD5/SHA1 are broken for security purposes.",
+        "category": "semgrep",
+        "default_level": "warning",
+        "default_precision": "heuristic",
+        "engine": "semgrep",
+        "languages": [
+          "csharp",
+          "java",
+          "python",
+          "typescript"
+        ],
+        "frameworks": [],
+        "scope": "external",
+        "source": "semgrep-or-opengrep"
+      }
+    ],
+    "execution": {
+      "schema_version": 1,
+      "projects": [
+        {
+          "language": "python",
+          "root": ".",
+          "rules": {
+            "H001": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H002": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H003": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H004": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H005": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H006": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H007": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H008": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H009": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H010": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H012": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P001": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P002": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P003": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P004": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P005": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P006": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P007": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P008": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "no requires-python declared in this project"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-java-runtime-exec-concat": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "no java files in this project"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-js-child-process-concat": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "no typescript files in this project"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-python-eval-input": {
+              "status": "skipped",
+              "eligible_inputs": 2,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": [
+                "semgrep engine disabled by --no-semgrep"
+              ]
+            },
+            "S:auditor-python-pickle-load": {
+              "status": "skipped",
+              "eligible_inputs": 2,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": [
+                "semgrep engine disabled by --no-semgrep"
+              ]
+            },
+            "S:auditor-weak-hash": {
+              "status": "skipped",
+              "eligible_inputs": 2,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": [
+                "semgrep engine disabled by --no-semgrep"
+              ]
+            }
+          },
+          "contract_errors": []
+        },
+        {
+          "language": "typescript",
+          "root": "web",
+          "rules": {
+            "H001": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H002": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H003": {
+              "status": "executed",
+              "eligible_inputs": 4,
+              "attempted": 4,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H004": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H005": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H006": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H007": {
+              "status": "executed",
+              "eligible_inputs": 2,
+              "attempted": 2,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H008": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H009": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H010": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "H012": {
+              "status": "unavailable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [
+                "offline mode: public registry was not consulted"
+              ],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "N001": {
+              "status": "executed",
+              "eligible_inputs": 6,
+              "attempted": 6,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "N002": {
+              "status": "executed",
+              "eligible_inputs": 6,
+              "attempted": 6,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "N003": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "superseded by the N006 module-graph pass"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "N004": {
+              "status": "executed",
+              "eligible_inputs": 6,
+              "attempted": 6,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "N005": {
+              "status": "executed",
+              "eligible_inputs": 6,
+              "attempted": 6,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "N006": {
+              "status": "executed",
+              "eligible_inputs": 1,
+              "attempted": 1,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P001": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P002": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P003": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P004": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P005": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P006": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "P007": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R001": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R002": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R003": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R004": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R005": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R006": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "R007": {
+              "status": "executed",
+              "eligible_inputs": 5,
+              "attempted": 5,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-java-runtime-exec-concat": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "no java files in this project"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-js-child-process-concat": {
+              "status": "skipped",
+              "eligible_inputs": 5,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": [
+                "semgrep engine disabled by --no-semgrep"
+              ]
+            },
+            "S:auditor-python-eval-input": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "no python files in this project"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-python-pickle-load": {
+              "status": "not_applicable",
+              "eligible_inputs": 0,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [
+                "no python files in this project"
+              ],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": []
+            },
+            "S:auditor-weak-hash": {
+              "status": "skipped",
+              "eligible_inputs": 5,
+              "attempted": 0,
+              "failures": 0,
+              "blocked_inputs": 0,
+              "partial_parse_inputs": 0,
+              "not_applicable_reasons": [],
+              "unavailable_reasons": [],
+              "partial_reasons": [],
+              "failure_reasons": [],
+              "skipped_reasons": [
+                "semgrep engine disabled by --no-semgrep"
+              ]
+            }
+          },
+          "contract_errors": []
+        }
+      ]
+    }
+  }
 }

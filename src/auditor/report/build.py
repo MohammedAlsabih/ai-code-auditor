@@ -32,7 +32,8 @@ def _counts(findings: list[Finding]) -> dict[str, int]:
 def build_report(target: str, projects: list[dict], engines: dict,
                  limitations: list[str], diagnostics: dict | None = None,
                  confidence: int | None = None,
-                 catalog: list[dict] | None = None) -> dict:
+                 catalog: list[dict] | None = None,
+                 execution: dict | None = None) -> dict:
     out_projects = []
     parts = []
     all_counts = {"red": 0, "yellow": 0, "blue": 0}
@@ -92,10 +93,11 @@ def build_report(target: str, projects: list[dict], engines: dict,
     }
     if catalog is not None:
         # analysis_manifest.catalog = TOOL CAPABILITY AT SCAN TIME (the rules
-        # this build ships) — NOT proof that any rule executed; execution
-        # status is a later, separate contract.
+        # this build ships); analysis_manifest.execution = whether/how each
+        # rule actually RAN this run (B2-D). Reports without execution stay
+        # manifest schema v1; scoring/verdict never read either block.
         from auditor.core.catalog import analysis_manifest
-        report["analysis_manifest"] = analysis_manifest(catalog)
+        report["analysis_manifest"] = analysis_manifest(catalog, execution)
     # redact EVERY outgoing string in one pass — target, findings, diagnostics,
     # limitations, engines (CP-8.7). Numbers/verdict are untouched by _redact.
     return _redact_tree(report)

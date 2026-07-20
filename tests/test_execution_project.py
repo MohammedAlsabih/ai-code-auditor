@@ -444,9 +444,10 @@ def test_real_pipeline_populates_project_passes(tmp_path, monkeypatch):
                for led in captured)
     # P008 recorded for a python project (attempted or a not_applicable reason)
     assert any("P008" in led.rules for led in captured)
-    # report.json still carries no execution keys
-    text = (out / "report.json").read_text(encoding="utf-8")
-    for banned in ("eligible_inputs", "unavailable_reasons",
-                   "not_applicable_reasons", "execution_ledger"):
-        assert banned not in text
-    assert "analysis_manifest" in text
+    # B2-D: the ledgers are serialized ONLY under analysis_manifest.execution
+    data = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert data["analysis_manifest"]["schema_version"] == 2
+    execution = data["analysis_manifest"]["execution"]
+    assert execution["schema_version"] == 1
+    assert any("P008" in p["rules"] for p in execution["projects"])
+    assert "eligible_inputs" not in json.dumps(data["projects"])   # not in findings

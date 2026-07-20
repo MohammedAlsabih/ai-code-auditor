@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Protocol
 
 CATALOG_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_WITH_EXECUTION = 2   # manifest carrying an execution block
 
 VALID_LEVELS = ("error", "warning", "note")
 VALID_PRECISIONS = ("exact", "heuristic")
@@ -142,8 +143,15 @@ def collect_catalog(adapters: Iterable[HasRuleDescriptors],
             for d in merged]
 
 
-def analysis_manifest(catalog: list[dict[str, Any]]) -> dict[str, Any]:
+def analysis_manifest(catalog: list[dict[str, Any]],
+                      execution: dict[str, Any] | None = None) -> dict[str, Any]:
     """The report block. `catalog` semantics: TOOL CAPABILITY AT SCAN TIME —
-    the rules this build ships and could apply; NOT proof any rule executed
-    (execution status is a later, separate contract)."""
-    return {"schema_version": CATALOG_SCHEMA_VERSION, "catalog": catalog}
+    the rules this build ships and could apply. `execution` (B2-D) is the
+    separate PER-RUN evidence block (execution_manifest output, its own
+    schema_version): a manifest without it stays schema v1 for old readers;
+    with it the manifest becomes schema v2. Capability and execution are
+    never mixed into one list."""
+    if execution is None:
+        return {"schema_version": CATALOG_SCHEMA_VERSION, "catalog": catalog}
+    return {"schema_version": MANIFEST_SCHEMA_WITH_EXECUTION,
+            "catalog": catalog, "execution": execution}
