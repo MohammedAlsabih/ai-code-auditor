@@ -1,5 +1,11 @@
 # AI Code Auditor | مدقّق الكود المولَّد بالذكاء الاصطناعي
 
+> **Status: Alpha (`0.1.0a1`).** Experimental software under active
+> development — interfaces, report schemas and rule behavior may change
+> between releases. It assists human review; it is **not** a substitute for
+> code review, testing, or professional security auditing, and absence of
+> findings is never proof code is safe.
+
 <div dir="rtl">
 
 ## ما هذه الأداة؟
@@ -25,9 +31,10 @@
 </div>
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\python -m pip install -e .
-.venv\Scripts\auditor --version
+python -m venv .venv                       # Python 3.11 or 3.12
+.venv\Scripts\python -m pip install -e .   # core scanner only
+.venv\Scripts\python -m pip install -e ".[web]"   # + the local Report Explorer
+.venv\Scripts\auditor --version            # ai-code-auditor 0.1.0a1
 ```
 
 <div dir="rtl">
@@ -50,6 +57,25 @@ auditor scan . --semgrep-bin C:\tools\opengrep.exe --semgrep-config my.yml
 
 Reports land in `--output` (default `auditor-report/`): `report.md`
 (bilingual, human) + `report.json` (machine, full diagnostics ledger).
+
+### Report Explorer (local web UI)
+
+```powershell
+auditor serve auditor-report\report.json --repo C:\path\to\project --port 8765
+```
+
+Requires `pip install -e ".[web]"`. Serves a local, loopback-only explorer for
+one report: search, level/rule/path filters, a read-only source viewer, a
+Coverage & Methodology panel, and a local review workflow
+(confirmed / false-positive / accepted-risk / note) stored in a
+`*.reviews.json` sidecar next to the report — the report file itself is never
+modified. Everything stays on your machine.
+
+**Privacy:** reports are generated and served locally only, but `report.json`
+/ `report.md` may contain **source snippets** from the scanned repository —
+treat them with the same confidentiality as the code, and review before
+sharing. Online mode sends only package *names* to the public registries;
+`--offline` disables all network access.
 
 ## Rule catalog | فهرس القواعد
 
@@ -102,6 +128,9 @@ src/auditor/
 
 ## Limitations | الحدود المعلنة
 
+- **Alpha, assistive-only:** this tool narrows human attention; it is not a
+  replacement for code review, tests, or a professional security audit, and
+  a clean report is not a safety guarantee.
 - **Java/.NET mapping accuracy:** import→artifact resolution rests on curated
   prefix maps + declared-id prefixes. Unmapped imports degrade to **H007
   (unresolved)** — never a guessed error. All mapping-based findings carry

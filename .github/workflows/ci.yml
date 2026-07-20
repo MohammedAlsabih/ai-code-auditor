@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[web,dev]"
+      # the suite is offline by design: registries are mocked (responses) and
+      # semgrep tests mock subprocess — no network and no semgrep binary needed
+      - name: pytest
+        run: python -m pytest -q
+      - name: ruff
+        run: python -m ruff check src
+      - name: mypy
+        run: python -m mypy src
+
+  web:
+    name: web (typecheck + node tests + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: npm clean install
+        working-directory: web
+        run: npm ci
+      - name: TypeScript typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Node tests
+        working-directory: web
+        run: node --test tests/*.mjs
+      - name: Frontend build
+        working-directory: web
+        run: npm run build
+
+  package:
+    name: wheel/sdist build + SPA-in-wheel check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Wheel must ship the SPA and no local junk
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          assert any(n.startswith("auditor/web/static/") and n.endswith(".html")
+                     for n in names), "SPA index.html missing from wheel"
+          assert any(n.startswith("auditor/web/static/assets/") for n in names), \
+              "SPA assets missing from wheel"
+          bad = [n for n in names if "node_modules" in n or "-report/" in n
+                 or ".venv" in n or "reviews.json" in n]
+          assert not bad, f"unexpected files in wheel: {bad[:5]}"
+          print(f"wheel OK: {wheel} ({len(names)} entries)")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

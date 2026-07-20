@@ -4,11 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-code-auditor"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Deterministic auditor for AI-generated code: hallucinated dependencies and risky patterns across Python, Java, .NET and TypeScript/React/Next.js"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [{ name = "MohammedAlsabih" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "tree-sitter>=0.26,<0.27",
     "tree-sitter-python>=0.25,<0.26",
@@ -22,6 +31,11 @@ dependencies = [
     "packaging>=24.0",
     "PyYAML>=6.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/MohammedAlsabih/ai-code-auditor"
+Issues = "https://github.com/MohammedAlsabih/ai-code-auditor/issues"
+Changelog = "https://github.com/MohammedAlsabih/ai-code-auditor/releases"
 
 [project.scripts]
 auditor = "auditor.cli:main"
