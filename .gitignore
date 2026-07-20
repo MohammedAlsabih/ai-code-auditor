@@ -1,16 +1,28 @@
+# virtualenvs / caches / build output
 .venv/
 .venv311/
 .venv-check/
+.venv-*/
 __pycache__/
 *.egg-info/
 dist/
 build/
 .pytest_cache/
-auditor-report/
-trial-*/
 .cache/
+
+# scan OUTPUT is never committed: real reports may contain source snippets.
+# `*-report/` covers auditor-report/, tabi-report/, madar-report/ and any
+# future <name>-report/ output directory. examples/ (curated fixture output)
+# and src/auditor/web/static/ (the shipped SPA build) stay TRACKED.
+auditor-report/
+tabi-report/
+madar-report/
+*-report/
+trial-*/
 field-*/
-.venv-field/
+
+# local review sidecars: private reviewer decisions, never published
+*.reviews.json
 
 # W1 web UI build artifacts.
 # NOTE: src/auditor/web/static/ is intentionally NOT ignored — the built SPA is
@@ -18,3 +30,4 @@ field-*/
 # node_modules and TypeScript scratch files are ignored.
 web/node_modules/
 web/*.tsbuildinfo
+docs/superpowers/

@@ -31,7 +31,9 @@ def test_p1_scrubber_covers_common_secret_formats():
         "?access_token=OAUTHSECRET&x=1": "OAUTHSECRET",
         "refresh_token=REFRESHSECRET": "REFRESHSECRET",
         "//registry/:_password=NPMBASE64": "NPMBASE64",
-        "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA": "ghp_AAAA",
+        # token assembled from parts at TEST TIME so the tracked file
+        # never contains a complete token-shaped literal
+        ("ghp_" + "A" * 36): "ghp_AAAA",
         "the key is AKIAIOSFODNN7EXAMPLE here": "AKIAIOSFODNN7EXAMPLE",
     }
     for text, secret in cases.items():

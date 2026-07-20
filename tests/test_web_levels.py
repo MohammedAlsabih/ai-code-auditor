@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,10 @@ from auditor.report.build import build_report
 from auditor.web.app import create_app
 from auditor.web.reviews import review_id
 
-TABI_REPORT = Path(r"<repo>\tabi-report\report.json")
+# an optional LOCAL report for extra assertions (never committed): point
+# AUDITOR_LOCAL_REPORT at a real report.json; otherwise these tests skip
+TABI_REPORT = Path(os.environ.get("AUDITOR_LOCAL_REPORT",
+                                  "local-report/report.json"))
 
 
 # --- normalization unit ------------------------------------------------------

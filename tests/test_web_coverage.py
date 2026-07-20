@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,10 @@ from fastapi.testclient import TestClient
 from auditor.web.app import create_app
 from auditor.web.coverage import OBSERVED_RULES_DISCLAIMER, build_coverage
 
-TABI_REPORT = Path(r"<repo>\tabi-report\report.json")
+# an optional LOCAL report for extra assertions (never committed): point
+# AUDITOR_LOCAL_REPORT at a real report.json; otherwise these tests skip
+TABI_REPORT = Path(os.environ.get("AUDITOR_LOCAL_REPORT",
+                                  "local-report/report.json"))
 
 
 def _stage(cov, key):
