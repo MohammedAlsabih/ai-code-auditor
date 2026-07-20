@@ -767,3 +767,69 @@ tr.sev-blue td.c-sev {
   width: 30px;
   text-align: center;
 }
+
+/* ── Rules tab (W2-B2.7C1) ─────────────────────────────────────────────── */
+.rc-wrap { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.rc-head h2 { margin: 0 0 6px; font-size: 15px; }
+.rc-banner {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 9px; font-size: 12.5px; background: rgba(214, 158, 46, 0.08);
+}
+.rc-banner.rc-note { background: rgba(120, 120, 120, 0.08); }
+.rc-toolbar {
+  flex-direction: row;   /* the base .toolbar is a column (Findings rows) */
+  flex-wrap: wrap; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.rc-search {
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 8px; font: inherit; min-width: 220px; flex: 0 1 260px;
+  height: 30px; box-sizing: border-box;
+}
+.tb-count { font-size: 12px; opacity: 0.75; margin-left: auto; }
+.tb-rules-search {
+  width: calc(100% - 4px); box-sizing: border-box; margin: 2px 0 6px;
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 4px 6px; font: inherit; font-size: 12px;
+}
+.rc-body { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+.rc-tablewrap { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
+.rc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.rc-table th, .rc-table td {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.rc-table tbody tr { cursor: pointer; }
+.rc-table tbody tr:hover { background: rgba(120, 120, 120, 0.06); }
+.rc-table tbody tr.sel { background: rgba(66, 133, 244, 0.10); }
+.rc-title { opacity: 0.85; }
+.rc-langs { font-size: 11.5px; }
+.rc-fw { opacity: 0.7; }
+.rc-none { opacity: 0.6; }
+.rc-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.rc-status {
+  display: inline-flex; align-items: center; gap: 3px;
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 7px; font-size: 11px; white-space: nowrap;
+}
+/* attention accents — icon + TEXT always carry the meaning, color is a hint.
+   executed is deliberately NEUTRAL (ran ≠ safe). */
+.rc-inconsistent, .rc-failed { border-color: #c0564d; }
+.rc-partial, .rc-blocked { border-color: #b98a2e; }
+.rc-unavailable, .rc-skipped { border-color: #8a7ec8; }
+.rc-executed, .rc-not_recorded, .rc-not_applicable { opacity: 0.85; }
+.rc-detail { flex: 0 0 340px; max-width: 40vw; }
+.rc-desc { font-size: 12.5px; margin: 4px 0 8px; }
+.rc-ctx {
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; margin: 5px 0; font-size: 12px;
+}
+.rc-ctx-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rc-counters { margin-top: 4px; opacity: 0.85; font-size: 11.5px; }
+.rc-reasons { margin-top: 3px; font-size: 11.5px; opacity: 0.9; overflow-wrap: anywhere; }
+.rc-reason-label { font-weight: 600; }
+@media (max-width: 900px) {
+  .rc-body { flex-direction: column; }
+  .rc-detail { flex: 1 1 auto; max-width: none; width: 100%; }
+}
