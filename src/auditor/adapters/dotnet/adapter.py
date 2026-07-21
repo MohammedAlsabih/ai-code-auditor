@@ -67,6 +67,13 @@ class DotnetAdapter(LanguageAdapter):
         self._old_tfm = False   # any TargetFramework < netcore3 / netstandard?
         self._fw_provides_definite: tuple[str, ...] = ()
         self._fw_provides_possible: tuple[str, ...] = ()
+        # W2-B2.8B1: compile providers flowing in via ProjectReference
+        # (id_lower -> (display_id, 'definite'|'possible')) and own
+        # packages whose NuGet asset metadata removes compile assets
+        self._transitive_providers: dict[str, tuple[str, str]] = {}
+        # own packages' COMPILE-provider state ("definite"|"possible"|
+        # "absent") — separate from the declared/registry state
+        self._own_local_state: dict[str, str] = {}
 
     def detect(self, root: Path) -> bool:
         if (root / "packages.config").is_file() or (root / "Directory.Packages.props").is_file():
@@ -205,6 +212,7 @@ class DotnetAdapter(LanguageAdapter):
                 if fw_merged.get(name) != "definite":
                     fw_merged[name] = kind
         self._finish_framework_refs(fw_merged, csprojs)
+        self._collect_compile_providers(root, csprojs)
         # carry the definite/possible KIND onto the DeclaredDep so the engine can
         # gate H001 on it (CP-8b round 8: dropping kind here lost 'possible')
         declared = {k: replace(dep, presence=kind) for k, (dep, kind) in merged.items()}
@@ -301,7 +309,7 @@ class DotnetAdapter(LanguageAdapter):
 
     _PROJREF_DEPTH_CAP = 32
 
-    def _fw_and_projrefs(self, path: Path) -> tuple[dict, list]:
+    def _fw_and_projrefs(self, path: Path) -> tuple[dict, list, list]:
         """STATIC read of one MSBuild file: (framework refs incl. the Sdk
         implicit one, ProjectReference edges as (raw_include, kind)). The
         conditional context of ItemGroup/Choose ancestors is inherited; a
@@ -311,13 +319,14 @@ class DotnetAdapter(LanguageAdapter):
         try:
             root = ET.fromstring(self._read(path))
         except (ET.ParseError, DefusedXmlException):
-            return {}, []
+            return {}, [], []
         fw: dict[str, str] = {}
         sdk = (root.get("Sdk") or "").strip().lower()
         implied = self._SDK_IMPLICIT_FRAMEWORKS.get(sdk)
         if implied:
             fw[implied] = "definite"
         refs: list[tuple[str, str]] = []
+        pkgs: list[dict] = []   # {id, kind, local, flows} per PackageReference
 
         def walk(el, dynamic: bool) -> None:
             tag = el.tag.rsplit("}", 1)[-1]
@@ -326,6 +335,19 @@ class DotnetAdapter(LanguageAdapter):
             here = dynamic or bool((el.get("Condition") or "").strip())                 or tag in ("When", "Otherwise")
             if tag == "FrameworkReference":
                 self._fwref_event(el, here, fw)
+                return
+            if tag == "PackageReference":
+                inc = el.get("Include")
+                rem = el.get("Remove")
+                upd = el.get("Update")
+                if rem and "$(" not in rem:
+                    pkgs.append({"op": "remove", "id": rem.strip(), "ctx": here})
+                elif inc and "$(" not in inc:
+                    pkgs.append({"op": "include", "id": inc.strip(),
+                                 "ctx": here, "meta": self._read_asset_meta(el)})
+                elif upd and "$(" not in upd:
+                    pkgs.append({"op": "update", "id": upd.strip(),
+                                 "ctx": here, "meta": self._read_asset_meta(el)})
                 return
             if tag == "ProjectReference":
                 inc = el.get("Include")
@@ -349,7 +371,7 @@ class DotnetAdapter(LanguageAdapter):
                 walk(child, here)
 
         walk(root, False)
-        return fw, refs
+        return fw, refs, pkgs
 
     def _transitive_framework_refs(self, csproj: Path,
                                    visited: frozenset | None = None,
@@ -379,10 +401,12 @@ class DotnetAdapter(LanguageAdapter):
         # must evaluate D on BOTH paths so one definite chain wins — a global
         # set silently downgraded definite to possible (closing-round bug)
         visited = visited | {key}
-        sources: list[tuple[dict, list]] = [self._fw_and_projrefs(csproj)]
+        fw0, refs0, _pkgs0 = self._fw_and_projrefs(csproj)
+        sources: list[tuple[dict, list]] = [(fw0, refs0)]
         props, _ = self._nearest_ancestor_file(csproj.parent, "Directory.Build.props")
         if props is not None:
-            sources.append(self._fw_and_projrefs(props))
+            fwp, refsp, _pkgsp = self._fw_and_projrefs(props)
+            sources.append((fwp, refsp))
         repo = self._confinement_root()
         for fw, refs in sources:
             for name, kind in fw.items():
@@ -408,6 +432,237 @@ class DotnetAdapter(LanguageAdapter):
                     eff = "possible" if "possible" in (edge_kind, ckind)                         else "definite"
                     if out.get(name) != "definite":
                         out[name] = eff
+        return out
+
+    def _collect_compile_providers(self, root: Path, csprojs: list) -> None:
+        """W2-B2.8B1: per-directory result of the compile-provider graph —
+        transitive PackageReferences reaching this project through its
+        ProjectReferences (namespace PROVIDERS, deliberately NOT added to the
+        declared list: registry/security auditing of a package stays in the
+        project that declares it), plus this project's OWN packages' local
+        compile-provider tri-state (each csproj evaluated in isolation on the
+        props baseline, then merged: definite > possible > absent — a
+        non-compile package in one sibling never cancels another's
+        provider)."""
+        providers: dict[str, tuple[str, str]] = {}
+        own_states = self._merge_states(
+            [self._project_pkg_state(cs) for cs in csprojs])
+        self._own_local_state = {k: e["local"] for k, e in own_states.items()}
+        repo = self._confinement_root()
+        base = csprojs[0].parent if csprojs else root
+        refs: list = []
+        for cs in csprojs:
+            _fw, r, _ev = self._fw_and_projrefs(cs)
+            refs += r
+        props, _ = self._nearest_ancestor_file(root, "Directory.Build.props")
+        if props is not None and props.is_file():
+            _fwp, rp, _evp = self._fw_and_projrefs(props)
+            refs += rp
+        try:
+            self_keys = frozenset(
+                c.resolve().as_posix().lower() for c in csprojs)
+        except OSError:
+            self_keys = frozenset()
+        for raw, edge_kind in refs:
+            if "$(" in raw:
+                continue          # dynamic path: already noted + incomplete
+            target = (base / raw.replace("\\", "/")).resolve()
+            if target.suffix.lower() != ".csproj" or not target.is_file():
+                continue
+            if repo is not None and target != repo                     and repo not in target.parents:
+                continue          # escapes the repository: never followed
+            for k, (display, ckind) in self._flowing_packages(
+                    target, visited=self_keys).items():
+                eff = "possible" if "possible" in (edge_kind, ckind)                     else "definite"
+                if providers.get(k, ("", "possible"))[1] != "definite":
+                    providers[k] = (display, eff)
+        self._transitive_providers = providers
+        proj = csprojs[0] if csprojs else None
+        n_possible = sum(1 for _, k in providers.values() if k == "possible")
+        n_local_possible = sum(1 for v in self._own_local_state.values()
+                               if v == "possible")
+        if n_possible:
+            self._note(f"{proj.name if proj else 'project'}: {n_possible} "
+                       "transitive compile provider(s) reachable only through "
+                       "a CONDITIONAL reference — treated as POSSIBLE, not exact")
+        if n_local_possible:
+            self._note(f"{proj.name if proj else 'project'}: "
+                       f"{n_local_possible} package(s) with dynamic/conditional "
+                       "asset metadata — compile-provider capability treated "
+                       "as POSSIBLE, not exact")
+        if (n_possible or n_local_possible) and proj is not None:
+            self._mark_incomplete(proj)
+
+    @staticmethod
+    def _read_asset_meta(el) -> tuple:
+        """NuGet asset metadata for ONE PackageReference element (attribute
+        AND child-element forms, case-insensitive names, ';'-separated
+        values) as an explicit tri-state pair (local, flows) each in
+        "definite" | "possible" | "absent", plus a dynamic flag. Contract
+        (learn.microsoft.com package-references-in-project-files):
+        - ExcludeAssets all|compile      => absent locally, absent flowing
+        - IncludeAssets without compile  => absent locally, absent flowing
+        - PrivateAssets all|compile      => definite locally, absent flowing
+        - any dynamic/conditional value  => possible/possible (never a silent
+          definite AND never a silent absent)."""
+        meta: dict[str, str] = {}
+        dynamic = False
+        for name in ("privateassets", "includeassets", "excludeassets"):
+            for attr, val in el.attrib.items():
+                if attr.lower() == name:
+                    meta[name] = val
+        for child in el:
+            ctag = child.tag.rsplit("}", 1)[-1].lower()
+            if ctag in ("privateassets", "includeassets", "excludeassets"):
+                meta[ctag] = (child.text or "").strip()
+                if (child.get("Condition") or "").strip():
+                    dynamic = True
+        if any("$(" in v for v in meta.values()):
+            dynamic = True
+        if dynamic:
+            return "possible", "possible", True
+        def vals(key):
+            return {v.strip().lower() for v in meta.get(key, "").split(";")
+                    if v.strip()}
+        priv, incl, excl = vals("privateassets"), vals("includeassets"),             vals("excludeassets")
+        local, flows = "definite", "definite"
+        if excl & {"all", "compile"}:
+            local = flows = "absent"
+        if "includeassets" in meta and "all" not in incl                 and ("none" in incl or "compile" not in incl):
+            local = flows = "absent"
+        if local != "absent" and priv & {"all", "compile"}:
+            flows = "absent"
+        return local, flows, False
+
+    @staticmethod
+    def _demote(value: str, conditional: bool) -> str:
+        return "possible" if conditional and value == "definite" else value
+
+    def _fold_pkg_events(self, state: dict, events: list) -> None:
+        """Fold ordered Include/Remove/Update events into a provider state
+        (id_lower -> {display, presence, local, flows}) with the SAME MSBuild
+        order the declared-deps parser uses. Include declares and sets
+        metadata; a STATIC Remove deletes; a conditional Remove downgrades
+        definite facts to possible; Update only modifies an EXISTING entry
+        and never creates one."""
+        for ev in events:
+            key = ev["id"].lower()
+            if ev["op"] == "remove":
+                if not ev["ctx"]:
+                    state.pop(key, None)
+                elif key in state:
+                    e = state[key]
+                    for f in ("presence", "local", "flows"):
+                        e[f] = self._demote(e[f], True)
+                continue
+            if ev["op"] == "include":
+                local, flows, _dyn = ev["meta"]
+                state[key] = {
+                    "display": ev["id"],
+                    "presence": "possible" if ev["ctx"] else "definite",
+                    "local": self._demote(local, ev["ctx"]),
+                    "flows": self._demote(flows, ev["ctx"]),
+                }
+                continue
+            # update: modifies an existing reference only
+            e = state.get(key)
+            if e is None:
+                continue
+            local, flows, dyn = ev["meta"]
+            if ev["ctx"] or dyn:
+                # unresolved update: neither the old nor the new value is a
+                # provable fact where they might differ
+                if e["local"] != local:
+                    e["local"] = "possible"
+                if e["flows"] != flows:
+                    e["flows"] = "possible"
+            else:
+                e["local"], e["flows"] = local, flows
+
+    _STATE_RANK = {"absent": 0, "possible": 1, "definite": 2}
+
+    def _project_pkg_state(self, csproj: Path) -> dict:
+        """ONE csproj's final provider state: the nearest Directory.Build.props
+        events as the baseline, then the csproj's own events — the same
+        evaluation order as the declared-deps parser."""
+        state: dict = {}
+        props, _ = self._nearest_ancestor_file(csproj.parent,
+                                               "Directory.Build.props")
+        if props is not None and props.is_file():
+            _fw, _refs, ev = self._fw_and_projrefs(props)
+            self._fold_pkg_events(state, ev)
+        _fw, _refs, ev = self._fw_and_projrefs(csproj)
+        self._fold_pkg_events(state, ev)
+        return state
+
+    def _merge_states(self, states: list) -> dict:
+        """Directory-level merge across sibling csprojs, each evaluated in
+        ISOLATION: per package and per FIELD the strongest fact wins
+        (definite > possible > absent) — a non-compile or Removed package in
+        one project never cancels a sibling project's provider."""
+        merged: dict = {}
+        for st in states:
+            for key, e in st.items():
+                cur = merged.get(key)
+                if cur is None:
+                    merged[key] = dict(e)
+                    continue
+                for f in ("presence", "local", "flows"):
+                    if self._STATE_RANK[e[f]] > self._STATE_RANK[cur[f]]:
+                        cur[f] = e[f]
+        return merged
+
+    def _flowing_packages(self, csproj: Path,
+                          visited: frozenset | None = None,
+                          depth: int = 0) -> dict:
+        """Compile-asset packages FLOWING OUT of this project to a consumer:
+        its own flow-eligible PackageReferences (csproj + nearest
+        Directory.Build.props) plus whatever flows out of its own
+        ProjectReferences (NuGet transitivity). Same protections as the
+        framework graph: recursion STACK for cycles (diamonds keep a definite
+        path), repo confinement, depth cap, no MSBuild/restore, and never
+        obj/project.assets.json."""
+        if visited is None:
+            visited = frozenset()
+        out: dict[str, tuple[str, str]] = {}
+        if depth > self._PROJREF_DEPTH_CAP:
+            return out
+        try:
+            key = csproj.resolve().as_posix().lower()
+        except OSError:
+            return out
+        if key in visited:
+            return out
+        visited = visited | {key}
+        # this node's FINAL provider state (props baseline + own events,
+        # Include/Remove/Update folded in MSBuild order)
+        own = self._project_pkg_state(csproj)
+        for k, e in own.items():
+            if e["flows"] == "absent":
+                continue
+            kind = "definite" if e["presence"] == "definite"                 and e["flows"] == "definite" else "possible"
+            if out.get(k, ("", "possible"))[1] != "definite":
+                out[k] = (e["display"], kind)
+        _fw, refs, _ev = self._fw_and_projrefs(csproj)
+        props, _ = self._nearest_ancestor_file(csproj.parent,
+                                               "Directory.Build.props")
+        if props is not None and props.is_file():
+            _fwp, refsp, _evp = self._fw_and_projrefs(props)
+            refs = refs + refsp
+        repo = self._confinement_root()
+        for raw, edge_kind in refs:
+            if "$(" in raw:
+                continue        # dynamic path: unresolvable, noted upstream
+            target = (csproj.parent / raw.replace("\\", "/")).resolve()
+            if target.suffix.lower() != ".csproj" or not target.is_file():
+                continue
+            if repo is not None and target != repo                     and repo not in target.parents:
+                continue        # escapes the repository: never followed
+            child = self._flowing_packages(target, visited, depth + 1)
+            for k, (display, ckind) in child.items():
+                eff = "possible" if "possible" in (edge_kind, ckind)                     else "definite"
+                if out.get(k, ("", "possible"))[1] != "definite":
+                    out[k] = (display, eff)
         return out
 
     def _fwref_event(self, el, dynamic: bool, fw_state: dict) -> None:
@@ -539,13 +794,44 @@ class DotnetAdapter(LanguageAdapter):
                    for ns in self._own_namespaces)
 
     def match_declared(self, imp: ImportRef, declared: list[DeclaredDep]) -> DeclaredDep | None:
+        # NuGet package ids are CASE-INSENSITIVE (xunit provides Xunit) —
+        # matching is casefolded but stays on component boundaries ('Foo'
+        # never matches 'Foobar'). A package whose asset metadata removes
+        # compile assets locally is NOT a namespace provider here, though it
+        # remains in the declared list for registry/security auditing.
+        m = imp.module.lower()
         best: tuple[int, DeclaredDep] | None = None
         for dep in declared:
-            n = dep.name
-            if imp.module == n or imp.module.startswith(n + "."):
+            n = dep.name.lower()
+            # tri-state local capability: "absent" never provides namespaces
+            # (the dep still exists for registry/security auditing);
+            # "possible" provides but only as a CONDITIONAL match
+            if self._own_local_state.get(n, "definite") == "absent":
+                continue
+            if m == n or m.startswith(n + "."):
                 if best is None or len(n) > best[0]:
                     best = (len(n), dep)
-        return best[1] if best else None
+        if best is not None:
+            dep = best[1]
+            if self._own_local_state.get(dep.name.lower()) == "possible"                     and getattr(dep, "presence", "definite") == "definite":
+                return replace(dep, presence="possible")
+            return dep
+        # transitive compile providers (W2-B2.8B1): a package declared in a
+        # REFERENCED project flows compile assets here (NuGet transitivity).
+        # Synthesized as skip_registry so it is never re-audited in THIS
+        # project; a possible-only chain carries presence="possible".
+        tbest: tuple[int, str, str] | None = None
+        for n, (display, kind) in self._transitive_providers.items():
+            if m == n or m.startswith(n + "."):
+                if tbest is None or len(n) > tbest[0]:
+                    tbest = (len(n), display, kind)
+        if tbest is not None:
+            return DeclaredDep(
+                name=tbest[1], ecosystem="nuget",
+                source_file="<referenced project>", raw=tbest[1],
+                skip_registry=True,
+                presence="definite" if tbest[2] == "definite" else "possible")
+        return None
 
     def registry_candidates(self, imp: ImportRef) -> list[str]:
         parts = imp.module.split(".")
