@@ -24,15 +24,32 @@ def test_confidence_is_coverage_ratio_based():
     from auditor.core.models import Diagnostics
     from auditor.core.scoring import analysis_confidence
     clean = Diagnostics(semgrep_status="opengrep 1.25.0: success")
-    assert analysis_confidence(clean, offline=False, files_read=10) == 100
-    assert analysis_confidence(clean, offline=True, files_read=10) == 50
+    # coverage-v3 (B2.8B2): analysis completeness ONLY — there is no registry
+    # factor and no offline parameter; an intended offline run scores the same
+    assert analysis_confidence(clean, files_read=10) == 100
     # denominators matter: 5-of-5 skipped is a disaster, 5-of-50000 is noise
     tiny = Diagnostics(skipped_files=["a", "b", "c", "d", "e"],
                        semgrep_status="x: success")
-    assert analysis_confidence(tiny, offline=False, files_read=0) == 0
+    assert analysis_confidence(tiny, files_read=0) == 0
     huge = Diagnostics(skipped_files=["a", "b", "c", "d", "e"],
                        semgrep_status="x: success")
-    assert analysis_confidence(huge, offline=False, files_read=49_995) == 100
+    assert analysis_confidence(huge, files_read=49_995) == 100
+
+
+def test_registry_axis_is_separate_from_analysis_confidence():
+    from auditor.core.scoring import registry_confidence, registry_status
+    # intended absence (--offline) => unavailable, confidence null
+    assert registry_status(True, 0, 0) == "unavailable"
+    assert registry_confidence("unavailable", 0, 0) is None
+    # online but nothing to look up => not_applicable, confidence null
+    assert registry_status(False, 0, 0) == "not_applicable"
+    assert registry_confidence("not_applicable", 0, 0) is None
+    # online, all lookups answered => complete 100 (not-found is an ANSWER)
+    assert registry_status(False, 40, 0) == "complete"
+    assert registry_confidence("complete", 40, 0) == 100
+    # online, some lookups FAILED => partial + a real number
+    assert registry_status(False, 40, 10) == "partial"
+    assert registry_confidence("partial", 40, 10) == 75
 
 
 def test_fourth_round_counterexamples_are_closed():
@@ -42,11 +59,11 @@ def test_fourth_round_counterexamples_are_closed():
     from auditor.core.scoring import analysis_confidence, verdict
     all_parse = Diagnostics(parse_error_files=[f"f{i}.ts" for i in range(100)],
                             semgrep_status="x: success")
-    assert analysis_confidence(all_parse, offline=False, files_read=100) == 0
+    assert analysis_confidence(all_parse, files_read=100) == 0
     all_rules = Diagnostics(rule_attempted=400, rule_failures=400,
                             semgrep_status="x: success")
-    assert analysis_confidence(all_rules, offline=False, files_read=100) == 0
-    assert verdict({"red": 0, "yellow": 0}, 0,
+    assert analysis_confidence(all_rules, files_read=100) == 0
+    assert verdict({"block": 0, "review": 0}, 0,
                    {"rule_attempted": 400, "rule_failures": 400}) == "block"
 
 
@@ -60,7 +77,7 @@ def test_manifest_cov_counts_unique_files_not_reads():
     d2 = Diagnostics(manifest_files=["pyproject.toml", "requirements.txt", "Pipfile"],
                      manifest_errors=["pyproject.toml: TOMLDecodeError"],
                      semgrep_status="x: success")
-    assert analysis_confidence(d, False, 10) < analysis_confidence(d2, False, 10)
+    assert analysis_confidence(d, 10) < analysis_confidence(d2, 10)
 
 
 def test_monorepo_two_corrupt_manifests_give_zero_coverage(tmp_path):
@@ -80,16 +97,24 @@ def test_monorepo_two_corrupt_manifests_give_zero_coverage(tmp_path):
     assert len(set(diag.manifest_errors)) == 2   # distinct by full path
     assert len(set(diag.manifest_files)) == 2
     # both manifests broken => manifest coverage 0
-    assert analysis_confidence(diag, offline=False, files_read=5) == 0
+    assert analysis_confidence(diag, files_read=5) == 0
 
 
 def test_verdict_contract():
+    # B2.8B2: the verdict consumes per-finding GATE ACTIONS, never colors
     from auditor.core.scoring import verdict
-    assert verdict({"red": 1, "yellow": 0}, 100, {}) == "block"
-    assert verdict({"red": 0, "yellow": 0}, 39, {}) == "block"     # incomplete != passed
-    assert verdict({"red": 0, "yellow": 2}, 100, {}) == "review"
-    assert verdict({"red": 0, "yellow": 0}, 100,
+    assert verdict({"block": 1, "review": 0}, 100, {}) == "block"
+    assert verdict({"block": 0, "review": 0}, 39, {}) == "block"   # incomplete != passed
+    assert verdict({"block": 0, "review": 2}, 100, {}) == "review"
+    assert verdict({"block": 0, "review": 0}, 100,
                    {"manifest_errors": ["x"]}) == "review"
-    assert verdict({"red": 0, "yellow": 0}, 100,
+    assert verdict({"block": 0, "review": 0}, 100,
                    {"rule_attempted": 50, "rule_failures": 1}) == "review"  # ANY rule failure != pass
-    assert verdict({"red": 0, "yellow": 0}, 100, {}) == "pass"
+    # informational findings NEVER gate; a clean scan passes
+    assert verdict({"block": 0, "review": 0, "informational": 7}, 100, {}) == "pass"
+    # an online registry that could not answer some lookups forbids pass
+    assert verdict({"block": 0, "review": 0}, 100, {},
+                   reg_status="partial") == "review"
+    # an INTENDED offline run (unavailable) does not gate by itself
+    assert verdict({"block": 0, "review": 0}, 100, {},
+                   reg_status="unavailable") == "pass"

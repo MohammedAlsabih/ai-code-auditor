@@ -15,6 +15,7 @@ export async function fetchReport(): Promise<Report> {
 // level normalization lives in the pure module ./levels (Node-testable);
 // re-exported here for existing importers.
 export { CANONICAL_LEVELS, levelColor, normalizeLevel } from './levels'
+import { normalizeBaselineState } from './baseline'
 import { normalizeLevel } from './levels'
 
 // Thrown by fetchSource so the panel can distinguish "server has no --repo"
@@ -61,6 +62,8 @@ export function aggregate(report: Report): Finding[] {
         snippet: f.snippet ?? '',
         engine: f.engine,
         review_id: (f as { review_id?: string }).review_id,
+        gate_action: typeof f.gate_action === 'string' ? f.gate_action : '',
+        baseline_state: normalizeBaselineState(f.baseline_state),
       })
     }
   }

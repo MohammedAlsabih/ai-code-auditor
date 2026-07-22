@@ -298,8 +298,11 @@ pypi = ["acme-core"]
 
 
 @pytest.mark.parametrize("body,needle", [
-    ("schema_version = 2\n", "unsupported schema_version"),
+    ("schema_version = 3\n", "unsupported schema_version"),   # v2 is legal now
     ("exclude_paths = ['x']\n", "unsupported schema_version"),   # missing version
+    # v2-only keys stay unknown-key errors under v1 — v1 semantics never grow
+    ("schema_version = 1\n[policy]\nheuristic_errors = 'block'\n", "unknown key"),
+    ("schema_version = 1\n[rule_levels]\nR007 = 'warning'\n", "unknown key"),
     ("schema_version = 1\nunknown_key = 1\n", "unknown key"),
     ("schema_version = 1\nexclude_paths = 'x'\n", "list of strings"),
     ("schema_version = 1\nexclude_paths = ['C:/x']\n", "drive"),

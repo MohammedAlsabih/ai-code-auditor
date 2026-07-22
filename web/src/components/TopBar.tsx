@@ -1,4 +1,4 @@
-import { Activity, Gauge, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
+import { Activity, Database, Gauge, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 
 import type { Summary } from '../types'
 
@@ -32,6 +32,7 @@ export function TopBar({
     note: legacy.blue,
   }
   const verdict = summary.verdict ?? 'review'
+  const gc = summary.gate_counts
 
   const chip = (level: 'error' | 'warning' | 'note', n: number) => (
     <button
@@ -48,15 +49,40 @@ export function TopBar({
       <div className="brand">
         AI Code Auditor <span className="sub">Report Explorer</span>
       </div>
-      <div className={`verdict verdict-${verdict}`}>
+      <div
+        className={`verdict verdict-${verdict}`}
+        title={'Verdict derives from per-finding gate_action: exact errors '
+          + 'block; HEURISTIC errors require review but do NOT block by '
+          + 'default; notes are informational.'
+          + (gc ? ` Gate: block ${gc.block ?? 0} · review ${gc.review ?? 0} `
+            + `· informational ${gc.informational ?? 0}` : '')}
+      >
         {verdictIcon(verdict)} <span>{verdict.toUpperCase()}</span>
       </div>
       <div className="metric">
         <Activity size={15} /> code_health <b>{summary.overall_score ?? '—'}</b>
       </div>
-      <div className="metric">
-        <Gauge size={15} /> confidence <b>{summary.analysis_confidence ?? '—'}</b>
+      <div
+        className="metric"
+        title="How COMPLETE the file/manifest/rule analysis was — registry
+verification is the separate metric next to this one"
+      >
+        <Gauge size={15} /> Analysis confidence{' '}
+        <b>{summary.analysis_confidence ?? '—'}</b>
       </div>
+      {summary.registry_status && (
+        <div
+          className="metric"
+          title="Registry verification (separate axis): whether dependency
+lookups ran and how many failed — 'unavailable' means an intended --offline
+run and does not reduce analysis confidence"
+        >
+          <Database size={15} /> Registry <b>{summary.registry_status}</b>
+          {typeof summary.registry_confidence === 'number' && (
+            <b> {summary.registry_confidence}</b>
+          )}
+        </div>
+      )}
       <div className="counts">
         {chip('error', lc.error ?? 0)}
         {chip('warning', lc.warning ?? 0)}

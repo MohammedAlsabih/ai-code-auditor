@@ -21,6 +21,7 @@ const REVIEW_BADGE: Record<string, [string, string]> = {
 
 export function FindingsTable({
   rows,
+  showBaseline,
   reviews,
   selected,
   onSelect,
@@ -29,6 +30,8 @@ export function FindingsTable({
   onTogglePage,
 }: {
   rows: Finding[]
+  // true only for reports scanned with --baseline: no fabricated badges
+  showBaseline: boolean
   reviews: Record<string, Review>
   selected: Finding | null
   onSelect: (f: Finding) => void
@@ -107,6 +110,16 @@ export function FindingsTable({
                   {f.file}:{f.line}
                 </td>
                 <td className="ellip" title={f.title}>
+                  {showBaseline && f.baseline_state && (
+                    <span
+                      className={`bl-badge bl-${f.baseline_state}`}
+                      title={f.baseline_state === 'new'
+                        ? 'Not in the baseline report'
+                        : 'Already present in the baseline report'}
+                    >
+                      {f.baseline_state === 'new' ? 'NEW' : 'EXISTING'}
+                    </span>
+                  )}
                   {f.title}
                 </td>
                 <td>

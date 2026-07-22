@@ -55,9 +55,9 @@ def test_project_rules_failure_counts_and_forbids_pass(tmp_path):
     assert BoomAdapter.body_entered
     assert any("project_rules(python): RuntimeError" in e for e in diag.rule_errors)
     assert diag.rule_failures >= 1 and diag.rule_attempted >= 1
-    conf = analysis_confidence(diag, offline=False, files_read=1)
+    conf = analysis_confidence(diag, files_read=1)
     assert conf < 100
-    assert verdict({"red": 0, "yellow": 0}, conf,
+    assert verdict({"block": 0, "review": 0}, conf,
                    {"rule_attempted": diag.rule_attempted,
                     "rule_failures": diag.rule_failures}) != "pass"
 

@@ -30,15 +30,15 @@ def test_p1_manifest_incomplete_lowers_confidence_and_forbids_pass():
     from auditor.core.scoring import analysis_confidence, verdict
     base = Diagnostics(semgrep_status="ci: success")
     inc = Diagnostics(manifest_incomplete=["a/pyproject.toml"], semgrep_status="ci: success")
-    assert analysis_confidence(base, offline=False, files_read=10) == 100
-    assert analysis_confidence(inc, offline=False, files_read=10) < 100
-    assert verdict({"red": 0, "yellow": 0}, 100,
+    assert analysis_confidence(base, files_read=10) == 100
+    assert analysis_confidence(inc, files_read=10) < 100
+    assert verdict({"block": 0, "review": 0}, 100,
                    {"manifest_incomplete": ["a/pyproject.toml"]}) == "review"
 
 
 def test_p1_include_gaps_forbid_pass():
     from auditor.core.scoring import verdict
-    assert verdict({"red": 0, "yellow": 0}, 100,
+    assert verdict({"block": 0, "review": 0}, 100,
                    {"include_gaps": ["req.txt: include not found: x"]}) == "review"
 
 
@@ -54,8 +54,8 @@ def test_p1_manifest_coverage_counts_files_not_messages():
         manifest_files=["/r/a.toml", "/r/b.txt", "/r/c.cfg"],
         manifest_errors=["/r/a.toml: TOMLDecodeError", "/r/b.txt: TOMLDecodeError"],
         semgrep_status="ci: success")
-    c1 = analysis_confidence(one_file_two_msgs, offline=False, files_read=10)
-    c2 = analysis_confidence(two_files, offline=False, files_read=10)
+    c1 = analysis_confidence(one_file_two_msgs, files_read=10)
+    c2 = analysis_confidence(two_files, files_read=10)
     assert c1 > c2                       # 1 affected file scores higher than 2
     assert c1 == 67 and c2 == 33         # manifest_cov 2/3 vs 1/3, by file
 

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, Search, X } from 'lucide-react'
 
+import { BASELINE_FILTERS, type BaselineFilter, type BaselineSummary } from '../baseline'
+
 export const SORT_KEYS: Array<[string, string]> = [
   ['level', 'Level'],
   ['rule', 'Rule'],
@@ -28,6 +30,9 @@ export function Toolbar({
   onToggleRule,
   precisionFilter,
   onTogglePrecision,
+  baselineInfo,
+  baselineFilter,
+  onBaselineFilter,
   sortKey,
   sortDir,
   onSortKey,
@@ -52,6 +57,10 @@ export function Toolbar({
   onToggleRule: (r: string) => void
   precisionFilter: Set<string>
   onTogglePrecision: (p: string) => void
+  // null on reports without a baseline: the filter group is NOT rendered
+  baselineInfo: BaselineSummary | null
+  baselineFilter: BaselineFilter
+  onBaselineFilter: (f: BaselineFilter) => void
   sortKey: string
   sortDir: 'asc' | 'desc'
   onSortKey: (k: string) => void
@@ -149,6 +158,23 @@ export function Toolbar({
             </button>
           ))}
         </span>
+        {baselineInfo && (
+          <span
+            className="tb-group"
+            title={`Baseline: ${baselineInfo.new} new · ${baselineInfo.unchanged} existing · ${baselineInfo.resolved} resolved (gate scope: ${baselineInfo.gate_scope})`}
+          >
+            {BASELINE_FILTERS.map((f) => (
+              <button
+                key={f}
+                className={`btn btn-toggle ${baselineFilter === f ? 'on' : ''}`}
+                onClick={() => onBaselineFilter(f)}
+              >
+                {f === 'all' ? 'All' : f === 'new' ? `New (${baselineInfo.new})`
+                  : `Existing (${baselineInfo.unchanged})`}
+              </button>
+            ))}
+          </span>
+        )}
         <span className="tb-group tb-rules">
           <button className="btn" onClick={() => setRulesOpen(!rulesOpen)}>
             Rules{ruleFilter.size ? ` (${ruleFilter.size})` : ''} <ChevronDown size={13} />
