@@ -70,28 +70,85 @@ class RawSqlInterpolation(Rule):
     title = "Interpolated/concatenated SQL passed to raw-SQL API"
     precision = "heuristic"
 
+    # B2.8C-A: judge the SQL STRING argument itself, never the whole argument
+    # list — `SqlQueryRaw("... {0} ...", (object?)x ?? DBNull.Value)` uses EF
+    # positional placeholders with SEPARATE parameter args; the `??` in a
+    # PARAMETER is not SQL composition. A dynamic SQL argument is cleared only
+    # when the provenance analysis proves every part trusted (EF model
+    # metadata, consts, literal-arg local helpers).
+    _STRINGY = ("string_literal", "verbatim_string_literal",
+                "raw_string_literal", "interpolated_string_expression",
+                "binary_expression", "identifier", "conditional_expression",
+                "parenthesized_expression", "invocation_expression")
+
+    @staticmethod
+    def _invoked_name(fn) -> str:
+        """The name of the method THIS call invokes — for a member access,
+        the final member only. `db.Database.SqlQueryRaw(...).FirstOrDefaultAsync(ct)`
+        must never classify the OUTER FirstOrDefaultAsync call as a raw-SQL
+        API just because the receiver text mentions one (that would judge
+        `ct` as the SQL argument)."""
+        if fn.type in ("member_access_expression", "member_binding_expression"):
+            name = fn.child_by_field_name("name")
+            return node_text(name) if name is not None else node_text(fn)
+        return node_text(fn)
+
     def check(self, sf: SourceFile) -> list[Finding]:
+        from auditor.adapters.dotnet.sql_trust import trusted_sql_expr
         out = []
         for call in captures("csharp", sf.tree.root_node, "(invocation_expression) @i").get("i", []):
             fn = call.child_by_field_name("function")
-            if fn is None or not _RAW_SQL_APIS.search(node_text(fn)):
+            if fn is None or not _RAW_SQL_APIS.search(self._invoked_name(fn)):
                 continue
             args = call.child_by_field_name("arguments")
-            if args is None:
+            if args is None or not args.named_children:
                 continue
+            sql_arg = next((a.named_children[0] for a in args.named_children
+                            if a.named_children
+                            and a.named_children[0].type in self._STRINGY), None)
+            if sql_arg is None:
+                continue
+            if sql_arg.type in ("string_literal", "verbatim_string_literal",
+                                "raw_string_literal"):
+                continue                      # constant SQL (+ separate params)
+            # closing round: an IDENTIFIER SQL argument is resolved to its
+            # local initializer — literal/trusted composition is safe, but a
+            # parameter, member, external call, or unknown initializer is a
+            # raw-SQL sink fed by unproven text: D003 (heuristic).
+            if sql_arg.type == "identifier":
+                from auditor.adapters.dotnet.sql_trust import local_initializer
+                init = local_initializer(sql_arg, sf)
+                if init is not None and (
+                        init.type in ("string_literal",
+                                      "verbatim_string_literal",
+                                      "raw_string_literal")
+                        or trusted_sql_expr(init, sf)):
+                    continue
+                out.append(_finding(self, sf, call,
+                                    "Raw-SQL API receives a variable whose SQL text "
+                                    "cannot be proven constant — SQL injection risk; "
+                                    "use parameters (e.g. FromSqlInterpolated or "
+                                    "SqlParameter)."))
+                continue
+            # a non-identifier argument must itself contain interpolation/
+            # concat; separate parameter arguments after the SQL are never
+            # judged as SQL
             dynamic = False
-            stack = list(args.named_children)
+            stack = [sql_arg]
             while stack:
                 cur = stack.pop()
                 if cur.type in ("interpolation", "binary_expression"):
                     dynamic = True
                     break
                 stack.extend(cur.named_children)
-            if dynamic:
-                out.append(_finding(self, sf, call,
-                                    "Raw-SQL API receives interpolated/concatenated input — "
-                                    "SQL injection; use parameters (e.g. FromSqlInterpolated "
-                                    "or SqlParameter)."))
+            if not dynamic:
+                continue
+            if trusted_sql_expr(sql_arg, sf):
+                continue                      # provably trusted composition
+            out.append(_finding(self, sf, call,
+                                "Raw-SQL API receives interpolated/concatenated input — "
+                                "SQL injection; use parameters (e.g. FromSqlInterpolated "
+                                "or SqlParameter)."))
         return out
 
 

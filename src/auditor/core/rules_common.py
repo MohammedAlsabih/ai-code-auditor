@@ -24,8 +24,18 @@ _TOKEN_PATTERNS = [
 _GENERIC_CRED = re.compile(r"(?i)\b(api_?key|secret|token|passwd|password)\b\s*[:=]\s*[\"']([^\"']{8,})[\"']")
 _PLACEHOLDER = re.compile(r"(?i)(changeme|example|placeholder|your[_\-]|xxx+|dummy|sample|"
                           r"<[^>]*>|\{\{|\$\{|process\.env|os\.environ|getenv)")
-_SMELLS = re.compile(r"(?i)(in a real (?:app|application|project|system)|TODO:?\s*implement|"
-                     r"not implemented|placeholder|for demo purposes|in production,? you (?:would|should)|"
+# B2.8C-C: incompleteness markers live in COMMENTS. The bare word
+# "placeholder" is NOT evidence — it is everyday UI vocabulary (a JSX/HTML
+# placeholder attribute, a prop/type/parameter, a CSS `placeholder:` class, a
+# translation key, user-facing copy). Only classic work markers
+# (TODO/FIXME/HACK/XXX) and EXPLICIT incompleteness phrases count, and only
+# inside a comment.
+_SMELLS = re.compile(r"(?i)(in a real (?:app|application|project|system)|TODO\b:?|FIXME\b:?|"
+                     r"HACK\b:?|\bXXX\b|not implemented|for demo purposes|"
+                     r"in production,? you (?:would|should)|"
+                     r"placeholder (?:implementation|logic|value|code|for now)|"
+                     r"(?:temporary|temp) (?:stub|placeholder|implementation|hack)|"
+                     r"stubbed? out|just a (?:stub|placeholder)|"
                      r"simplified (?:for|version)|replace (?:this )?with (?:your|actual|real)|"
                      r"left as an exercise|mock implementation)")
 
@@ -66,6 +76,16 @@ class EmptyCatch(Rule):
         return out
 
 
+# B2.8C-E2: a PEM HEADER alone is not a private key. A real key carries a
+# base64 body (MII... — 40+ base64 chars). "-----BEGIN PRIVATE KEY-----
+# \nMIIBROKEN\n-----END..." (a deliberately mangled test value) is neither a
+# valid key nor an exact secret.
+_PEM_BODY = re.compile(r"[A-Za-z0-9+/=]{40,}")
+# B2.8C-E3: development credentials pointing at the LOCAL machine only.
+_LOCAL_HOST_IN_CONN = re.compile(
+    r"(?i)\b(?:server|data source|host)\s*=\s*(?:localhost|127\.0\.0\.1|\[?::1\]?)\s*(?:;|$)")
+
+
 class SecretsRule(Rule):
     id = "P002"  # emits P002 and P003
     output_ids = ("P002", "P003")
@@ -75,12 +95,30 @@ class SecretsRule(Rule):
 
     def check(self, sf: SourceFile) -> list[Finding]:
         out = []
-        for i, line in enumerate(sf.text.decode("utf-8", errors="replace").splitlines(), 1):
+        lines = sf.text.decode("utf-8", errors="replace").splitlines()
+        for i, line in enumerate(lines, 1):
             hit = next(((label, m) for label, rx in _TOKEN_PATTERNS
                         for m in [rx.search(line)] if m), None)
             if hit:
                 label, m = hit
+                if label == "Private key block" and not self._pem_has_body(lines, i, m):
+                    continue   # header without a plausible key body: not a key
                 masked = line.replace(m.group(0), m.group(0)[:4] + "***")
+                if label == "Private key block":
+                    # the body IS the secret — mask any base64 run on the line
+                    masked = _PEM_BODY.sub("***", masked)
+                if label == "Connection string password" \
+                        and _LOCAL_HOST_IN_CONN.search(line):
+                    # E3: a password in a LOCALHOST-only development connection
+                    # string is a hygiene review, not a blocking secret — the
+                    # credential does not reach past the developer machine.
+                    out.append(_mk_finding(
+                        "P003", Severity.YELLOW,
+                        "Local development credential in connection string", sf,
+                        i, masked.strip(),
+                        "Connection-string password targets localhost only — "
+                        "review, but not a blocking secret by default."))
+                    continue
                 out.append(_mk_finding("P002", Severity.RED, self.title, sf, i,
                                        masked.strip(), f"{label} committed in source."))
                 continue
@@ -92,6 +130,21 @@ class SecretsRule(Rule):
                                        masked.strip(),
                                        "Literal credential-like value assigned in code."))
         return out
+
+    @staticmethod
+    def _pem_has_body(lines: list[str], lineno: int, m) -> bool:
+        """A plausible base64 body must follow the BEGIN header — on the SAME
+        line (string literals with \\n escapes) or within the next 3 physical
+        lines (real multi-line PEM)."""
+        same = lines[lineno - 1][m.end():]
+        if _PEM_BODY.search(same.split("-----END", 1)[0]):
+            return True
+        for nxt in lines[lineno:lineno + 3]:
+            if "-----END" in nxt and not _PEM_BODY.search(nxt.split("-----END", 1)[0]):
+                return False
+            if _PEM_BODY.search(nxt):
+                return True
+        return False
 
 
 class SqlStringBuild(Rule):
@@ -122,7 +175,25 @@ class SqlStringBuild(Rule):
         text = node_text(node)
         if not _SQL_RE.search(text):
             return
+        # B2.8C-A: a captured binary node must actually be STRING
+        # CONCATENATION. Generic-call ambiguity (`X<T>(args)`) parses as a
+        # `<`/`>` binary_expression wrapping the whole call — a parse
+        # artifact, not composition. Any REAL `+`-concat inside it is a
+        # separate capture and is still judged on its own.
+        if not needs_dynamic and not self._is_plus_concat(node):
+            return
         if needs_dynamic and not self._is_dynamic(node):
+            return
+        # B2.8C-A: a composition whose every leaf is a plain string literal is
+        # a COMPILE-TIME CONSTANT ("SELECT ..." + "AND x = @p") — parameterized
+        # SQL split over lines, not string-building. Never a finding.
+        if not needs_dynamic and self._all_literal_leaves(node):
+            return
+        # B2.8C-A: a DYNAMIC composition whose parts are all provably trusted
+        # (EF model metadata, consts, literal-arg local helpers) per the
+        # adapter's provenance oracle is not user-influenceable.
+        if self.profile.sql_trusted is not None \
+                and self.profile.sql_trusted(node, sf):
             return
         line = line_of(node)
         if line in seen_lines:
@@ -139,6 +210,16 @@ class SqlStringBuild(Rule):
                                    "SQL assembled from dynamic strings; prefer parameterized queries.",
                                    precision=self.precision))
 
+    @staticmethod
+    def _is_plus_concat(node) -> bool:
+        op = node.child_by_field_name("operator")
+        if op is not None:
+            return node_text(op) == "+"
+        # no operator field (e.g. python's binary_operator exposes it as an
+        # anonymous child): accept unless a non-'+' operator token is visible
+        ops = [c for c in node.children if not c.is_named]
+        return not ops or any(node_text(c) == "+" for c in ops)
+
     def _is_dynamic(self, node) -> bool:
         stack = [node]
         while stack:
@@ -148,9 +229,38 @@ class SqlStringBuild(Rule):
             stack.extend(cur.named_children)
         return False
 
+    # node kinds that merely GROUP a composition (never introduce dynamism)
+    _COMPOSITION_TYPES = frozenset({
+        "binary_expression", "parenthesized_expression", "binary_operator",
+        "concatenated_string",
+    })
+
+    def _all_literal_leaves(self, node) -> bool:
+        """True when the composition bottoms out in string literals only —
+        the profile names its literal types; without them the answer is False
+        (prior behavior preserved for languages without the hook)."""
+        lits = self.profile.sql_literal_types
+        if not lits:
+            return False
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if cur.type in lits:
+                continue                      # literal leaf — never descended
+            if cur.type in self._COMPOSITION_TYPES:
+                stack.extend(cur.named_children)
+                continue
+            return False                      # anything else = not provably constant
+        return True
+
     def _enclosing_sink(self, node) -> str | None:
         cur = node.parent
         while cur is not None:
+            # B2.8C-A: a lambda/local-function boundary ends the search — the
+            # sink must receive the SQL in the same executable expression; an
+            # outer MapGet/MapPost wrapper is never the sink.
+            if cur.type in self.profile.sql_boundary_types:
+                return None
             if cur.type in self.profile.sql_sink_call_types:
                 fn = cur.child_by_field_name("function") or cur.child_by_field_name("name") \
                     or cur.child_by_field_name("type")
@@ -164,23 +274,43 @@ class SqlStringBuild(Rule):
 
 class SmellComments(Rule):
     id = "P007"
-    requires_syntax_tree = False   # scans sf.text line-by-line; parse-independent
     severity = Severity.BLUE
     title = "AI-style incompleteness comment"
 
+    # B2.8C-C closing round: markers are read from REAL COMMENT NODES of the
+    # syntax tree, never from a regex over raw lines — `"https://x/TODO:..."`
+    # inside a string carries `//` but is not a comment and never fires.
+    _DEFAULT_COMMENT_TYPES = ("comment", "line_comment", "block_comment")
+
+    def __init__(self, profile=None):
+        self.comment_types = tuple(getattr(profile, "comment_types", None)
+                                   or self._DEFAULT_COMMENT_TYPES)
+
     def check(self, sf: SourceFile) -> list[Finding]:
         out = []
-        for i, line in enumerate(sf.text.decode("utf-8", errors="replace").splitlines(), 1):
-            m = _SMELLS.search(line)
-            if m:
-                out.append(_mk_finding(self.id, self.severity, self.title, sf, i,
-                                       line.strip(), f"Marker '{m.group(0)}' suggests "
-                                       "incomplete/demo-grade code left by generation."))
-        return out
+        tree = getattr(sf, "tree", None)
+        if tree is None:
+            return []
+        stack = [tree.root_node]
+        while stack:
+            node = stack.pop()
+            if node.type in self.comment_types:
+                base = line_of(node)
+                for off, text in enumerate(node_text(node).splitlines()):
+                    m = _SMELLS.search(text)
+                    if m:
+                        out.append(_mk_finding(
+                            self.id, self.severity, self.title, sf, base + off,
+                            text.strip(), f"Marker '{m.group(0)}' suggests "
+                            "incomplete/demo-grade code left by generation."))
+                continue
+            stack.extend(node.named_children)
+        return sorted(out, key=lambda f: f.line)
 
 
 def common_rules(profile) -> list[Rule]:
-    return [EmptyCatch(profile), SecretsRule(), SqlStringBuild(profile), SmellComments()]
+    return [EmptyCatch(profile), SecretsRule(), SqlStringBuild(profile),
+            SmellComments(profile)]
 
 
 # ── Rule Capability Catalog (owned HERE; multi-output checks describe EVERY

@@ -21,10 +21,42 @@ _IMPORT_QUERY = """
 
 
 def _strip_jsonc(text: str) -> str:
-    text = re.sub(r"//[^\n]*", "", text)
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r",\s*([}\]])", r"\1", text)
-    return text
+    """STRING-AWARE JSONC stripper (B2.8C-D). The old regex pass treated the
+    `/*` inside path-alias KEYS like "@/*" as a block-comment opener and ate
+    the whole `paths` table — which is exactly why tsconfig aliases were
+    silently lost and `@/lib/...` imports leaked to the registry as H010.
+    Comments are removed only OUTSIDE JSON strings; trailing commas last."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_str = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        out.append(c)
+        i += 1
+    return re.sub(r",\s*([}\]])", r"\1", "".join(out))
 
 
 class TypeScriptAdapter(LanguageAdapter):
@@ -124,6 +156,19 @@ class TypeScriptAdapter(LanguageAdapter):
         self._scan_root = root.resolve()
         self._self_name = str(self._load_pkg(root / "package.json").get("name") or "")
         self._load_tsconfig_aliases(root)
+        # B2.8C-B: per-project R007 safety index (DOMPurify wrappers + hex-
+        # gated CSS builders). Attached to EACH SourceFile (no module global)
+        # and internally file-scoped, so proofs never leak across files or
+        # projects. Failure of the index build fails toward detection.
+        from auditor.adapters.typescript.dom_safety import (
+            EMPTY_INDEX,
+            attach_index,
+            build_safety_index,
+        )
+        try:
+            attach_index(files, build_safety_index(files))
+        except Exception:  # noqa: BLE001
+            attach_index(files, EMPTY_INDEX)
         # N006 module-graph pass: built here because prepare has files + cached
         # declared deps; per-file N003 is superseded when the graph is active
         self._graph_notes: list[str] = []
