@@ -187,8 +187,11 @@ def test_merge_keeps_project_contexts_separate():
 
 
 def test_text_rules_run_when_parse_fails(tmp_path, monkeypatch):
-    """A parse failure blocks TREE rules but text-only rules (P002/P003 secrets,
-    P007 comments) still run on sf.text and can emit findings."""
+    """A parse failure blocks TREE rules but text-only rules (P002/P003
+    secrets) still run on sf.text and can emit findings. B2.8C closing: P007
+    reads REAL comment nodes (a marker inside a string must not fire), so it
+    is a TREE rule now — on a failed parse it is BLOCKED and RECORDED, never
+    silently skipped."""
     import auditor.core.patterns as patterns
     f = _sf(tmp_path, "x.py",
             "password = 'definitely-secret-value'\n# TODO: implement\n")
@@ -196,24 +199,27 @@ def test_text_rules_run_when_parse_fails(tmp_path, monkeypatch):
                         lambda sf: (_ for _ in ()).throw(RuntimeError("no parse")))
     findings, diag, ledger = _run(tmp_path, [f])
     emitted = {x.rule_id for x in findings}
-    assert "P003" in emitted and "P007" in emitted     # text rules produced data
-    for text_id in ("P002", "P003", "P007"):
+    assert "P003" in emitted                           # text rules produced data
+    for text_id in ("P002", "P003"):
         assert ledger.rules[text_id].attempted == 1
         assert ledger.rules[text_id].blocked_inputs == 0
-    for tree_id in ("P001", "P004", "P005"):           # tree rules blocked
+    for tree_id in ("P001", "P004", "P005", "P007"):   # tree rules blocked
         assert ledger.rules[tree_id].blocked_inputs == 1
         assert ledger.rules[tree_id].attempted == 0
 
 
 def test_partial_parse_flags_tree_rules_only(tmp_path):
     """On a partial tree, tree rules get partial_parse; text rules run normally
-    with partial_parse_inputs == 0."""
+    with partial_parse_inputs == 0. P007 is a tree rule since B2.8C closing
+    (comment nodes) — a PARTIAL tree still runs it, marked partial."""
     broken = _sf(tmp_path, "broken.py", "def f(:\n    password = 'x'\n")
     _, _, ledger = _run(tmp_path, [broken])
     assert ledger.rules["P001"].partial_parse_inputs == 1     # tree rule
     assert ledger.rules["P001"].attempted == 1
-    assert ledger.rules["P007"].partial_parse_inputs == 0     # text rule
+    assert ledger.rules["P007"].partial_parse_inputs == 1     # tree rule now
     assert ledger.rules["P007"].attempted == 1
+    assert ledger.rules["P002"].partial_parse_inputs == 0     # text rule
+    assert ledger.rules["P002"].attempted == 1
 
 
 def test_healthy_path_no_double_attempts(tmp_path):

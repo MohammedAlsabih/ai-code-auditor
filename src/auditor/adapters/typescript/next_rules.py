@@ -53,7 +53,13 @@ def _env_reads(sf: SourceFile) -> list[tuple]:
 
 class PublicEnvSecret(Rule):
     id = "N001"
-    severity = Severity.RED
+    # B2.8C-E4: NEXT_PUBLIC_* is client-exposed BY DESIGN; a key-LIKE name
+    # alone (e.g. a Google Maps browser key, which is meant to be public and
+    # domain-restricted) does not prove a leaked secret. Name-only evidence is
+    # a WARNING (review: verify the key is provider/domain-restricted). Only a
+    # VALUE matching a known token format (the .env pass) stays a RED block.
+    severity = Severity.YELLOW
+    precision = "heuristic"
     title = "NEXT_PUBLIC_ variable with secret-like name (exposed to client bundle)"
     frameworks = ("next",)
 
@@ -63,7 +69,9 @@ class PublicEnvSecret(Rule):
             if var.startswith("NEXT_PUBLIC_") and _SENSITIVE.search(var) and not _SAFE.search(var):
                 out.append(_finding(self, sf, node,
                                     f"{var} is inlined into the public client bundle at build "
-                                    "time; a secret here is exposed to every visitor."))
+                                    "time. The NAME alone does not prove a secret — review that "
+                                    "the value is a publishable (provider/domain-restricted) "
+                                    "key, not a private credential."))
         return out
 
 
@@ -74,18 +82,36 @@ def list_env_files(root: Path) -> list[Path]:
 
 def scan_one_env_file(env: Path) -> list[Finding]:
     """N001 for a SINGLE .env file. The variable VALUE is never echoed — only
-    the (masked) name."""
+    the (masked) name. B2.8C-E4: the VALUE decides the level here — a value
+    matching a known token format is a PROVEN secret shipped to the client
+    (RED, exact); a key-like NAME alone is a review-grade warning."""
+    from auditor.core.rules_common import _TOKEN_PATTERNS
     from auditor.core.walk import read_text_capped
     title = PublicEnvSecret().title
     out: list[Finding] = []
     for i, line in enumerate(read_text_capped(env).splitlines(), 1):
-        name = line.split("=", 1)[0].strip()
-        if "=" in line and name.startswith("NEXT_PUBLIC_") \
-                and _SENSITIVE.search(name) and not _SAFE.search(name):
+        name, sep, value = line.partition("=")
+        name = name.strip()
+        if not sep or not name.startswith("NEXT_PUBLIC_") \
+                or not _SENSITIVE.search(name) or _SAFE.search(name):
+            continue
+        proven = any(rx.search(value) for _label, rx in _TOKEN_PATTERNS)
+        if proven:
             out.append(Finding(rule_id="N001", severity=Severity.RED, title=title,
                                file=env.name, line=i, snippet=name + "=***",
-                               detail=f"{name} in {env.name} ships to the client bundle.",
+                               detail=f"{name} in {env.name} carries a KNOWN token "
+                                      "format and ships to the client bundle — a "
+                                      "real secret exposed to every visitor.",
                                language="typescript", engine="auditor"))
+        else:
+            out.append(Finding(rule_id="N001", severity=Severity.YELLOW, title=title,
+                               file=env.name, line=i, snippet=name + "=***",
+                               detail=f"{name} in {env.name} ships to the client "
+                                      "bundle. The name alone does not prove a "
+                                      "secret — review that the value is a "
+                                      "publishable, provider/domain-restricted key.",
+                               language="typescript", engine="auditor",
+                               precision="heuristic"))
     return out
 
 
@@ -201,8 +227,11 @@ _N: "dict[str, _Any]" = dict(category="next", engine="pattern-engine", scope="fi
           frameworks=("next",))
 DESCRIPTORS = [
     _RD("N001", "Secret exposed via NEXT_PUBLIC_*",
-        "A secret-named NEXT_PUBLIC_ variable is defined in code or .env* (value never echoed).",
-        default_level="error", default_precision="exact", **_N),
+        "A secret-named NEXT_PUBLIC_ variable is defined in code or .env* (value "
+        "never echoed). Name-only evidence is a review-grade warning (NEXT_PUBLIC "
+        "is client-exposed by design); a value matching a known token format "
+        "escalates to a proven error.",
+        default_level="warning", default_precision="heuristic", **_N),
     _RD("N002", "Private env read in client code",
         "A non-public environment variable is read from a client component.",
         default_level="warning", default_precision="exact", **_N),

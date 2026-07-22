@@ -46,6 +46,18 @@ class SyntaxProfile:
     sql_sink_call_types: tuple[str, ...] = (
         "call", "call_expression", "invocation_expression",
         "method_invocation", "object_creation_expression")
+    # B2.8C-A precision hooks (all optional; defaults keep prior behavior):
+    # node types that are plain string literals — a composition whose leaves
+    # are ALL literals is a compile-time constant, not "string-built SQL".
+    sql_literal_types: tuple[str, ...] = ()
+    # adapter-supplied provenance oracle: True when a DYNAMIC composition is
+    # provably built from trusted sources only (EF model metadata, consts,
+    # literal-arg local helpers). None = no oracle; dynamic stays flagged.
+    sql_trusted: Callable[[object, object], bool] | None = None   # (node, sf)
+    # ancestor node types that END the sink search: a sink must enclose the
+    # SQL inside the same executable expression — an outer route registration
+    # (MapGet/MapPost wrapping a lambda) is never the sink.
+    sql_boundary_types: tuple[str, ...] = ()
 
 
 class LanguageAdapter(ABC):

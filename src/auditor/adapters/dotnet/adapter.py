@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -74,6 +75,11 @@ class DotnetAdapter(LanguageAdapter):
         # own packages' COMPILE-provider state ("definite"|"possible"|
         # "absent") — separate from the declared/registry state
         self._own_local_state: dict[str, str] = {}
+        # B2.8C-D: repository-wide internal root namespaces (AssemblyName /
+        # RootNamespace / csproj stem of EVERY project in the repo), cached
+        # per resolved repo root — a `using Aseesx.Modules.X` in a sibling
+        # project is repo-internal, never a NuGet lookup.
+        self._repo_ns_cache: dict[str, tuple[str, ...]] = {}
 
     def detect(self, root: Path) -> bool:
         if (root / "packages.config").is_file() or (root / "Directory.Packages.props").is_file():
@@ -790,8 +796,43 @@ class DotnetAdapter(LanguageAdapter):
                 return True
         if self._config_internal_match(m):
             return True
-        return any(m == ns or m.startswith(ns + ".") or ns.startswith(m + ".")
-                   for ns in self._own_namespaces)
+        if any(m == ns or m.startswith(ns + ".") or ns.startswith(m + ".")
+               for ns in self._own_namespaces):
+            return True
+        # B2.8C-D: namespaces rooted at ANY repo project's AssemblyName /
+        # RootNamespace are repo-internal — never sent to the registry as an
+        # unknown NuGet id. External packages stay on the registry path.
+        return any(m == ns or m.startswith(ns + ".")
+                   for ns in self._repo_internal_roots())
+
+    def _repo_internal_roots(self) -> tuple[str, ...]:
+        """Root namespaces of every project in the repository: explicit
+        <AssemblyName>/<RootNamespace> when present, else the csproj file
+        stem (MSBuild's default for both). Cached per resolved repo root."""
+        base = self._repo_root or getattr(self, "_scan_root", None)
+        if base is None:
+            return ()
+        key = str(Path(base).resolve())
+        cached = self._repo_ns_cache.get(key)
+        if cached is not None:
+            return cached
+        roots: set[str] = set()
+        try:
+            csprojs = list(Path(key).rglob("*.csproj"))
+        except OSError:
+            csprojs = []
+        for cs in csprojs[:2000]:                     # bounded walk
+            roots.add(cs.stem)
+            text = self._read(cs)
+            if not text:
+                continue
+            for tag in ("AssemblyName", "RootNamespace"):
+                m = re.search(rf"<{tag}>\s*([A-Za-z0-9_.]+)\s*</{tag}>", text)
+                if m:
+                    roots.add(m.group(1))
+        out = tuple(sorted(r for r in roots if r))
+        self._repo_ns_cache[key] = out
+        return out
 
     def match_declared(self, imp: ImportRef, declared: list[DeclaredDep]) -> DeclaredDep | None:
         # NuGet package ids are CASE-INSENSITIVE (xunit provides Xunit) —
@@ -857,12 +898,23 @@ class DotnetAdapter(LanguageAdapter):
         return {"csharp": tree_sitter_c_sharp.language()}
 
     def syntax(self):
+        from auditor.adapters.dotnet.sql_trust import trusted_sql_expr
         return SyntaxProfile(
             catch_query="(catch_clause) @c",
             catch_body_types=("block",),
             sql_concat_query="(binary_expression) @n",
             sql_interp_query="(interpolated_string_expression) @n",
             sql_dynamic_types=("interpolation",),
+            # B2.8C-A: "lit" + "lit" is constant, parameterized-and-wrapped SQL;
+            # dynamic parts are cleared only by the provenance oracle (EF model
+            # metadata, consts, literal-arg local helpers); a lambda boundary
+            # ends the sink search so MapGet/MapPost is never "the sink".
+            sql_literal_types=("string_literal", "verbatim_string_literal",
+                               "raw_string_literal"),
+            sql_trusted=trusted_sql_expr,
+            sql_boundary_types=("lambda_expression",
+                                "anonymous_method_expression",
+                                "local_function_statement"),
         )
 
     def private_registry_reason(self, root: Path) -> str | None:

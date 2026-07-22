@@ -388,6 +388,12 @@ class IndexAsKey(Rule):
         return None
 
 
+# B2.8C-B (closing round): the safety index travels ON each SourceFile
+# (`sf._r007_safety`, attached by TypeScriptAdapter.prepare via
+# dom_safety.attach_index) — no mutable module global, so interleaved
+# projects can never leak proofs into each other. Proofs are file-scoped
+# inside the index itself: a name is safe in THIS file only if proven here
+# or imported from the file that proved it.
 class DangerousInnerHtml(Rule):
     id = "R007"
     severity = Severity.RED
@@ -406,14 +412,134 @@ class DangerousInnerHtml(Rule):
                 continue
             attr = attr_name.parent
             # CP-8.5: flag UNLESS the value is PROVABLY { __html: <string/number
-            # literal without interpolation> }. So `={expr}` (an identifier),
-            # `={{__html: x}}` (non-literal), and `={{...spread}}` (spread —
-            # contents unknown) are all flagged; only the proven literal is clean.
-            if not self._is_provably_literal(sf, attr):
-                out.append(_finding(self, sf, attr,
-                                    "__html is not a proven string literal; any user-influenced "
-                                    "content here is an XSS vector (heuristic — no taint analysis)."))
+            # literal without interpolation> }. B2.8C-B adds two structural
+            # proofs: DOMPurify-sanitized values (real import + direct-return
+            # wrapper, incl. through useMemo), and hex-gated CSS builders when
+            # the element is <style> (a CSS context, judged separately from
+            # HTML). A sanitize-ish NAME alone never counts.
+            if self._is_provably_literal(sf, attr):
+                continue
+            if self._is_proven_sanitized(sf, attr):
+                continue
+            if self._is_style_element(attr) and self._is_css_safe_value(sf, attr):
+                continue
+            out.append(_finding(self, sf, attr,
+                                "__html is not a proven string literal; any user-influenced "
+                                "content here is an XSS vector (heuristic — no taint analysis)."))
         return out
+
+    # ---- B2.8C-B helpers -----------------------------------------------------
+    @staticmethod
+    def _html_value(attr):
+        expr = next((c for c in attr.named_children if c.type == "jsx_expression"), None)
+        if expr is None or not expr.named_children:
+            return None
+        obj = expr.named_children[0]
+        if obj.type != "object":
+            return None
+        for pair in obj.named_children:
+            if pair.type == "pair":
+                key = pair.child_by_field_name("key")
+                if key is not None and node_text(key).strip("'\"") == "__html":
+                    return pair.child_by_field_name("value")
+        return None
+
+    @staticmethod
+    def _is_style_element(attr) -> bool:
+        opening = attr.parent
+        if opening is None or opening.type != "jsx_opening_element":
+            # self-closing: jsx_self_closing_element carries attributes directly
+            if opening is None or opening.type != "jsx_self_closing_element":
+                return False
+        name = opening.child_by_field_name("name")
+        return name is not None and node_text(name) == "style"
+
+    def _resolve_call_or_ident(self, sf: SourceFile, val):
+        """The __html value as evidence tokens: called function NAMES, the
+        marker "<direct>" for a real `DOMPurify.sanitize(...)` member call,
+        or "" for any unresolvable part (which poisons the proof). One
+        identifier hop through its declaration; useMemo unwrapped."""
+        from auditor.adapters.typescript.dom_safety import is_direct_sanitize_call
+        names: list[str] = []
+        nodes = [val]
+        hops = 0
+        while nodes and hops < 6:
+            hops += 1
+            cur = nodes.pop()
+            if cur is None:
+                continue
+            if cur.type == "call_expression":
+                fn = cur.child_by_field_name("function")
+                ftext = node_text(fn) if fn is not None else ""
+                if ftext in ("useMemo", "React.useMemo"):
+                    args = cur.child_by_field_name("arguments")
+                    cb = args.named_children[0] if args is not None and args.named_children else None
+                    if cb is not None and cb.type in ("arrow_function", "function_expression"):
+                        nodes.append(cb.child_by_field_name("body"))
+                    continue
+                if is_direct_sanitize_call(cur, sf):
+                    names.append("<direct>")
+                    continue
+                if fn is not None and fn.type == "identifier":
+                    names.append(ftext)
+                continue
+            if cur.type == "identifier":
+                decl_value = self._declaration_value(sf, node_text(cur))
+                if decl_value is not None:
+                    nodes.append(decl_value)
+                continue
+            if cur.type in ("binary_expression", "parenthesized_expression",
+                            "ternary_expression"):
+                for k in cur.named_children:
+                    if k.type in ("string",):
+                        continue
+                    nodes.append(k)
+                continue
+            if cur.type == "statement_block":
+                for r in captures(sf.language, cur, "(return_statement) @r").get("r", []):
+                    if r.named_children:
+                        nodes.append(r.named_children[0])
+                continue
+            if cur.type == "string":
+                continue
+            names.append("")   # unresolvable part — poisons the proof
+        return names
+
+    @staticmethod
+    def _declaration_value(sf: SourceFile, name: str):
+        for d in captures(sf.language, sf.tree.root_node,
+                          "(variable_declarator) @d").get("d", []):
+            n = d.child_by_field_name("name")
+            if n is not None and node_text(n) == name:
+                return d.child_by_field_name("value")
+        return None
+
+    def _is_proven_sanitized(self, sf: SourceFile, attr) -> bool:
+        idx = getattr(sf, "_r007_safety", None)
+        val = self._html_value(attr)
+        if val is None:
+            return False
+        names = self._resolve_call_or_ident(sf, val)
+        if not names:
+            return False
+        for n in names:
+            if n == "<direct>":
+                continue                      # proven DOMPurify.sanitize call
+            if idx is None or not idx.is_dompurify_safe(sf.rel, n):
+                return False
+        return True
+
+    def _is_css_safe_value(self, sf: SourceFile, attr) -> bool:
+        idx = getattr(sf, "_r007_safety", None)
+        if idx is None:
+            return False
+        val = self._html_value(attr)
+        if val is None:
+            return False
+        names = self._resolve_call_or_ident(sf, val)
+        return bool(names) and all(
+            n != "" and n != "<direct>" and idx.is_css_safe(sf.rel, n)
+            for n in names)
 
     def _is_provably_literal(self, sf: SourceFile, attr) -> bool:
         expr = next((c for c in attr.named_children if c.type == "jsx_expression"), None)
