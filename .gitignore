@@ -12,12 +12,15 @@ build/
 
 # scan OUTPUT is never committed: real reports may contain source snippets.
 # `*-report/` covers auditor-report/, tabi-report/, madar-report/ and any
-# future <name>-report/ output directory. examples/ (curated fixture output)
-# and src/auditor/web/static/ (the shipped SPA build) stay TRACKED.
+# future <name>-report/ output directory; `*-report-*/` covers suffixed round
+# outputs (madar-report-b28b2/, madar-report-latest/, tabi-report-b28a/, ...).
+# examples/ (curated fixture output) and src/auditor/web/static/ (the shipped
+# SPA build) stay TRACKED.
 auditor-report/
 tabi-report/
 madar-report/
 *-report/
+*-report-*/
 trial-*/
 field-*/
 

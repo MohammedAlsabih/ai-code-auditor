@@ -218,6 +218,45 @@ See [`examples/report.md`](examples/report.md) and
 [`examples/report.json`](examples/report.json) for real output from the
 test fixture, and [SECURITY.md](SECURITY.md) for the security policy.
 
+## AI providers (connection testing only)
+
+The `auditor ai` layer manages connections to LLM providers for the planned
+AI-assisted review. In the current stage it does exactly two things: list a
+provider's models, and test the connection with a fixed probe
+(`Reply with OK only.`, output capped at 8 tokens). **No source code, no
+findings, and no report content are sent to any model at this stage.** The
+external services charge for API use and apply their own data-retention
+policies; Ollama is the local option and sends nothing off the machine.
+
+Supported providers: `openai` (OpenAI), `anthropic` (Anthropic Claude),
+`xai` (xAI Grok), `ollama` (local Ollama), and `openai_compatible` (any
+server speaking the OpenAI chat API). No extra install is needed — the layer
+uses the scanner's existing HTTP stack.
+
+```
+auditor ai providers                             # local state, no network
+auditor ai models --provider anthropic           # explicit network call
+auditor ai test --provider ollama --model llama3.2
+```
+
+Configuration is environment-only; keys are never written to config files,
+reports, SARIF, review sidecars, or browser storage:
+
+| Variable | Meaning |
+|---|---|
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `XAI_API_KEY` | provider keys |
+| `AUDITOR_OPENAI_COMPAT_BASE_URL` | base URL of an OpenAI-compatible server |
+| `AUDITOR_OPENAI_COMPAT_API_KEY` | optional key for that server |
+| `OLLAMA_HOST` | Ollama address (default `http://127.0.0.1:11434`) |
+| `AUDITOR_AI_PROVIDER` / `AUDITOR_AI_MODEL` | defaults for later stages |
+
+OpenAI, Anthropic, and xAI endpoints are pinned to the official hosts; a
+custom base URL exists only for Ollama and OpenAI-compatible servers, and
+only from the server's environment — never from the browser. The report
+explorer gets an **AI Providers** tab with the same functionality; opening
+the tab performs no outbound request, only the explicit Refresh/Test
+buttons do.
+
 ## Development
 
 ```

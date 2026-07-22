@@ -147,6 +147,48 @@ export function pathFilterMatches(repoRelative: string, filter: string): boolean
   return repoRelative === filter || repoRelative.startsWith(filter + '/')
 }
 
+// ---- AI provider layer (W3-A) ----------------------------------------------
+// providers = LOCAL server metadata (no outbound call); models/test are the
+// ONLY calls that reach a provider, and only on an explicit click.
+
+export async function fetchAIProviders(): Promise<unknown> {
+  const res = await fetch('/api/ai/providers')
+  if (!res.ok) throw new Error(`providers request failed (HTTP ${res.status})`)
+  return res.json()
+}
+
+export async function postAIModels(provider: string): Promise<unknown> {
+  const res = await fetch('/api/ai/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 409) throw new Error('another AI request is already running')
+  if (!res.ok) throw new Error(
+    (body as { error?: string }).error ?? `models request failed (HTTP ${res.status})`)
+  return body
+}
+
+export interface AITestResult {
+  status: string
+  message: string
+  latency_ms?: number
+}
+
+export async function postAITest(provider: string, model: string): Promise<AITestResult> {
+  const res = await fetch('/api/ai/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, model }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 409) throw new Error('another AI request is already running')
+  if (!res.ok) throw new Error(
+    (body as { error?: string }).error ?? `test request failed (HTTP ${res.status})`)
+  return body as AITestResult
+}
+
 export async function deleteReview(rid: string): Promise<void> {
   const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
   if (!res.ok) {

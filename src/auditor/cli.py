@@ -39,6 +39,23 @@ def build_parser() -> argparse.ArgumentParser:
                       help="exit non-zero on 'review' verdicts too (incomplete analysis never passes)")
     scan.add_argument("--verbose", "-v", action="store_true")
 
+    ai = sub.add_parser("ai", help="AI provider layer (W3-A: connection "
+                                   "testing only — no code or findings are sent)")
+    ai_sub = ai.add_subparsers(dest="ai_command")
+    ai_sub.add_parser("providers",
+                      help="list the supported providers and their local "
+                           "configuration state (no network)")
+    ai_models = ai_sub.add_parser("models",
+                                  help="fetch the provider's model list "
+                                       "(explicit network call)")
+    ai_models.add_argument("--provider", required=True)
+    ai_test = ai_sub.add_parser("test",
+                                help="send the fixed connection probe "
+                                     "(explicit network call)")
+    ai_test.add_argument("--provider", required=True)
+    ai_test.add_argument("--model", default=None,
+                         help="model id (default: AUDITOR_AI_MODEL)")
+
     srv = sub.add_parser("serve",
                          help="open a report.json in a local web explorer (127.0.0.1 only)")
     srv.add_argument("report", help="path to a report.json produced by 'auditor scan'")
@@ -65,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         return _serve(args)
+    if args.command == "ai":
+        return _ai(args)
     if args.command != "scan":
         build_parser().print_help()
         return 0
@@ -115,6 +134,68 @@ def _serve(args) -> int:
     print(f"AI Code Auditor Report Explorer | {url}  (report: {args.report})")
     uvicorn.run(app, host=SERVE_HOST, port=args.port, log_level="warning")
     return 0
+
+
+def _ai(args) -> int:
+    """`auditor ai ...` — the W3-A provider layer. `providers` is local-only;
+    `models` and `test` are EXPLICIT network calls. Output is safe by
+    construction: fixed messages only — never keys, response bodies, URLs,
+    or internal tracebacks."""
+    from auditor.ai import AIError, Provider, create_client, provider_metadata
+
+    if args.ai_command == "providers":
+        print("provider             display              configured  key  locality")
+        for m in provider_metadata():
+            key = "yes" if m["key_present"] else ("-" if m["key_env"] is None
+                                                  else "no")
+            print(f"{m['provider']:<20} {m['display']:<20} "
+                  f"{'yes' if m['configured'] else 'no':<11} {key:<4} "
+                  f"{m['locality']}")
+        print("\nkeys/config are read from the environment only "
+              "(OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, OLLAMA_HOST, "
+              "AUDITOR_OPENAI_COMPAT_BASE_URL, AUDITOR_OPENAI_COMPAT_API_KEY).")
+        return 0
+
+    if args.ai_command not in ("models", "test"):
+        print("usage: auditor ai {providers,models,test} — see `auditor ai -h`")
+        return 0
+    try:
+        provider = Provider(args.provider)
+    except ValueError:
+        legal = ", ".join(p.value for p in Provider)
+        print(f"error | خطأ: unknown provider (expected one of: {legal})",
+              file=sys.stderr)
+        return 2
+    try:
+        client = create_client(provider)
+    except AIError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 1
+
+    if args.ai_command == "models":
+        try:
+            models = client.list_models()
+        except AIError as e:
+            print(f"error | خطأ: {e}", file=sys.stderr)
+            return 1
+        if not models:
+            print("no models reported by the provider (an empty list is legal)")
+        for info in models:
+            print(info.id)
+        return 0
+
+    model = args.model or client.config.model
+    if not model:
+        print("error | خطأ: no model given (--model or AUDITOR_AI_MODEL)",
+              file=sys.stderr)
+        return 2
+    result = client.test_connection(model)
+    if result.ok:
+        print(f"ok: connection test passed ({result.latency_ms} ms) — "
+              "the fixed probe only; no code or findings were sent")
+        return 0
+    print(f"failed [{result.status}]: {result.message}", file=sys.stderr)
+    return 1
 
 
 def _relativize_diag(diag_dict: dict, root) -> dict:

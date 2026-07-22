@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -206,6 +207,22 @@ class BatchIn(BaseModel):
 
 BATCH_MAX_IDS = 5000
 _NOTE_MODES = ("keep", "append", "replace")
+
+
+class AIRequestIn(BaseModel):
+    """W3-A: the browser may name a provider (and a model) — NOTHING else.
+    extra='forbid' hard-rejects any attempt to smuggle an api_key or a
+    base_url through the request body (422 before any code runs)."""
+    model_config = {"extra": "forbid"}
+
+    provider: str
+    model: str = ""
+
+
+# ONE probe/models call at a time per process: a second concurrent request
+# gets 409 WITHOUT any outbound connection. Module-level on purpose — the
+# guard covers every app instance in the process.
+_AI_PROBE_LOCK = threading.Lock()
 
 
 def create_app(report_path: Path, repo_root: Path | None = None,
@@ -447,6 +464,73 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             "lines": [{"number": n, "text": text_lines[n - 1]}
                       for n in range(start, end + 1)],
         })
+
+    # ---- AI provider layer (W3-A): connection testing ONLY -------------------
+    # No findings, snippets, or source paths are ever sent; the probe is a
+    # fixed string. GET /api/ai/providers is LOCAL metadata (no network).
+    # POST endpoints are the only ones that go outbound, one at a time.
+    from auditor.ai import AIError, Provider, create_client, provider_metadata
+
+    def _ai_provider(name: str) -> Provider | None:
+        try:
+            return Provider(name)
+        except ValueError:
+            return None
+
+    @app.get("/api/ai/providers")
+    def ai_providers() -> JSONResponse:
+        rows = [{k: m[k] for k in ("provider", "display", "configured",
+                                   "key_present", "locality")}
+                for m in provider_metadata()]
+        return _AsciiJSON({"providers": rows,
+                           "note": "Connection tests send a fixed probe only. "
+                                   "Reports and source code are not sent."})
+
+    @app.post("/api/ai/models")
+    def ai_models(body: AIRequestIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if not _AI_PROBE_LOCK.acquire(blocking=False):
+            return _err(409, "another AI request is already in flight")
+        try:
+            try:
+                client = create_client(provider)
+                models = client.list_models()
+            except AIError as e:
+                return _AsciiJSON({"provider": provider.value,
+                                   "status": e.code, "message": str(e)})
+            return _AsciiJSON({"provider": provider.value, "status": "ok",
+                               "models": [m.id for m in models]})
+        finally:
+            _AI_PROBE_LOCK.release()
+
+    @app.post("/api/ai/test")
+    def ai_test(body: AIRequestIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        if not _AI_PROBE_LOCK.acquire(blocking=False):
+            return _err(409, "another AI request is already in flight")
+        try:
+            try:
+                client = create_client(provider)
+            except AIError as e:
+                return _AsciiJSON({"provider": provider.value,
+                                   "model": body.model,
+                                   "status": e.code, "message": str(e)})
+            result = client.test_connection(body.model.strip())
+            out: dict[str, Any] = {"provider": provider.value,
+                                   "model": body.model.strip(),
+                                   "status": result.status,
+                                   "message": result.message}
+            if result.ok:
+                out["latency_ms"] = result.latency_ms
+            return _AsciiJSON(out)
+        finally:
+            _AI_PROBE_LOCK.release()
 
     # Serve the bundled SPA last so /api/* wins. html=True makes "/" return
     # index.html. Mount only if the build exists — the API is usable without it.
