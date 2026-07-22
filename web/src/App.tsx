@@ -11,6 +11,7 @@ import {
   putReviewBatch,
   sourcePathFor,
 } from './api'
+import { AIProvidersPanel } from './components/AIProvidersPanel'
 import { CoveragePanel } from './components/CoveragePanel'
 import { DetailPanel } from './components/DetailPanel'
 import { BulkBar, PaginationBar, Toolbar } from './components/FindingsControls'
@@ -53,7 +54,7 @@ export default function App() {
   const [reviews, setReviews] = useState<Record<string, Review>>({})
   const [reviewsOk, setReviewsOk] = useState(true)
   const [reviewsError, setReviewsError] = useState('')
-  const [tab, setTab] = useState<'findings' | 'rules' | 'coverage'>('findings')
+  const [tab, setTab] = useState<'findings' | 'rules' | 'coverage' | 'ai'>('findings')
 
   // multi-value filters: OR inside a category, AND across categories
   const [query, setQuery] = useState('')
@@ -376,6 +377,12 @@ export default function App() {
         >
           Coverage
         </button>
+        <button
+          className={`tab ${tab === 'ai' ? 'active' : ''}`}
+          onClick={() => setTab('ai')}
+        >
+          AI Providers
+        </button>
       </nav>
       {tab === 'rules' ? (
         <div className="body">
@@ -387,6 +394,12 @@ export default function App() {
         <div className="body">
           <main className="main">
             <CoveragePanel />
+          </main>
+        </div>
+      ) : tab === 'ai' ? (
+        <div className="body">
+          <main className="main">
+            <AIProvidersPanel />
           </main>
         </div>
       ) : (
