@@ -137,7 +137,7 @@ def test_schema_version_value_never_echoed(tmp_path):
         load_config(tmp_path)
     msg = str(ei.value)
     _assert_clean(msg)
-    assert "unsupported schema_version (expected 1)" in msg
+    assert "unsupported schema_version (expected 1 or 2)" in msg
 
 
 def test_unknown_ecosystem_key_never_echoed(tmp_path):

@@ -114,10 +114,12 @@ def test_p3_single_declared_dep_does_not_suppress_hallucination(tmp_path):
     # requests does NOT silence it — it SURFACES as a yellow probable...
     assert h.severity.value == "yellow"
     assert "PROBABLE" in h.detail and "requests" in h.detail
-    # ...for REVIEW, not a definitive block on an unproven mapping (CP-8b r3)
-    counts = {"red": 0, "yellow": sum(1 for f in fs if f.severity.value == "yellow"),
-              "blue": 0}
-    assert verdict(counts, 100, {}) == "review"
+    # ...for REVIEW, not a definitive block on an unproven mapping (CP-8b r3).
+    # B2.8B2: verdict consumes gate_action — a warning gates as review.
+    gate = {"block": 0,
+            "review": sum(1 for f in fs if f.severity.value == "yellow"),
+            "informational": 0}
+    assert verdict(gate, 100, {}) == "review"
 
 
 # ── Point 4: .NET TFM old/modern/unknown ─────────────────────────────────────
@@ -211,7 +213,7 @@ def test_p5_error_and_incomplete_same_file_counted_once():
         manifest_incomplete=["/r/a/pyproject.toml"],
         semgrep_status="ci: success")
     # affected = union({a}, {a}) = 1 of 2 => manifest_cov 0.5 => confidence 50
-    assert analysis_confidence(d, offline=False, files_read=10) == 50
+    assert analysis_confidence(d, files_read=10) == 50
 
 
 # ── Point 6: semgrep one normalization base ──────────────────────────────────

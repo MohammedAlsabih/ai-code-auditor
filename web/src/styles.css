@@ -429,6 +429,29 @@ tr.sev-blue td.c-sev {
   background: var(--yellow-bg);
   border-color: #fedf89;
 }
+/* baseline badges (W2-B2.8B2): shown only for reports scanned with
+   --baseline. Text carries the meaning; color is never the only signal. */
+.bl-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  margin-right: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  letter-spacing: 0.03em;
+  vertical-align: 1px;
+}
+.bl-new {
+  color: var(--red);
+  background: var(--red-bg);
+  border-color: #fecdca;
+}
+.bl-unchanged {
+  color: var(--muted);
+  background: var(--panel);
+}
+
 .review-box {
   display: flex;
   flex-direction: column;

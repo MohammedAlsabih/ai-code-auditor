@@ -1,7 +1,7 @@
 export interface RawFinding {
   rule_id: string
   severity: string // DEPRECATED legacy color (red/yellow/blue)
-  level?: string // SARIF-compatible: error/warning/note
+  level?: string // SARIF-compatible: error/warning/note (EFFECTIVE, post-policy)
   title: string
   file: string
   line: number
@@ -10,6 +10,11 @@ export interface RawFinding {
   language?: string
   precision?: string
   engine?: string
+  gate_action?: string // block | review | informational (B2.8B2)
+  default_level?: string // pre-override level, present only when overridden
+  level_source?: string // 'project_policy' when a rule_levels override applied
+  fingerprint?: string // line-independent content identity
+  baseline_state?: string // 'new' | 'unchanged', only when --baseline was used
 }
 
 export interface Project {
@@ -25,9 +30,15 @@ export interface Project {
 export interface Summary {
   overall_score?: number
   analysis_confidence?: number
+  confidence?: number // DEPRECATED alias of analysis_confidence
+  registry_status?: string // complete | partial | unavailable | not_applicable
+  registry_confidence?: number | null // null when unavailable/not_applicable
   verdict?: string
   counts?: { red?: number; yellow?: number; blue?: number } // DEPRECATED
   level_counts?: { error?: number; warning?: number; note?: number }
+  gate_counts?: { block?: number; review?: number; informational?: number }
+  // deliberately unknown-shaped: baseline.ts type-guards it
+  baseline?: unknown
 }
 
 export interface Report {
@@ -73,6 +84,8 @@ export interface Finding {
   snippet: string
   engine?: string
   review_id?: string
+  gate_action: string // '' when the report predates B2.8B2
+  baseline_state: string // 'new' | 'unchanged' | '' (strictly normalized)
 }
 
 // One saved review decision (W2-B1). unreviewed = no record at all.

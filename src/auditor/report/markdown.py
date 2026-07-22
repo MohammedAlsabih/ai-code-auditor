@@ -41,13 +41,32 @@ def write_markdown(data: dict, path: Path) -> None:
     lc = _level_counts(s)
     L.append(f"- 🔴 Error: {lc['error']}   🟡 Warning: {lc['warning']}   "
              f"🔵 Note: {lc['note']}")
+    gc = s.get("gate_counts")
+    if isinstance(gc, dict):
+        L.append(f"- Gate | البوابة: block {gc.get('block', 0)} · review "
+                 f"{gc.get('review', 0)} · informational "
+                 f"{gc.get('informational', 0)} — the verdict consumes "
+                 "gate_action; a **heuristic** error requires review but does "
+                 "NOT block by default | خطأ heuristic لا يحجب افتراضياً، "
+                 "يتطلب مراجعة")
     low = s.get("lowest_language")
     if low and overall is not None and low["score"] < overall:
         L.append(f"- ⚠️ Lowest language | أدنى لغة: **{low['language']} = {low['score']}/100** "
                  "(the average must not hide this)")
     if s.get("analysis_confidence") is not None:
         L.append(f"- Analysis confidence | ثقة التحليل: {s['analysis_confidence']}/100 "
-                 "(separate axis: how COMPLETE the checks were, not how risky the code is)")
+                 "(how COMPLETE the file/manifest/rule analysis was — no "
+                 "registry factor, not a risk score)")
+    if s.get("registry_status") is not None:
+        rc = s.get("registry_confidence")
+        L.append(f"- Registry verification | تحقق السجلات: {s['registry_status']}"
+                 + (f" ({rc}/100)" if rc is not None else "")
+                 + " — a separate axis from analysis confidence")
+    base = s.get("baseline")
+    if isinstance(base, dict) and base.get("enabled"):
+        L.append(f"- Baseline: new {base.get('new', 0)} · unchanged "
+                 f"{base.get('unchanged', 0)} · resolved {base.get('resolved', 0)} "
+                 f"(gate scope: {base.get('gate_scope', 'all')})")
     L.append("")
     L.append("## Engines")
     L.append("")

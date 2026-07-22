@@ -18,6 +18,7 @@ import { FindingsTable } from './components/FindingsTable'
 import { RulesPanel } from './components/RulesPanel'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
+import { type BaselineFilter, baselineSummary, matchesBaselineFilter } from './baseline'
 import { buildRuleCoverage, ruleFilterOptions } from './rulecov'
 import {
   type Selection,
@@ -62,6 +63,8 @@ export default function App() {
   const [precisionF, setPrecisionF] = useState<Set<string>>(new Set())
   const [ruleF, setRuleF] = useState<Set<string>>(new Set())
   const [reviewF, setReviewF] = useState<Set<string>>(new Set())
+  // All/New/Existing — rendered ONLY for reports with a real baseline block
+  const [baselineF, setBaselineF] = useState<BaselineFilter>('all')
   const [pathFilters, setPathFilters] = useState<string[]>([])
   const [pathInput, setPathInput] = useState('')
   const [pathInvalid, setPathInvalid] = useState(false)
@@ -100,6 +103,11 @@ export default function App() {
   }, [])
 
   const allRows = useMemo(() => (report ? aggregate(report) : []), [report])
+  // strict gate: baseline UI exists ONLY when the report carries a real block
+  const baseline = useMemo(
+    () => (report ? baselineSummary(report.summary) : null),
+    [report],
+  )
   const projects = useMemo(
     () => Array.from(new Set(allRows.map((r) => r.project))).sort(),
     [allRows],
@@ -153,6 +161,9 @@ export default function App() {
         const state = rv ? rv.status : 'unreviewed'
         if (!reviewF.has(state)) return false
       }
+      if (baseline && !matchesBaselineFilter(r.baseline_state, baselineF)) {
+        return false
+      }
       if (pathFilters.length) {
         const rel = sourcePathFor(r)
         if (!pathFilters.some((p) => pathFilterMatches(rel, p))) return false
@@ -160,7 +171,7 @@ export default function App() {
       return true
     })
   }, [allRows, query, projectF, languageF, levelF, precisionF, ruleF, reviewF,
-      pathFilters, reviews])
+      baseline, baselineF, pathFilters, reviews])
 
   const sorted = useMemo(() => {
     const dir = sortDir === 'asc' ? 1 : -1
@@ -216,9 +227,11 @@ export default function App() {
   )
 
   // any search/filter/page-size change returns to page 1 AND clears selection
+  // baselineF included: switching All/New/Existing clears the (possibly
+  // hidden) selection so bulk review can never touch rows outside the view
   const filterStamp = JSON.stringify([
     query, [...projectF], [...languageF], [...levelF], [...precisionF],
-    [...ruleF], [...reviewF], pathFilters, pageSize,
+    [...ruleF], [...reviewF], baselineF, pathFilters, pageSize,
   ])
   useEffect(() => {
     setPage(1)
@@ -254,6 +267,7 @@ export default function App() {
     setPrecisionF(new Set())
     setRuleF(new Set())
     setReviewF(new Set())
+    setBaselineF('all')
     setPathFilters([])
     setPathInput('')
     setPathInvalid(false)
@@ -262,7 +276,7 @@ export default function App() {
   const anyFilterActive =
     Boolean(query.trim()) || projectF.size > 0 || languageF.size > 0 ||
     levelF.size > 0 || precisionF.size > 0 || ruleF.size > 0 ||
-    reviewF.size > 0 || pathFilters.length > 0
+    reviewF.size > 0 || baselineF !== 'all' || pathFilters.length > 0
 
   const applyBulk = async (confirmRed: boolean) => {
     if (!bulkStatus || selectedIds.length === 0) return
@@ -409,6 +423,9 @@ export default function App() {
               onToggleRule={(r) => setRuleF((prev) => toggleSet(prev, r))}
               precisionFilter={precisionF}
               onTogglePrecision={(p) => setPrecisionF((prev) => toggleSet(prev, p))}
+              baselineInfo={baseline}
+              baselineFilter={baselineF}
+              onBaselineFilter={setBaselineF}
               sortKey={sortKey}
               sortDir={sortDir}
               onSortKey={setSortKey}
@@ -442,6 +459,7 @@ export default function App() {
             )}
             <FindingsTable
               rows={paged}
+              showBaseline={baseline !== null}
               reviews={reviews}
               selected={selected}
               onSelect={setSelected}

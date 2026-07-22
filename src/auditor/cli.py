@@ -26,6 +26,15 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--config", default=None,
                       help="path to a .auditor.toml (default: auto-discover at "
                            "the target root)")
+    scan.add_argument("--baseline", default=None, metavar="REPORT_JSON",
+                      help="a prior report.json; current findings are "
+                           "classified new/unchanged against it (fingerprint "
+                           "multiset, line-shift tolerant)")
+    scan.add_argument("--new-only", action="store_true",
+                      help="gate the verdict on NEW findings only (requires "
+                           "--baseline); the report still carries everything")
+    scan.add_argument("--sarif", action="store_true",
+                      help="also write a SARIF 2.1.0 log to <output>/report.sarif")
     scan.add_argument("--strict", action="store_true",
                       help="exit non-zero on 'review' verdicts too (incomplete analysis never passes)")
     scan.add_argument("--verbose", "-v", action="store_true")
@@ -168,6 +177,12 @@ def _scan(args) -> int:
 
     from auditor.config import any_match, is_vendored, load_config
 
+    from auditor.core.baseline import load_baseline_counter
+    from auditor.core.policy import GatePolicy
+
+    if args.new_only and not args.baseline:
+        raise AuditorError("--new-only requires --baseline")
+
     root, cleanup = resolve_target(args.target)
     try:
         # project configuration (W2-B2.8A): explicit --config or .auditor.toml
@@ -177,6 +192,24 @@ def _scan(args) -> int:
         for _a in adapters:
             _a.set_repo_root(root)      # npm_roots resolve repo-relatively
             _a.apply_config(config)
+        # catalog collected ONCE, up front: it also validates the config's
+        # rule_levels ids BEFORE any scan work (unknown ids are counted, never
+        # echoed — a malformed key may carry anything).
+        catalog = collect_catalog(adapters.values()
+                                  if isinstance(adapters, dict) else adapters)
+        catalog_ids = {d["rule_id"] for d in catalog}
+        unknown_rules = sorted(set(config.rule_levels) - catalog_ids)
+        if unknown_rules:
+            raise AuditorError(
+                f"config: rule_levels contains {len(unknown_rules)} rule id(s) "
+                "not present in the tool rule catalog")
+        policy = GatePolicy(heuristic_errors=config.heuristic_errors,
+                            rule_levels=dict(config.rule_levels),
+                            source=config.loaded_from or "default")
+        # baseline loads BEFORE the scan: a corrupt/oversize/incompatible file
+        # fails closed immediately instead of after minutes of scanning
+        baseline = (load_baseline_counter(Path(args.baseline))
+                    if args.baseline else None)
         projects = discover_projects(root, adapters)
         limitations: list[str] = []
         if config.loaded_from:
@@ -354,10 +387,20 @@ def _scan(args) -> int:
 
         from dataclasses import asdict as dc_asdict
 
-        from auditor.core.scoring import analysis_confidence
+        from auditor.core.scoring import (
+            analysis_confidence,
+            registry_confidence,
+            registry_status,
+        )
         total_files_read = sum(r["file_count"] for r in results)
-        confidence = analysis_confidence(global_diag, offline=args.offline,
-                                         files_read=total_files_read)
+        # analysis completeness and registry verification are SEPARATE axes
+        # (B2.8B2-B): an intended --offline run keeps full analysis confidence
+        # and reports registry_status=unavailable instead.
+        confidence = analysis_confidence(global_diag, files_read=total_files_read)
+        reg_status = registry_status(args.offline, global_diag.registry_attempted,
+                                     global_diag.registry_failures)
+        reg_conf = registry_confidence(reg_status, global_diag.registry_attempted,
+                                       global_diag.registry_failures)
         engines = {
             "ast": "tree-sitter 0.26 (python/java/csharp/typescript/tsx)",
             "registry": "offline" if args.offline else "online (pypi/npm/maven/nuget, cached)",
@@ -368,15 +411,12 @@ def _scan(args) -> int:
         # the REPORT shows repository-relative paths (privacy + reproducibility,
         # CP-8b round 3)
         diag_dict = _relativize_diag(dc_asdict(global_diag), root)
-        # catalog collected ONCE; execution serialized AFTER every engine has
-        # recorded (builtin file rules, H, project passes, semgrep) — derived
-        # from the ledgers only, never recomputed from diagnostics/findings.
-        # Scoring/confidence/verdict above are already computed and unaffected.
+        # execution serialized AFTER every engine has recorded (builtin file
+        # rules, H, project passes, semgrep) — derived from the ledgers only,
+        # never recomputed from diagnostics/findings. The catalog was
+        # collected once, up front (it validated rule_levels too).
         from auditor.core.execution import execution_manifest
-        catalog = collect_catalog(adapters.values()
-                                  if isinstance(adapters, dict) else adapters)
-        execution = execution_manifest(execution_ledgers,
-                                       {d["rule_id"] for d in catalog})
+        execution = execution_manifest(execution_ledgers, catalog_ids)
         # the report's `target` never echoes an ABSOLUTE machine path (privacy,
         # CP-8b round 3 — surfaced by Linux CI where as_posix == str): URLs and
         # relative paths pass through, a local absolute path shows as
@@ -387,10 +427,18 @@ def _scan(args) -> int:
             display_target = f"<local>/{Path(display_target).name}"
         data = build_report(display_target, results, engines, limitations,
                             diagnostics=diag_dict, confidence=confidence,
-                            catalog=catalog, execution=execution)
+                            catalog=catalog, execution=execution,
+                            policy=policy,
+                            registry={"status": reg_status,
+                                      "confidence": reg_conf},
+                            baseline=baseline,
+                            gate_scope="new" if args.new_only else "all")
         out_dir = Path(args.output)
         write_json(data, out_dir / "report.json")
         write_markdown(data, out_dir / "report.md")
+        if args.sarif:
+            from auditor.report.sarif import write_sarif
+            write_sarif(data, out_dir / "report.sarif")
 
         if not projects:
             print("no supported languages detected | لم تُكتشف لغات مدعومة "
@@ -399,10 +447,18 @@ def _scan(args) -> int:
         overall = s["overall_score"]
         low = s["lowest_language"]
         low_txt = f", lowest {low['language']}={low['score']}" if low else ""
-        print(f"scan complete | اكتمل الفحص: verdict={s['verdict'].upper()}, "
+        gc = s["gate_counts"]
+        print(f"scan complete | اكتمل الفحص: verdict={s['verdict'].upper()} "
+              f"(gate: block={gc['block']} review={gc['review']} "
+              f"info={gc['informational']}), "
               f"health {overall if overall is not None else 'N/A'}{low_txt}, "
-              f"errors={s['counts']['red']}, confidence {confidence}/100 "
-              f"— reports in {out_dir / 'report.md'} + report.json")
+              f"errors={s['counts']['red']}, "
+              f"analysis confidence {confidence}/100, "
+              f"registry {s['registry_status']}"
+              + (f" {s['registry_confidence']}/100"
+                 if s.get("registry_confidence") is not None else "")
+              + f" — reports in {out_dir / 'report.md'} + report.json"
+              + (" + report.sarif" if args.sarif else ""))
         if s["verdict"] == "block":
             return 1
         if s["verdict"] == "review" and args.strict:

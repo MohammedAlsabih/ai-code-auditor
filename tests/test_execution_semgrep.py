@@ -505,8 +505,8 @@ def test_ledger_guards_forbid_contradictions():
 def test_ledger_recording_never_changes_scoring(tmp_path, descriptors):
     from auditor.core.scoring import analysis_confidence, verdict
     diag = Diagnostics(semgrep_status="semgrep 1.0.0: success")
-    before_conf = analysis_confidence(diag, offline=True, files_read=3)
-    before_verdict = verdict({"red": 0, "yellow": 0}, before_conf,
+    before_conf = analysis_confidence(diag, files_read=3)
+    before_verdict = verdict({"block": 0, "review": 0}, before_conf,
                              {"rule_attempted": 4, "rule_failures": 0,
                               "semgrep_status": diag.semgrep_status})
     py = _sf(tmp_path, "a.py", "python")
@@ -515,9 +515,9 @@ def test_ledger_recording_never_changes_scoring(tmp_path, descriptors):
                      partial_reasons=["1 skipped"])
     record_semgrep_execution([(led, [py])], descriptors, run=run)
     assert diag.rule_attempted == 0 and diag.rule_failures == 0   # untouched
-    after_conf = analysis_confidence(diag, offline=True, files_read=3)
+    after_conf = analysis_confidence(diag, files_read=3)
     assert (before_conf, before_verdict) == (
-        after_conf, verdict({"red": 0, "yellow": 0}, after_conf,
+        after_conf, verdict({"block": 0, "review": 0}, after_conf,
                             {"rule_attempted": 4, "rule_failures": 0,
                              "semgrep_status": diag.semgrep_status}))
 

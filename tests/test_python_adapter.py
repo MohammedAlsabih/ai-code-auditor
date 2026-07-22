@@ -453,8 +453,8 @@ def test_setup_py_dynamic_install_requires_is_recorded_limitation(tmp_path):
     assert any(p.endswith("setup.py") for p in diag.manifest_incomplete)
     # CP-8.1: the single numeric confidence source reflects the incompleteness
     from auditor.core.scoring import analysis_confidence, verdict
-    assert analysis_confidence(diag, offline=False, files_read=1) < 100
-    assert verdict({"red": 0, "yellow": 0}, 100,
+    assert analysis_confidence(diag, files_read=1) < 100
+    assert verdict({"block": 0, "review": 0}, 100,
                    {"manifest_incomplete": diag.manifest_incomplete}) == "review"
 
 
@@ -527,7 +527,7 @@ def test_oversized_pyproject_double_read_dedups_ledger(tmp_path):
     assert len(oversize) == 1                    # deduped by entry
     assert len(diag.manifest_files) == 1
     from auditor.core.scoring import analysis_confidence
-    assert analysis_confidence(diag, offline=False, files_read=1) < 100
+    assert analysis_confidence(diag, files_read=1) < 100
 
 
 def test_uv_conditional_source_list_is_local(tmp_path):

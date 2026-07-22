@@ -334,4 +334,5 @@ def test_e2e_findings_and_scores_unchanged_by_execution_block(scanned_report):
         assert key not in proj_text
     assert set(scanned_report["summary"].keys()) == {
         "overall_score", "score_kind", "lowest_language", "counts",
-        "level_counts", "analysis_confidence", "verdict"}
+        "level_counts", "analysis_confidence", "confidence",
+        "registry_status", "registry_confidence", "gate_counts", "verdict"}

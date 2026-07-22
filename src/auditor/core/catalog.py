@@ -144,14 +144,22 @@ def collect_catalog(adapters: Iterable[HasRuleDescriptors],
 
 
 def analysis_manifest(catalog: list[dict[str, Any]],
-                      execution: dict[str, Any] | None = None) -> dict[str, Any]:
+                      execution: dict[str, Any] | None = None,
+                      policy: dict[str, Any] | None = None) -> dict[str, Any]:
     """The report block. `catalog` semantics: TOOL CAPABILITY AT SCAN TIME —
     the rules this build ships and could apply. `execution` (B2-D) is the
     separate PER-RUN evidence block (execution_manifest output, its own
     schema_version): a manifest without it stays schema v1 for old readers;
-    with it the manifest becomes schema v2. Capability and execution are
-    never mixed into one list."""
+    with it the manifest becomes schema v2. `policy` (B2.8B2) is the gate
+    policy this scan applied (policy_manifest output, its own
+    schema_version) — an ADDITIVE optional key that does not move the
+    manifest version; readers that only know catalog/execution ignore it.
+    Capability, execution, and policy are never mixed into one list."""
     if execution is None:
-        return {"schema_version": CATALOG_SCHEMA_VERSION, "catalog": catalog}
-    return {"schema_version": MANIFEST_SCHEMA_WITH_EXECUTION,
-            "catalog": catalog, "execution": execution}
+        out = {"schema_version": CATALOG_SCHEMA_VERSION, "catalog": catalog}
+    else:
+        out = {"schema_version": MANIFEST_SCHEMA_WITH_EXECUTION,
+               "catalog": catalog, "execution": execution}
+    if policy is not None:
+        out["policy"] = policy
+    return out

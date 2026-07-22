@@ -84,8 +84,9 @@ def test_scoring_and_verdict_identical_before_after_migration():
     from auditor.core.scoring import language_score, verdict
     expected_score = language_score(projects[0]["findings"])
     assert rep["projects"][0]["score"] == expected_score
+    # B2.8B2: an exact RED gates as block, a YELLOW as review
     assert rep["summary"]["verdict"] == verdict(
-        {"red": 1, "yellow": 1, "blue": 0}, 90, {})
+        {"block": 1, "review": 1, "informational": 0}, 90, {})
 
 
 def test_review_id_identical_before_after_level_field():

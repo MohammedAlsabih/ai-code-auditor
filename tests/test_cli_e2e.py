@@ -17,9 +17,16 @@ def test_cli_scan_monorepo_offline(fixtures_dir, tmp_path, capsys):
     assert "R001" in all_rules          # hooks in condition in Widget.tsx
     assert "N001" in all_rules          # .env.local public secret
     assert (out / "report.md").read_text(encoding="utf-8").startswith("# AI Code Auditor Report")
-    # coverage-v2: offline => registry_cov 0 => 0.5 factor; no semgrep binary => 0.95
-    assert data["summary"]["analysis_confidence"] == 48
-    assert data["summary"]["verdict"] == "block"          # reds exist
+    # coverage-v3 (B2.8B2): NO registry factor — offline no longer halves the
+    # number; no semgrep binary => 0.95 factor. Asserted EXACTLY: recompute
+    # when the coverage model changes, never leave two numbers.
+    assert data["summary"]["analysis_confidence"] == 95
+    assert data["summary"]["confidence"] == 95            # deprecated alias
+    # the registry axis is SEPARATE: intended offline => unavailable + null
+    assert data["summary"]["registry_status"] == "unavailable"
+    assert data["summary"]["registry_confidence"] is None
+    assert data["summary"]["verdict"] == "block"          # exact errors exist
+    assert data["summary"]["gate_counts"]["block"] >= 1
     assert data["summary"]["lowest_language"] is not None
     assert "diagnostics" in data and "semgrep_status" in data["diagnostics"]
     printed = capsys.readouterr().out
