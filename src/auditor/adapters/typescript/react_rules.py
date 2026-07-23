@@ -200,6 +200,81 @@ class HookInNestedCallback(Rule):
         return out
 
 
+# B2.8C1 (closing): the two proven R003 false-positive classes, both proven
+# from the AST — never a file-level regex boolean. `renderHook` must resolve
+# to a REAL @testing-library import binding (respecting alias + shadowing);
+# a Storybook `render` must be a real Story render (an exported story object's
+# property), not any property named render.
+def _import_bindings(sf) -> dict:
+    """local binding name -> (imported_name, source) from this file's import
+    declarations. `import { renderHook }` -> renderHook maps to
+    ('renderHook', spec); `import { x as y }` -> y maps to ('x', spec);
+    default/namespace imports map to ('default'/'*', spec). Keeping the
+    ORIGINAL imported name lets callers require the real export, so
+    `import { somethingElse as renderHook }` is NOT accepted as renderHook."""
+    out: dict[str, tuple[str, str]] = {}
+    root = sf.tree.root_node
+    for imp in captures(sf.language, root, "(import_statement) @i").get("i", []):
+        src = imp.child_by_field_name("source")
+        spec = node_text(src).strip("'\"`") if src is not None else ""
+        if not spec:
+            continue
+        for named in captures(sf.language, imp, "(import_specifier) @s").get("s", []):
+            name = named.child_by_field_name("name")
+            alias = named.child_by_field_name("alias")
+            imported = node_text(name) if name is not None else ""
+            local = node_text(alias) if alias is not None else imported
+            if local and imported:
+                out[local] = (imported, spec)
+        for clause in captures(sf.language, imp,
+                               "(import_clause (identifier) @d)").get("d", []):
+            out[node_text(clause)] = ("default", spec)
+        for ns in captures(sf.language, imp,
+                           "(namespace_import (identifier) @n)").get("n", []):
+            out[node_text(ns)] = ("*", spec)
+    return out
+
+
+def _direct_scope_decls(fn_node, lang: str) -> set:
+    """Names declared DIRECTLY in this function's own lexical scope — its
+    parameters and the top-level statements of its body. Deliberately does NOT
+    descend into nested functions or the bodies of nested blocks/other
+    functions, so a `const renderHook` inside a sibling/nested function does
+    not shadow this scope. A same-scope declaration counts even if it appears
+    textually after the use (block scoping is lexical, not positional)."""
+    names: set[str] = set()
+    params = fn_node.child_by_field_name("parameters")
+    if params is not None:
+        for p in captures(lang, params, "(identifier) @p").get("p", []):
+            names.add(node_text(p))
+    body = fn_node.child_by_field_name("body")
+    if body is not None and body.type == "statement_block":
+        for stmt in body.named_children:
+            if stmt.type in ("lexical_declaration", "variable_declaration"):
+                for d in stmt.named_children:
+                    if d.type == "variable_declarator":
+                        n = d.child_by_field_name("name")
+                        if n is not None and n.type == "identifier":
+                            names.add(node_text(n))
+            elif stmt.type == "function_declaration":
+                n = stmt.child_by_field_name("name")
+                if n is not None:
+                    names.add(node_text(n))
+    return names
+
+
+def _is_shadowed(name: str, at_node, lang: str) -> bool:
+    """True when `name` is re-declared in a function scope enclosing the use —
+    lexically, i.e. in that scope's own params/top-level declarations (never
+    inside a nested/sibling function). Module scope keeps the import."""
+    cur = at_node.parent
+    while cur is not None:
+        if cur.type in _FUNC_TYPES and name in _direct_scope_decls(cur, lang):
+            return True
+        cur = cur.parent
+    return False
+
+
 class HookOutsideComponent(Rule):
     id = "R003"
     severity = Severity.YELLOW
@@ -214,8 +289,12 @@ class HookOutsideComponent(Rule):
     # `const Btn = memo(() => ...)`.
     _COMPONENT_WRAPPERS = frozenset({"memo", "forwardRef", "React.memo", "React.forwardRef"})
 
+    _TESTING_LIB_RE = re.compile(r"^@testing-library/")
+    _STORYBOOK_RE = re.compile(r"^@storybook/")
+
     def check(self, sf: SourceFile) -> list[Finding]:
         out = []
+        imports = _import_bindings(sf)
         for call, name in hook_calls(sf):
             fns = enclosing_functions(call)
             if not fns:
@@ -229,12 +308,109 @@ class HookOutsideComponent(Rule):
                 continue  # `useEffect(() => useX())` — R002 owns that case
             if wrapper in self._COMPONENT_WRAPPERS:
                 continue  # memo/forwardRef-wrapped component body — legal
+            # B2.8C1 (closing): a renderHook(() => useX()) callback is a hook
+            # test context ONLY when the callee resolves to a real
+            # @testing-library import binding AND is not shadowed by a local of
+            # the same name in an enclosing scope.
+            if wrapper is not None and inner.parent is not None \
+                    and self._is_testing_lib_renderhook(inner, wrapper, imports, sf):
+                continue
+            # B2.8C1 (closing): a Storybook `render` is a component context only
+            # when it is the render property of an EXPORTED story object — mere
+            # presence of a @storybook import never exempts a local helper.
+            if inner_name == "render" \
+                    and self._is_exported_story_render(inner, imports, sf):
+                continue
             where = f"'{inner_name}'" if inner_name else "an anonymous callback"
             out.append(_finding(self, sf, call,
                                 f"{name} is called from {where}, which is neither a "
                                 "component (Capitalized) nor a custom hook (use*); hooks "
                                 "cannot run inside event handlers or nested callbacks."))
         return out
+
+    _STORY_TYPE_RE = re.compile(r"\b(?:Story|StoryObj|Meta|StoryFn)\b")
+
+    def _is_testing_lib_renderhook(self, fn_node, wrapper, imports, sf) -> bool:
+        binding = imports.get(wrapper)
+        if binding is None:
+            return False
+        imported_name, spec = binding
+        # the EXPORT must actually be `renderHook` (reject
+        # `import { somethingElse as renderHook }`) from a @testing-library pkg
+        if imported_name != "renderHook" or not self._TESTING_LIB_RE.match(spec):
+            return False
+        call = fn_node.parent.parent if fn_node.parent is not None else None
+        if call is None or call.type != "call_expression":
+            return False
+        return not _is_shadowed(wrapper, call, sf.language)
+
+    def _is_exported_story_render(self, fn_node, imports, sf) -> bool:
+        parent = fn_node.parent
+        if parent is None or parent.type != "pair":
+            return False   # not an object property at all
+        has_sb = any(self._STORYBOOK_RE.match(spec)
+                     for _imported, spec in imports.values()) \
+            or ".stories." in sf.rel
+        if not has_sb:
+            return False
+        obj = parent.parent
+        if obj is None or obj.type != "object":
+            return False
+        # A Storybook import + an export is NOT enough. Require ACTUAL story
+        # evidence: (a) a Story/StoryObj/Meta type annotation or a
+        # `satisfies StoryObj/Story` on the declaration, OR (b) the module has
+        # a `export default` meta (a proven CSF module) AND this object is an
+        # exported named binding (a story). A bare `export const helper = {
+        # render }` with no annotation and no meta stays R003.
+        exported = self._exported_declarator(obj)
+        if exported is not None:
+            if self._has_story_type_evidence(exported):
+                return True
+            if self._module_has_default_export(sf):
+                return True    # CSF module: named exports are stories
+        return False
+
+    @staticmethod
+    def _exported_declarator(obj):
+        """The variable_declarator whose value is `obj`, IF that declaration is
+        exported — else None."""
+        cur = obj.parent
+        hops = 0
+        while cur is not None and hops < 6:
+            hops += 1
+            if cur.type == "variable_declarator":
+                decl = cur.parent
+                if decl is not None and decl.parent is not None \
+                        and decl.parent.type == "export_statement":
+                    return cur
+                return None
+            if cur.type in ("object", "pair", "parenthesized_expression",
+                            "satisfies_expression", "as_expression"):
+                cur = cur.parent
+                continue
+            return None
+        return None
+
+    def _has_story_type_evidence(self, declarator) -> bool:
+        # a `: Story`/`: StoryObj`/`: Meta` type annotation on the declarator
+        type_node = declarator.child_by_field_name("type")
+        if type_node is not None and self._STORY_TYPE_RE.search(node_text(type_node)):
+            return True
+        # or `= { ... } satisfies StoryObj`
+        value = declarator.child_by_field_name("value")
+        if value is not None and value.type == "satisfies_expression" \
+                and self._STORY_TYPE_RE.search(node_text(value)):
+            return True
+        return False
+
+    @staticmethod
+    def _module_has_default_export(sf) -> bool:
+        for exp in captures(sf.language, sf.tree.root_node,
+                            "(export_statement) @e").get("e", []):
+            txt = node_text(exp)
+            if txt.startswith("export default") or "export default" in txt[:40]:
+                return True
+        return False
 
     @staticmethod
     def _wrapping_callee(fn_node) -> str | None:
@@ -285,6 +461,64 @@ def _component_reactive_names(fn_node, lang: str, exclude=None) -> set[str]:
     return names
 
 
+def _member_path(node) -> str | None:
+    """A normalized member path for a dependency-array entry, or None when the
+    entry is not a plain identifier/member chain (a call, computed `[...]`
+    access, spread, etc. — which cannot be reasoned about). `client?.costModel`
+    and `client.costModel` both normalize to 'client.costModel'."""
+    t = node.type
+    if t == "identifier":
+        return node_text(node)
+    if t in ("member_expression",):
+        obj = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        if prop is None or prop.type != "property_identifier":
+            return None                 # computed member: obj[expr]
+        base = _member_path(obj)
+        return f"{base}.{node_text(prop)}" if base is not None else None
+    if t in ("parenthesized_expression", "non_null_expression"):
+        inner = next(iter(node.named_children), None)
+        return _member_path(inner) if inner is not None else None
+    return None
+
+
+def _path_covers(dep: str, read: str) -> bool:
+    """A dependency path covers a read path when it is the read or a prefix of
+    it: [client] covers client.costModel; [client.costModel] covers
+    client.costModel; [client.other] does not."""
+    return dep == read or read.startswith(dep + ".")
+
+
+def _read_paths(callback, lang: str, bases: set[str]) -> dict[str, set[str]]:
+    """For every reactive `base` name read inside the callback, the set of
+    member paths actually read. A bare use of `base`, or a use whose full path
+    cannot be resolved (it is an argument to a call, a computed access, etc.),
+    contributes the base path itself — so it needs whole-object coverage."""
+    out: dict[str, set[str]] = {}
+    for ident in captures(lang, callback, _IDENT_QUERY).get("id", []):
+        base = node_text(ident)
+        if base not in bases:
+            continue
+        # climb member_expression parents while THIS node is the .object side
+        # (compare by byte-range: tree-sitter re-wraps nodes, so `is` fails)
+        path = base
+        cur = ident
+        parent = cur.parent
+        while parent is not None and parent.type == "member_expression":
+            obj = parent.child_by_field_name("object")
+            if obj is None or (obj.start_byte, obj.end_byte) != \
+                    (cur.start_byte, cur.end_byte):
+                break                   # cur is the .property side, not .object
+            prop = parent.child_by_field_name("property")
+            if prop is None or prop.type != "property_identifier":
+                break                   # computed access — stop at the base path
+            path = f"{path}.{node_text(prop)}"
+            cur = parent
+            parent = cur.parent
+        out.setdefault(base, set()).add(path)
+    return out
+
+
 class EffectDeps(Rule):
     id = "R004"  # emits R004 and R005
     output_ids = ("R004", "R005")
@@ -315,19 +549,35 @@ class EffectDeps(Rule):
             deps_node = arg_nodes[1]
             if deps_node.type != "array":
                 continue
-            deps = {node_text(c) for c in deps_node.named_children if c.type == "identifier"}
+            # B2.8C1: dependencies and reads are compared as MEMBER PATHS, not
+            # base identifiers. `[client.costModel]` / `[client?.costModel]`
+            # cover a read of client.costModel; `[client]` covers it too
+            # (broader); `[client.other]` does not. A read whose path cannot be
+            # resolved (computed access / call result) is treated conservatively
+            # as reading the base object — it is only covered by a whole-object
+            # dependency, never silenced without evidence.
+            dep_paths = {p for c in deps_node.named_children
+                         if (p := _member_path(c)) is not None}
             fns = enclosing_functions(call)
             component = fns[-1] if fns else None
             if component is None:
                 continue
             reactive = _component_reactive_names(component, sf.language, exclude=callback)
-            used = {node_text(n) for n in
-                    captures(sf.language, callback, _IDENT_QUERY).get("id", [])}
-            missing = sorted((used & reactive) - deps - _GLOBALS)
+            read_paths = _read_paths(callback, sf.language, reactive)
+            missing_bases: set[str] = set()
+            for base, paths in read_paths.items():
+                if base in _GLOBALS:
+                    continue
+                for rp in paths:
+                    if not any(_path_covers(dp, rp) for dp in dep_paths):
+                        missing_bases.add(base)
+                        break
+            missing = sorted(missing_bases)
             if missing:
+                shown = sorted(p for p in dep_paths if p) or ["(none)"]
                 f = _finding(self, sf, call,
                              f"{name} reads {', '.join(missing)} but its dependency array "
-                             f"only lists [{', '.join(sorted(deps))}].")
+                             f"only lists [{', '.join(shown)}].")
                 out.append(Finding(**{**f.__dict__, "rule_id": "R005",
                                       "title": "useEffect with obviously missing dependencies"}))
         return out

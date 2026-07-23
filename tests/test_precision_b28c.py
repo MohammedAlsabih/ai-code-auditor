@@ -371,14 +371,17 @@ def test_e_multiline_real_pem_stays_detected():
     assert _ids(SecretsRule().check(_py(code))) == ["P002"]
 
 
-def test_e_localhost_dev_connection_string_reviews_not_blocks():
+def test_e_localhost_connection_string_password_is_p002_error_B28C1():
+    # B2.8C1 CORRECTION of the B2.8C downgrade: a non-empty literal password
+    # is a hardcoded secret regardless of host — localhost is context, not an
+    # exemption. Value stays masked; exemptions are a baseline/config decision.
     sf = _cs('var cs = "Host=localhost;Port=5432;Database=d;Username=postgres;'
              'Password=postgres";\n')
     out = SecretsRule().check(sf)
-    assert _ids(out) == ["P003"]
-    assert out[0].severity.value == "yellow"
-    assert "postgres" not in out[0].snippet.split("Password=")[-1][:9] or \
-        "***" in out[0].snippet
+    assert _ids(out) == ["P002"]
+    assert out[0].severity.value == "red" and out[0].precision == "exact"
+    assert "postgres" not in out[0].snippet.split("Password=")[-1][:9] \
+        or "***" in out[0].snippet
 
 
 def test_e_remote_connection_string_password_still_blocks():
@@ -530,27 +533,50 @@ def test_close6_marker_inside_a_string_is_not_a_comment():
 
 # ═════ D. internal dependencies ═════════════════════════════════════════════════
 
-def test_d_repo_sibling_namespace_is_internal(tmp_path):
-    from auditor.core.models import ImportRef
+def test_d_referenced_sibling_internal_unreferenced_stays_h007(tmp_path):
+    # B2.8C1 CORRECTION: internal is decided by the ProjectReference CLOSURE,
+    # not a repo-wide prefix scan. A REFERENCED sibling (by RootNamespace too)
+    # is internal; an existing but UNREFERENCED sibling stays H007 so a missing
+    # reference is never masked.
+    from auditor.core.models import ImportRef, SourceFile
+    from auditor.core.treesitter import parse_source
     (tmp_path / "src" / "Acme.Api").mkdir(parents=True)
     (tmp_path / "src" / "Acme.Modules.Billing").mkdir(parents=True)
+    (tmp_path / "src" / "Acme.Orphan").mkdir(parents=True)
+    # Billing is referenced by its csproj-stem namespace (MSBuild default);
+    # a second reference (Named) overrides its namespace via RootNamespace.
+    (tmp_path / "src" / "Acme.Named").mkdir(parents=True)
     (tmp_path / "src" / "Acme.Api" / "Acme.Api.csproj").write_text(
-        "<Project Sdk=\"Microsoft.NET.Sdk\"/>", encoding="utf-8")
+        "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>"
+        "<ProjectReference Include=\"../Acme.Modules.Billing/"
+        "Acme.Modules.Billing.csproj\"/>"
+        "<ProjectReference Include=\"../Acme.Named/Acme.Named.csproj\"/>"
+        "</ItemGroup></Project>", encoding="utf-8")
     (tmp_path / "src" / "Acme.Modules.Billing" / "Acme.Modules.Billing.csproj"
-     ).write_text("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>"
-                  "<RootNamespace>Acme.Billing.Core</RootNamespace>"
-                  "</PropertyGroup></Project>", encoding="utf-8")
+     ).write_text("<Project Sdk=\"Microsoft.NET.Sdk\"/>", encoding="utf-8")
+    (tmp_path / "src" / "Acme.Named" / "Acme.Named.csproj").write_text(
+        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>"
+        "<RootNamespace>Acme.Billing.Core</RootNamespace>"
+        "</PropertyGroup></Project>", encoding="utf-8")
+    (tmp_path / "src" / "Acme.Orphan" / "Acme.Orphan.csproj").write_text(
+        "<Project Sdk=\"Microsoft.NET.Sdk\"/>", encoding="utf-8")
+    prog = tmp_path / "src" / "Acme.Api" / "Program.cs"
+    prog.write_text("namespace Acme.Api;\nclass P {}\n", encoding="utf-8")
+    sf = SourceFile(path=prog, rel="Program.cs", language="csharp",
+                    text=prog.read_bytes())
+    parse_source(sf)
     a = DotnetAdapter()
     a.set_repo_root(tmp_path)
-    internal = ImportRef(module="Acme.Modules.Billing.Domain", file="x.cs",
-                         line=1, top_level="Acme.Modules.Billing.Domain")
-    by_rootns = ImportRef(module="Acme.Billing.Core.Invoices", file="x.cs",
-                          line=1, top_level="Acme.Billing.Core.Invoices")
-    external = ImportRef(module="Contoso.External.Sdk", file="x.cs",
-                         line=1, top_level="Contoso.External.Sdk")
-    assert a.is_internal(internal)
-    assert a.is_internal(by_rootns)
-    assert not a.is_internal(external)      # unlinked stays a visible finding
+    a.prepare(tmp_path / "src" / "Acme.Api", [sf])
+
+    def imp(m):
+        return ImportRef(module=m, file="x.cs", line=1, top_level=m)
+    assert a.is_internal(imp("Acme.Api.Sub"))                    # own
+    assert a.is_internal(imp("Acme.Modules.Billing.Domain"))     # ref by stem
+    assert a.is_internal(imp("Acme.Billing.Core.Invoices"))      # ref by RootNamespace
+    # existing but UNREFERENCED sibling — NOT silenced, stays H007
+    assert not a.is_internal(imp("Acme.Orphan.Thing"))
+    assert not a.is_internal(imp("Contoso.External.Sdk"))        # external
 
 
 def test_d_strip_jsonc_preserves_alias_keys():

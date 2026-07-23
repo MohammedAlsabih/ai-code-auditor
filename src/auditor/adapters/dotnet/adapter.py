@@ -75,11 +75,11 @@ class DotnetAdapter(LanguageAdapter):
         # own packages' COMPILE-provider state ("definite"|"possible"|
         # "absent") — separate from the declared/registry state
         self._own_local_state: dict[str, str] = {}
-        # B2.8C-D: repository-wide internal root namespaces (AssemblyName /
-        # RootNamespace / csproj stem of EVERY project in the repo), cached
-        # per resolved repo root — a `using Aseesx.Modules.X` in a sibling
-        # project is repo-internal, never a NuGet lookup.
-        self._repo_ns_cache: dict[str, tuple[str, ...]] = {}
+        # B2.8C1: namespace roots reachable through THIS project's
+        # ProjectReference closure (own + referenced projects only) — set in
+        # prepare(). A sibling that exists but is not referenced is NOT here,
+        # so its namespace stays an H007 review rather than a silent suppress.
+        self._reachable_roots: tuple[str, ...] = ()
 
     def detect(self, root: Path) -> bool:
         if (root / "packages.config").is_file() or (root / "Directory.Packages.props").is_file():
@@ -750,6 +750,17 @@ class DotnetAdapter(LanguageAdapter):
                 if name is not None:
                     ns.add(node_text(name))
         self._own_namespaces = tuple(sorted(ns))
+        # B2.8C1 (final closing): the set of type names PROVEN to be an EF
+        # DbContext across this project's sources — DbContext itself plus every
+        # class that (transitively) derives from it. A `*Context` SUFFIX is NOT
+        # proof; only a real inheritance chain clears a FromSqlInterpolated
+        # receiver root.
+        self._dbcontext_types = self._scan_dbcontext_types(files)
+        # B2.8C1: namespace ROOTS reachable from THIS project through its
+        # ProjectReference closure. A sibling that exists but is NOT referenced
+        # is deliberately absent — its namespace stays an H007 review, not a
+        # silent suppression that could mask a missing reference.
+        self._reachable_roots = self._referenced_project_roots(root)
 
     def _diag_for_tfm(self, root: Path) -> None:
         """Unknown TFM => a limitation the report must show + a manifest marked
@@ -799,40 +810,74 @@ class DotnetAdapter(LanguageAdapter):
         if any(m == ns or m.startswith(ns + ".") or ns.startswith(m + ".")
                for ns in self._own_namespaces):
             return True
-        # B2.8C-D: namespaces rooted at ANY repo project's AssemblyName /
-        # RootNamespace are repo-internal — never sent to the registry as an
-        # unknown NuGet id. External packages stay on the registry path.
+        # B2.8C1: namespaces rooted at a project reachable through THIS
+        # project's ProjectReference closure are internal — never a registry
+        # lookup. An unreferenced sibling is NOT here, so it stays H007.
         return any(m == ns or m.startswith(ns + ".")
-                   for ns in self._repo_internal_roots())
+                   for ns in getattr(self, "_reachable_roots", ()))
 
-    def _repo_internal_roots(self) -> tuple[str, ...]:
-        """Root namespaces of every project in the repository: explicit
-        <AssemblyName>/<RootNamespace> when present, else the csproj file
-        stem (MSBuild's default for both). Cached per resolved repo root."""
-        base = self._repo_root or getattr(self, "_scan_root", None)
-        if base is None:
-            return ()
-        key = str(Path(base).resolve())
-        cached = self._repo_ns_cache.get(key)
-        if cached is not None:
-            return cached
-        roots: set[str] = set()
-        try:
-            csprojs = list(Path(key).rglob("*.csproj"))
-        except OSError:
-            csprojs = []
-        for cs in csprojs[:2000]:                     # bounded walk
-            roots.add(cs.stem)
-            text = self._read(cs)
-            if not text:
-                continue
-            for tag in ("AssemblyName", "RootNamespace"):
+    def _csproj_root_namespace(self, csproj: Path) -> str:
+        """The default root namespace for a project: explicit
+        <RootNamespace>/<AssemblyName> when present, else the csproj stem
+        (MSBuild's default for both)."""
+        text = self._read(csproj)
+        if text:
+            for tag in ("RootNamespace", "AssemblyName"):
                 m = re.search(rf"<{tag}>\s*([A-Za-z0-9_.]+)\s*</{tag}>", text)
                 if m:
-                    roots.add(m.group(1))
-        out = tuple(sorted(r for r in roots if r))
-        self._repo_ns_cache[key] = out
-        return out
+                    return m.group(1)
+        return csproj.stem
+
+    def _referenced_project_roots(self, proj_dir: Path) -> tuple[str, ...]:
+        """Namespace roots that are DEFINITELY internal to THIS project: its
+        own project(s) plus every project reachable through an ALL-DEFINITE
+        ProjectReference chain. Sources match the framework-ref graph:
+        - EVERY .csproj in the project directory is a start node (a directory
+          with two csprojs where the reference lives in the second must not be
+          lost), each paired with its nearest ancestor Directory.Build.props
+          so a ProjectReference declared in props enters the closure;
+        - only DEFINITE edges are followed for definite suppression — a
+          conditional/dynamic (possible) edge does NOT make its target
+          definitely internal (it stays an H007 review);
+        - ReferenceOutputAssembly=false carries no reference (skipped in the
+          edge reader), dynamic $(...) paths are not followed, cycles and depth
+          are bounded, and every target is repo-confined. A repo-wide prefix
+          scan is deliberately NOT used — an unreferenced sibling is never
+          silenced."""
+        starts = sorted(proj_dir.glob("*.csproj"))
+        if not starts:
+            return ()
+        roots: set[str] = set()
+        repo = self._confinement_root()
+        seen: set[str] = set()
+        # BFS over DEFINITE edges only; own project csprojs seed the frontier
+        stack: list[tuple[Path, int]] = [(cs, 0) for cs in starts]
+        while stack:
+            csproj, depth = stack.pop()
+            try:
+                key = csproj.resolve().as_posix().lower()
+            except OSError:
+                continue
+            if key in seen or depth > self._PROJREF_DEPTH_CAP:
+                continue
+            seen.add(key)
+            roots.add(self._csproj_root_namespace(csproj))
+            edges = list(self._fw_and_projrefs(csproj)[1])
+            props, _ = self._nearest_ancestor_file(csproj.parent,
+                                                   "Directory.Build.props")
+            if props is not None:
+                edges += self._fw_and_projrefs(props)[1]
+            for raw, edge_kind in edges:
+                if edge_kind != "definite" or "$(" in raw:
+                    continue            # possible/dynamic edge: no DEFINITE claim
+                target = (csproj.parent / raw.replace("\\", "/")).resolve()
+                if target.suffix.lower() != ".csproj" or not target.is_file():
+                    continue
+                if repo is not None and target != repo \
+                        and repo not in target.parents:
+                    continue            # ProjectReference escaping the repo
+                stack.append((target, depth + 1))
+        return tuple(sorted(r for r in roots if r))
 
     def match_declared(self, imp: ImportRef, declared: list[DeclaredDep]) -> DeclaredDep | None:
         # NuGet package ids are CASE-INSENSITIVE (xunit provides Xunit) —
@@ -915,7 +960,121 @@ class DotnetAdapter(LanguageAdapter):
             sql_boundary_types=("lambda_expression",
                                 "anonymous_method_expression",
                                 "local_function_statement"),
+            sql_parameterizing=self._ef_parameterizes,
         )
+
+    # EF Core parameterizing sinks: ExecuteSqlInterpolated*/FromSqlInterpolated*
+    # convert a FormattableString's holes into DbParameters, so an interpolated
+    # SQL argument to one of them is NOT string-built injection.
+    _EF_INTERP_RE = re.compile(r"^(?:ExecuteSqlInterpolated|FromSqlInterpolated)"
+                               r"(?:Async)?$")
+
+    def _ef_parameterizes(self, node, sf) -> bool:
+        """True when `node` (a SQL composition) is the argument of an EF
+        interpolating call PROVEN by shape — not by method name alone:
+        - the method name matches the EF interpolating family, AND
+        - Execute* family: the receiver chain ends in `.Database`
+          (DatabaseFacade — a signal only EF exposes), OR
+        - From* family: the receiver chain's ROOT identifier is locally
+          provable as an EF DbContext (declared with a *Context/DbContext
+          type in this file). Structure alone (member access) does NOT prove
+          a DbSet — a custom `h.Runner.FromSqlInterpolated` stays flagged."""
+        from auditor.core.treesitter import node_text
+        cur = node.parent
+        hops = 0
+        while cur is not None and hops < 40:
+            hops += 1
+            if cur.type == "invocation_expression":
+                fn = cur.child_by_field_name("function")
+                if fn is not None and fn.type == "member_access_expression":
+                    name = fn.child_by_field_name("name")
+                    recv = fn.child_by_field_name("expression")
+                    mname = node_text(name) if name is not None else ""
+                    if self._EF_INTERP_RE.match(mname) and recv is not None \
+                            and recv.type == "member_access_expression":
+                        if mname.startswith("Execute"):
+                            rn = recv.child_by_field_name("name")
+                            return rn is not None and node_text(rn) == "Database"
+                        # From*: prove the receiver ROOT is an EF context
+                        return self._ef_context_root(recv, sf)
+                return False            # bare-identifier / non-EF-shape sink
+            cur = cur.parent
+        return False
+
+    @staticmethod
+    def _simple_type_name(text: str) -> str:
+        """Strip qualifier/generic/nullable decoration to the bare type name:
+        `Microsoft.EF.DbContext<T>?` -> `DbContext`."""
+        text = text.strip().rstrip("?").split("<", 1)[0]
+        return text.rsplit(".", 1)[-1]
+
+    def _scan_dbcontext_types(self, files) -> frozenset:
+        """Type names proven to be an EF DbContext across the project sources:
+        seed {DbContext}, then a fixpoint adding every class whose base list
+        (transitively) contains an already-known DbContext type."""
+        from auditor.core.treesitter import captures, node_text
+        edges: list[tuple[str, list[str]]] = []
+        for sf in files:
+            if getattr(sf, "tree", None) is None:
+                continue
+            for cls in captures("csharp", sf.tree.root_node,
+                                "(class_declaration) @c").get("c", []):
+                name = cls.child_by_field_name("name")
+                bases_node = next((c for c in cls.children
+                                   if c.type == "base_list"), None)
+                if name is None or bases_node is None:
+                    continue
+                bases = [self._simple_type_name(node_text(b))
+                         for b in bases_node.named_children
+                         if node_text(b).strip()]
+                edges.append((node_text(name), bases))
+        known = {"DbContext"}
+        changed = True
+        while changed:
+            changed = False
+            for cls_name, bases in edges:
+                if cls_name not in known and any(b in known for b in bases):
+                    known.add(cls_name)
+                    changed = True
+        return frozenset(known)
+
+    def _ef_context_root(self, recv, sf) -> bool:
+        from auditor.core.treesitter import node_text
+        cur = recv
+        while cur is not None and cur.type == "member_access_expression":
+            cur = cur.child_by_field_name("expression")
+        if cur is None or cur.type != "identifier":
+            return False
+        return node_text(cur) in self._ef_context_idents(sf)
+
+    def _ef_context_idents(self, sf) -> set:
+        """Identifiers in THIS file declared with a PROVEN EF-context type
+        (DbContext or a class known to derive from it — never a mere *Context
+        suffix). Parameter, field, local, property. Cached per SourceFile."""
+        cached = getattr(sf, "_ef_ctx_idents", None)
+        if cached is not None:
+            return cached
+        from auditor.core.treesitter import captures, node_text
+        # project-wide proven DbContext types (from prepare) UNION any declared
+        # in this very file — so a context defined next to its use resolves
+        # even without a prior prepare() pass.
+        known = getattr(self, "_dbcontext_types", frozenset({"DbContext"})) \
+            | self._scan_dbcontext_types([sf])
+        out: set[str] = set()
+        root = sf.tree.root_node
+        queries = (
+            "(parameter type: (_) @t name: (identifier) @n)",
+            "(variable_declaration type: (_) @t (variable_declarator name: (identifier) @n))",
+            "(field_declaration (variable_declaration type: (_) @t "
+            "(variable_declarator name: (identifier) @n)))",
+        )
+        for q in queries:
+            caps = captures("csharp", root, q)
+            for tnode, nnode in zip(caps.get("t", []), caps.get("n", [])):
+                if self._simple_type_name(node_text(tnode)) in known:
+                    out.add(node_text(nnode))
+        sf._ef_ctx_idents = out
+        return out
 
     def private_registry_reason(self, root: Path) -> str | None:
         # a solution-level NuGet.config above the project also configures sources

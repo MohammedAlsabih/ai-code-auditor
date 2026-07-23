@@ -8,7 +8,11 @@ from auditor.core.treesitter import captures, line_of, node_text
 
 _SQL_RE = re.compile(r"\b(SELECT\s+.+?\s+FROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b",
                      re.I | re.S)
-_SINK_RE = re.compile(r"(execute|query|raw|command)", re.I)
+# B2.8C1 (closing): `sql` recognizes SQL-execution APIs whose name does not
+# carry execute/query/raw/command — e.g. EF's FromSqlInterpolated/FromSql.
+# An EF-PROVEN interpolating sink is cleared earlier by sql_parameterizing;
+# a non-EF `*Sql*` method receiving composed SQL is a real injection sink.
+_SINK_RE = re.compile(r"(execute|query|raw|command|sql)", re.I)
 
 _TOKEN_PATTERNS = [
     ("AWS access key", re.compile(r"\b(A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b")),
@@ -81,9 +85,6 @@ class EmptyCatch(Rule):
 # \nMIIBROKEN\n-----END..." (a deliberately mangled test value) is neither a
 # valid key nor an exact secret.
 _PEM_BODY = re.compile(r"[A-Za-z0-9+/=]{40,}")
-# B2.8C-E3: development credentials pointing at the LOCAL machine only.
-_LOCAL_HOST_IN_CONN = re.compile(
-    r"(?i)\b(?:server|data source|host)\s*=\s*(?:localhost|127\.0\.0\.1|\[?::1\]?)\s*(?:;|$)")
 
 
 class SecretsRule(Rule):
@@ -107,18 +108,13 @@ class SecretsRule(Rule):
                 if label == "Private key block":
                     # the body IS the secret — mask any base64 run on the line
                     masked = _PEM_BODY.sub("***", masked)
-                if label == "Connection string password" \
-                        and _LOCAL_HOST_IN_CONN.search(line):
-                    # E3: a password in a LOCALHOST-only development connection
-                    # string is a hygiene review, not a blocking secret — the
-                    # credential does not reach past the developer machine.
-                    out.append(_mk_finding(
-                        "P003", Severity.YELLOW,
-                        "Local development credential in connection string", sf,
-                        i, masked.strip(),
-                        "Connection-string password targets localhost only — "
-                        "review, but not a blocking secret by default."))
-                    continue
+                # B2.8C1: a NON-EMPTY literal connection-string password is a
+                # hardcoded secret regardless of host — localhost / design-time
+                # / "dev only" are context recorded in the detail (never an
+                # exemption). Deliberate suppression is a baseline/config
+                # decision, not something the detector decides. (An empty or
+                # missing password never matched _TOKEN_PATTERNS in the first
+                # place, so it produces no finding.) The value stays masked.
                 out.append(_mk_finding("P002", Severity.RED, self.title, sf, i,
                                        masked.strip(), f"{label} committed in source."))
                 continue
@@ -183,6 +179,12 @@ class SqlStringBuild(Rule):
         if not needs_dynamic and not self._is_plus_concat(node):
             return
         if needs_dynamic and not self._is_dynamic(node):
+            return
+        # B2.8C1: an enclosing call that PARAMETERIZES interpolation holes (EF
+        # ExecuteSqlInterpolated*/FromSqlInterpolated*, proven by receiver
+        # shape) makes this composition safe — neither P004 nor P005.
+        if self.profile.sql_parameterizing is not None \
+                and self.profile.sql_parameterizing(node, sf):
             return
         # B2.8C-A: a composition whose every leaf is a plain string literal is
         # a COMPILE-TIME CONSTANT ("SELECT ..." + "AND x = @p") — parameterized
