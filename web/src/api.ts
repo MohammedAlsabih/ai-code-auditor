@@ -344,6 +344,75 @@ export async function fetchAIReviewsSummary(): Promise<unknown> {
   return res.json()
 }
 
+// ---- W3-E: independent AI audit ---------------------------------------------
+
+export async function postAIAuditPreview(
+  profile: string,
+  provider: string,
+  model: string,
+  projects: string[],
+): Promise<unknown> {
+  return aiJson(
+    await fetch('/api/ai/audits/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, provider, model, projects }),
+    }),
+  )
+}
+
+export async function postAIAudit(
+  profile: string,
+  provider: string,
+  model: string,
+  projects: string[],
+  limits: AIBatchLimits,
+  consentToken = '',
+): Promise<unknown> {
+  return aiJson(
+    await fetch('/api/ai/audits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile,
+        provider,
+        model,
+        projects,
+        limits,
+        consent_token: consentToken,
+      }),
+    }),
+  )
+}
+
+export async function fetchAIAudit(auditId: string): Promise<unknown> {
+  return aiJson(await fetch(`/api/ai/audits/${encodeURIComponent(auditId)}`))
+}
+
+export async function cancelAIAudit(auditId: string): Promise<void> {
+  await aiJson(
+    await fetch(`/api/ai/audits/${encodeURIComponent(auditId)}/cancel`, { method: 'POST' }),
+  )
+}
+
+export async function fetchAIAuditResults(): Promise<unknown> {
+  return aiJson(await fetch('/api/ai/audit-results'))
+}
+
+export async function putAICandidateReview(
+  candidateId: string,
+  decision: string,
+  note: string,
+): Promise<unknown> {
+  return aiJson(
+    await fetch(`/api/ai/audit-candidates/${encodeURIComponent(candidateId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, note }),
+    }),
+  )
+}
+
 export async function deleteReview(rid: string): Promise<void> {
   const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
   if (!res.ok) {

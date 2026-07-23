@@ -286,6 +286,13 @@ class AIAuditIn(BaseModel):
     consent_token: str = ""
 
 
+class AICandidateReviewIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    decision: str
+    note: str = ""
+
+
 # ONE probe/models call at a time per process: a second concurrent request
 # gets 409 WITHOUT any outbound connection. Module-level on purpose — the
 # guard covers every app instance in the process.
@@ -1157,6 +1164,21 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             return _err(404, "unknown audit id")
         audit_runner.cancel(audit_id)
         return _AsciiJSON({"audit_id": audit_id, "cancel_requested": True})
+
+    @app.put("/api/ai/audit-candidates/{candidate_id}")
+    def ai_audit_candidate_review(candidate_id: str,
+                                  body: "AICandidateReviewIn") -> JSONResponse:
+        """W3-E2: the HUMAN classifies a candidate (confirmed /
+        false_positive / uncertain). Stored in the audit sidecar only —
+        completely separate from the static findings' review_ids, and it
+        never changes the report or the verdict."""
+        try:
+            entry = ai_audit_store.put_candidate_review(
+                candidate_id, body.decision, body.note)
+        except AIAuditStoreError as e:
+            msg = str(e)
+            return _err(404 if "unknown" in msg else 400, msg)
+        return _AsciiJSON({"candidate_id": candidate_id, **entry})
 
     @app.get("/api/ai/audit-results")
     def ai_audit_results() -> JSONResponse:
