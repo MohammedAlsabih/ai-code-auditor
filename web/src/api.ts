@@ -189,6 +189,43 @@ export async function postAITest(provider: string, model: string): Promise<AITes
   return body as AITestResult
 }
 
+// ---- AI single-finding review (W3-B) ---------------------------------------
+// The browser sends {review_id, provider, model} — never a prompt, key, or
+// URL. 403 = privacy gate (local providers only until W3-C).
+
+export class AIPrivacyGate extends Error {}
+
+export async function postAIReview(
+  reviewId: string,
+  provider: string,
+  model: string,
+): Promise<unknown> {
+  const res = await fetch('/api/ai/reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ review_id: reviewId, provider, model }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 403) {
+    throw new AIPrivacyGate(
+      (body as { error?: string }).error ??
+        'blocked: local providers only until the privacy gate ships',
+    )
+  }
+  if (res.status === 409) throw new Error('an AI review for this finding is already running')
+  if (!res.ok) {
+    const b = body as { error?: string; message?: string; status?: string }
+    throw new Error(b.error ?? b.message ?? `AI review failed (HTTP ${res.status})`)
+  }
+  return body
+}
+
+export async function fetchAIReview(reviewId: string): Promise<unknown> {
+  const res = await fetch(`/api/ai/reviews/${encodeURIComponent(reviewId)}`)
+  if (!res.ok) throw new Error(`AI review lookup failed (HTTP ${res.status})`)
+  return res.json()
+}
+
 export async function deleteReview(rid: string): Promise<void> {
   const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
   if (!res.ok) {
