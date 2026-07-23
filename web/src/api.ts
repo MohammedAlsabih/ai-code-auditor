@@ -271,6 +271,79 @@ export async function fetchAIReview(reviewId: string): Promise<unknown> {
   return res.json()
 }
 
+// ---- W3-D: batch AI review ---------------------------------------------------
+
+async function aiJson(res: Response): Promise<unknown> {
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 403) {
+    const b = body as { error?: string }
+    throw new AIPrivacyGate(b.error ?? 'blocked by the privacy gate')
+  }
+  if (!res.ok) {
+    const b = body as { error?: string }
+    throw new Error(b.error ?? `request failed (HTTP ${res.status})`)
+  }
+  return body
+}
+
+export async function postAIBatchPreview(
+  reviewIds: string[],
+  provider: string,
+  model: string,
+): Promise<unknown> {
+  return aiJson(
+    await fetch('/api/ai/batches/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ review_ids: reviewIds, provider, model }),
+    }),
+  )
+}
+
+export interface AIBatchLimits {
+  max_requests: number
+  max_output_tokens: number
+  max_input_bytes?: number
+}
+
+export async function postAIBatch(
+  reviewIds: string[],
+  provider: string,
+  model: string,
+  limits: AIBatchLimits,
+  consentToken = '',
+): Promise<unknown> {
+  return aiJson(
+    await fetch('/api/ai/batches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        review_ids: reviewIds,
+        provider,
+        model,
+        limits,
+        consent_token: consentToken,
+      }),
+    }),
+  )
+}
+
+export async function fetchAIBatch(batchId: string): Promise<unknown> {
+  return aiJson(await fetch(`/api/ai/batches/${encodeURIComponent(batchId)}`))
+}
+
+export async function cancelAIBatch(batchId: string): Promise<void> {
+  await aiJson(
+    await fetch(`/api/ai/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
+  )
+}
+
+export async function fetchAIReviewsSummary(): Promise<unknown> {
+  const res = await fetch('/api/ai/reviews')
+  if (!res.ok) throw new Error(`AI summary failed (HTTP ${res.status})`)
+  return res.json()
+}
+
 export async function deleteReview(rid: string): Promise<void> {
   const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
   if (!res.ok) {

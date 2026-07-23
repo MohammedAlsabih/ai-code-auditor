@@ -242,6 +242,28 @@ class AIConsentPreviewIn(BaseModel):
     model: str
 
 
+class AIBatchLimitsIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    max_requests: int
+    max_output_tokens: int
+    max_input_bytes: int | None = None
+    max_input_tokens: int | None = None
+    max_cost_usd: float | None = None
+
+
+class AIBatchIn(BaseModel):
+    """W3-D: a batch names findings + provider + model + MANDATORY limits —
+    and, for a remote provider, the consent token from the batch preview."""
+    model_config = {"extra": "forbid"}
+
+    review_ids: list[str]
+    provider: str
+    model: str
+    limits: AIBatchLimitsIn
+    consent_token: str = ""
+
+
 # ONE probe/models call at a time per process: a second concurrent request
 # gets 409 WITHOUT any outbound connection. Module-level on purpose — the
 # guard covers every app instance in the process.
@@ -722,6 +744,164 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         finally:
             with _ai_review_lock:
                 _ai_review_inflight.discard(body.review_id)
+
+    @app.get("/api/ai/reviews")
+    def ai_reviews_summary() -> JSONResponse:
+        """Latest AI assessment per finding (for the table filter). Fresh
+        results only carry their assessment; stale ones are flagged. Local
+        sidecar read — no provider call."""
+        out: dict[str, Any] = {}
+        for rid in valid_review_ids:
+            rows = ai_store.for_review_id(rid, None)
+            if not rows:
+                continue
+            latest = rows[0]
+            out[rid] = {"assessment": latest["assessment"],
+                        "provider": latest["provider"],
+                        "created_at": latest["created_at"]}
+        return _AsciiJSON({"available": ai_store.available,
+                           "results": out})
+
+    # ---- W3-D: batch AI review -----------------------------------------------
+    from auditor.ai.batch import (
+        BatchError,
+        BatchLimits,
+        BatchRunner,
+        BatchStore,
+        load_pricing,
+    )
+
+    batch_store = BatchStore(
+        report_path.parent / (report_path.stem + ".ai-batches.json"))
+    batch_runner = BatchRunner(
+        build_pack=lambda rid: build_context_pack(report, repo, rid),
+        ai_store=ai_store, batch_store=batch_store,
+        transport_factory=lambda: RequestsTransport())
+
+    def _batch_ids_ok(ids: list[str]) -> JSONResponse | None:
+        if not ids:
+            return _err(400, "review_ids must be a non-empty list")
+        unknown = [r for r in ids if r not in valid_review_ids]
+        if unknown:
+            return _err(404, f"{len(unknown)} unknown review id(s) for the "
+                             "loaded report")
+        return None
+
+    @app.post("/api/ai/batches/preview")
+    def ai_batch_preview(body: AIConsentPreviewIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        deduped = list(dict.fromkeys(body.review_ids))
+        bad = _batch_ids_ok(deduped)
+        if bad is not None:
+            return bad
+        local = _ai_local(provider)
+        if not local and not remote_reviews_enabled():
+            return _AsciiJSON(
+                {"error": "remote AI reviews are disabled by server policy",
+                 "status": "privacy_gate_required"}, status_code=403)
+        try:
+            preview = batch_runner.preview(deduped, provider,
+                                           body.model.strip(), local=local)
+        except ContextTooLargeError as e:
+            return _AsciiJSON({"error": str(e), "status": e.code},
+                              status_code=413)
+        except BatchError as e:
+            return _err(400, str(e))
+        preview["provider"] = provider.value
+        preview["model"] = body.model.strip()
+        if not local:
+            token = ai_consents.issue(provider.value, body.model.strip(),
+                                      preview["review_ids"],
+                                      preview["context_digests"])
+            preview["consent_token"] = token
+            ai_audit.record("issued", provider.value, body.model.strip(),
+                            preview["findings"],
+                            binding_hash(provider.value, body.model.strip(),
+                                         preview["review_ids"],
+                                         preview["context_digests"]),
+                            {"input_bytes": preview["input_bytes"],
+                             "redactions": preview["redaction_total"]})
+        else:
+            preview["consent_token"] = ""
+        return _AsciiJSON(preview)
+
+    @app.post("/api/ai/batches")
+    def ai_batch_start(body: AIBatchIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        if len(body.review_ids) != len(set(body.review_ids)):
+            return _err(400, "duplicate review ids in batch")
+        bad = _batch_ids_ok(body.review_ids)
+        if bad is not None:
+            return bad
+        local = _ai_local(provider)
+        # build the context packs ONCE. The SAME objects feed the consent
+        # check, the budget checks, and run_review — no rebuild after
+        # redeem, so the digest that was approved is the digest that is
+        # sent (no TOCTOU window between consent and send).
+        packs: dict[str, Any] = {}
+        for rid in body.review_ids:
+            try:
+                pack = build_context_pack(report, repo, rid)
+            except ContextTooLargeError as e:
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=413)
+            if pack is None:
+                return _err(404, "unknown review id for the loaded report")
+            packs[rid] = pack
+        consented = False
+        if not local:
+            if not remote_reviews_enabled():
+                return _AsciiJSON(
+                    {"error": "remote AI reviews are disabled by server "
+                              "policy", "status": "privacy_gate_required"},
+                    status_code=403)
+            # the token must bind to EXACTLY these packs' digests; a source
+            # change since the preview surfaces as consent_mismatch with
+            # zero provider network
+            try:
+                ai_consents.redeem(body.consent_token, provider.value,
+                                   body.model.strip(), body.review_ids,
+                                   [packs[r]["digest"]
+                                    for r in body.review_ids])
+            except ConsentError as e:
+                ai_audit.record("denied", provider.value, body.model.strip(),
+                                len(body.review_ids), "-", {e.code: 1})
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=403)
+            consented = True
+        try:
+            limits = BatchLimits.parse(body.limits.model_dump(),
+                                       load_pricing() is not None)
+            batch_id = batch_runner.start(body.review_ids, provider,
+                                          body.model.strip(), limits,
+                                          consented, local, packs=packs)
+        except BatchError as e:
+            msg = str(e)
+            return _err(409 if "already running" in msg else 400, msg)
+        return _AsciiJSON({"batch_id": batch_id, "state": "running"},
+                          status_code=202)
+
+    @app.get("/api/ai/batches/{batch_id}")
+    def ai_batch_status(batch_id: str) -> JSONResponse:
+        row = batch_runner.status(batch_id)
+        if row is None:
+            return _err(404, "unknown batch id")
+        return _AsciiJSON(row)
+
+    @app.post("/api/ai/batches/{batch_id}/cancel")
+    def ai_batch_cancel(batch_id: str) -> JSONResponse:
+        if batch_runner.status(batch_id) is None:
+            return _err(404, "unknown batch id")
+        batch_runner.cancel(batch_id)
+        return _AsciiJSON({"batch_id": batch_id, "cancel_requested": True})
 
     @app.get("/api/ai/reviews/{rid}")
     def ai_review_get(rid: str) -> JSONResponse:

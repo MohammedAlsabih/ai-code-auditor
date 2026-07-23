@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -97,7 +98,29 @@ class ContextTooLargeError(Exception):
             "reduction — this finding cannot be AI-reviewed")
 
 REVIEW_MAX_TOKENS = 1024
+# The default per-request timeout. Slow LOCAL models may legitimately need
+# more (the live W3-D batches proved it), so the value is a BOUNDED local
+# server setting — never a global constant rewritten from one experiment and
+# never configurable from a request or the browser.
 REVIEW_TIMEOUT_SECONDS = 120.0
+REVIEW_TIMEOUT_ENV = "AUDITOR_AI_REVIEW_TIMEOUT"
+REVIEW_TIMEOUT_MIN = 30.0
+REVIEW_TIMEOUT_MAX = 600.0
+
+
+def review_timeout(env: dict[str, str] | None = None) -> float:
+    """The effective per-request timeout: AUDITOR_AI_REVIEW_TIMEOUT (whole
+    seconds) clamped to [30, 600]; junk falls back to the default."""
+    e = os.environ if env is None else env
+    raw = (e.get(REVIEW_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return REVIEW_TIMEOUT_SECONDS
+    try:
+        value = float(int(raw))
+    except ValueError:
+        return REVIEW_TIMEOUT_SECONDS
+    return min(max(value, REVIEW_TIMEOUT_MIN), REVIEW_TIMEOUT_MAX)
+
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
@@ -658,7 +681,7 @@ def run_review(request: AIReviewRequest, pack: dict[str, Any],
         resp = transport.request(
             "POST", config.base_url + spec.probe_path, headers,
             _review_body(request.provider, request.model, system, user),
-            REVIEW_TIMEOUT_SECONDS)
+            review_timeout(env))
     except TransportFailure as e:
         raise AIError(e.code) from None
     latency_ms = int((time.perf_counter() - started) * 1000)
