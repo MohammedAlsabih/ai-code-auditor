@@ -9,10 +9,12 @@ import {
   fetchAIReview,
   fetchSource,
   levelColor,
+  postAIConsentPreview,
   postAIModels,
   postAIReview,
   putReview,
   sourcePathFor,
+  type AIConsentPreview,
 } from '../api'
 import { parseModelIds, parseProviders, type AIProviderInfo } from '../ai'
 import {
@@ -65,6 +67,7 @@ export function DetailPanel({
   const [aiState, setAIState] = useState<AIState>('idle')
   const [aiMsg, setAIMsg] = useState('')
   const [aiResult, setAIResult] = useState<AIReviewResult | null>(null)
+  const [aiConsent, setAIConsent] = useState<AIConsentPreview | null>(null)
 
   useEffect(() => {
     // re-seed the form whenever another finding (or its saved review) arrives
@@ -169,12 +172,12 @@ export function DetailPanel({
     }
   }
 
-  const runAIReview = async () => {
-    if (!finding.review_id || !aiModel.trim() || aiState === 'running') return
+  const executeAIReview = async (consentToken: string) => {
+    if (!finding.review_id) return
     setAIState('running')
     setAIMsg('')
     try {
-      const raw = await postAIReview(finding.review_id, aiProvider, aiModel.trim())
+      const raw = await postAIReview(finding.review_id, aiProvider, aiModel.trim(), consentToken)
       const parsed = parseAIReviewResult(raw)
       if (!parsed) throw new Error('the server returned an unexpected result shape')
       setAIResult(parsed)
@@ -187,6 +190,37 @@ export function DetailPanel({
       )
       setAIState('error')
     }
+  }
+
+  const runAIReview = async () => {
+    if (!finding.review_id || !aiModel.trim() || aiState === 'running') return
+    const info = aiProviders.find((p) => p.provider === aiProvider)
+    const isRemote = info ? info.locality === 'remote' : aiProvider !== 'ollama'
+    if (!isRemote) {
+      void executeAIReview('')
+      return
+    }
+    // remote: the user must approve the EXACT payload first — the modal
+    // shows what would be sent; Cancel means zero network to the provider.
+    setAIMsg('')
+    try {
+      const preview = await postAIConsentPreview([finding.review_id], aiProvider, aiModel.trim())
+      setAIConsent(preview)
+    } catch (e) {
+      setAIMsg(
+        e instanceof AIPrivacyGate
+          ? `Blocked by the privacy gate: ${e.message}`
+          : String((e as Error)?.message ?? e),
+      )
+      setAIState('error')
+    }
+  }
+
+  const confirmConsent = () => {
+    if (!aiConsent) return
+    const token = aiConsent.consent_token
+    setAIConsent(null)
+    void executeAIReview(token)
   }
 
   const showSnippet = srcState !== 'ok' && Boolean(finding.snippet)
@@ -378,6 +412,52 @@ export function DetailPanel({
             </div>
             {aiState === 'error' && <div className="review-msg err">{aiMsg}</div>}
             {aiMsg && aiState !== 'error' && <div className="review-msg err">{aiMsg}</div>}
+            {aiConsent && (
+              <div className="consent-overlay" role="dialog" aria-modal="true">
+                <div className="consent-modal">
+                  <div className="ai-sub">Send to a remote provider?</div>
+                  <dl className="consent-facts">
+                    <div>
+                      <dt>Provider / model</dt>
+                      <dd>
+                        {aiConsent.provider} · {aiConsent.model} ({aiConsent.locality})
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Findings / files</dt>
+                      <dd>
+                        {aiConsent.findings} finding(s), {aiConsent.files} file excerpt(s)
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Payload</dt>
+                      <dd>
+                        {aiConsent.input_bytes} bytes (~{aiConsent.estimated_input_tokens} tokens,
+                        conservative)
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Redactions applied</dt>
+                      <dd>{aiConsent.redaction_total} value(s) masked before sending</dd>
+                    </div>
+                    <div>
+                      <dt>Retention / cost</dt>
+                      <dd>
+                        {aiConsent.retention} / {aiConsent.cost}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="review-actions">
+                    <button className="btn btn-primary" onClick={confirmConsent}>
+                      Confirm send
+                    </button>
+                    <button className="btn" onClick={() => setAIConsent(null)}>
+                      Cancel — send nothing
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             {aiState === 'completed' && aiResult && (
               <div className="ai-result">
                 {aiResult.stale && (

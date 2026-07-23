@@ -239,6 +239,7 @@ def test_p002_secret_never_reaches_the_wire_or_the_store(tmp_path):
 # ---- fixed prompt ----------------------------------------------------------------
 
 def test_prompt_is_fixed_and_carries_no_user_text(tmp_path):
+    from auditor.ai.review import SYSTEM_INSTRUCTIONS, build_messages
     pack = build_context_pack(REPORT, _write_repo(tmp_path), _rid())
     prompt = build_prompt(pack)
     assert prompt.startswith(_PROMPT_HEADER)
@@ -247,12 +248,19 @@ def test_prompt_is_fixed_and_carries_no_user_text(tmp_path):
     assert prompt == _PROMPT_HEADER + pack["canonical"]
     assert hashlib.sha256(pack["canonical"].encode("utf-8")).hexdigest() \
         == pack["digest"]
+    # W3-C: instructions ride the SYSTEM channel, repository data the USER
+    # channel — never concatenated on providers that support the split
+    system, user = build_messages(pack)
+    assert system == SYSTEM_INSTRUCTIONS
+    assert user == "CONTEXT PIECES:\n" + pack["canonical"]
     t = FakeTransport()
     _run(tmp_path, t)
-    sent = t.calls[0]["body"]["messages"][0]["content"]
-    assert sent.startswith(_PROMPT_HEADER)
-    assert sent == _PROMPT_HEADER + pack["canonical"]
+    msgs = t.calls[0]["body"]["messages"]
+    assert msgs[0] == {"role": "system", "content": SYSTEM_INSTRUCTIONS}
+    assert msgs[1]["role"] == "user"
+    assert msgs[1]["content"] == "CONTEXT PIECES:\n" + pack["canonical"]
     assert t.calls[0]["body"].get("stream") is False
+    assert t.calls[0]["body"].get("format") == "json"
     assert "tools" not in t.calls[0]["body"]
 
 
@@ -547,8 +555,8 @@ def test_api_maps_context_too_large_to_413(tmp_path, monkeypatch):
 def test_wire_payload_never_exceeds_the_cap(tmp_path):
     t = FakeTransport()
     _run(tmp_path, t)
-    sent = t.calls[0]["body"]["messages"][0]["content"]
-    variable = sent[len(_PROMPT_HEADER):]
+    user = t.calls[0]["body"]["messages"][1]["content"]
+    variable = user[len("CONTEXT PIECES:\n"):]
     assert len(variable.encode("utf-8")) <= PACK_MAX_BYTES
 
 

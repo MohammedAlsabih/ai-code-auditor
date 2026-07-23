@@ -220,11 +220,24 @@ class AIRequestIn(BaseModel):
 
 
 class AIReviewIn(BaseModel):
-    """W3-B: the browser names ONE finding + provider + model — nothing else.
-    No prompt, no source, no api_key, no base_url (extra='forbid')."""
+    """W3-B/C: the browser names ONE finding + provider + model — plus, for
+    a REMOTE provider, the one-time consent token from /api/ai/
+    consent-preview. No prompt, no source, no api_key, no base_url
+    (extra='forbid')."""
     model_config = {"extra": "forbid"}
 
     review_id: str
+    provider: str
+    model: str
+    consent_token: str = ""
+
+
+class AIConsentPreviewIn(BaseModel):
+    """W3-C: what WOULD be sent for these findings — counts and byte sizes
+    only, never code. extra='forbid'."""
+    model_config = {"extra": "forbid"}
+
+    review_ids: list[str]
     provider: str
     model: str
 
@@ -546,20 +559,100 @@ def create_app(report_path: Path, repo_root: Path | None = None,
     # The context pack is built HERE from the loaded report + confined repo
     # reads; the browser can only name a finding. Local providers only until
     # the W3-C privacy gate. Results land in a separate git-ignored sidecar.
+    from auditor.ai.consent import (
+        ConsentAudit,
+        ConsentError,
+        ConsentRegistry,
+        binding_hash,
+        build_consent_preview,
+        remote_reviews_enabled,
+    )
     from auditor.ai.review import (
         AIReviewRequest,
         ContextTooLargeError,
         PrivacyGateError,
         build_context_pack,
+        is_local_review_provider,
         run_review,
     )
     from auditor.ai.review_store import AIReviewStore, AIReviewStoreError
     from auditor.ai.transport import RequestsTransport
+    from auditor.ai.providers import resolve_config as _ai_resolve_config
 
     ai_store = AIReviewStore(
         report_path.parent / (report_path.stem + ".ai-reviews.json"))
+    ai_consents = ConsentRegistry()
+    ai_audit = ConsentAudit(
+        report_path.parent / (report_path.stem + ".ai-consent.json"))
     _ai_review_inflight: set[str] = set()
     _ai_review_lock = threading.Lock()
+
+    def _ai_local(provider: Provider) -> bool:
+        try:
+            return is_local_review_provider(provider,
+                                            _ai_resolve_config(provider))
+        except AIError:
+            return False
+
+    @app.post("/api/ai/consent-preview")
+    def ai_consent_preview(body: AIConsentPreviewIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        ids = body.review_ids
+        if not ids or len(ids) != len(set(ids)):
+            return _err(400, "review_ids must be a non-empty, "
+                             "duplicate-free list")
+        unknown = [r for r in ids if r not in valid_review_ids]
+        if unknown:
+            return _err(404, f"{len(unknown)} unknown review id(s) for the "
+                             "loaded report")
+        local = _ai_local(provider)
+        if not local and not remote_reviews_enabled():
+            ai_audit.record("denied", provider.value, body.model.strip(),
+                            len(ids), "-",
+                            {"reason_remote_disabled": 1})
+            return _AsciiJSON(
+                {"error": "remote AI reviews are disabled by server policy "
+                          "(set AUDITOR_AI_REMOTE_REVIEWS=confirm to allow "
+                          "the consent flow)",
+                 "status": "privacy_gate_required"}, status_code=403)
+        packs = []
+        for rid in ids:
+            try:
+                pack = build_context_pack(report, repo, rid)
+            except ContextTooLargeError as e:
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=413)
+            if pack is None:
+                return _err(404, "unknown review id for the loaded report")
+            packs.append(pack)
+        try:
+            cfg = _ai_resolve_config(provider)
+            locality = cfg.locality
+        except AIError:
+            locality = "remote"
+        preview = build_consent_preview(provider.value, body.model.strip(),
+                                        locality, packs)
+        if not local:
+            digests = [p["digest"] for p in packs]
+            token = ai_consents.issue(provider.value, body.model.strip(),
+                                      ids, digests)
+            preview["consent_token"] = token
+            preview["consent_expires_in_seconds"] = 600
+            ai_audit.record(
+                "issued", provider.value, body.model.strip(), len(ids),
+                binding_hash(provider.value, body.model.strip(), ids,
+                             digests),
+                {"input_bytes": preview["input_bytes"],
+                 "redactions": preview["redaction_total"]})
+        else:
+            preview["consent_token"] = ""
+            preview["note"] = ("local provider — no remote consent needed; "
+                               "nothing leaves this machine")
+        return _AsciiJSON(preview)
 
     @app.post("/api/ai/reviews")
     def ai_review(body: AIReviewIn) -> JSONResponse:
@@ -586,8 +679,33 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             request = AIReviewRequest(review_id=body.review_id,
                                       provider=provider,
                                       model=body.model.strip())
+            consented = False
+            if not _ai_local(provider):
+                # remote path: BOTH the admin switch and a one-time token
+                # bound to exactly this payload — checked before any network
+                if not remote_reviews_enabled():
+                    return _AsciiJSON(
+                        {"error": "remote AI reviews are disabled by server "
+                                  "policy", "status": "privacy_gate_required"},
+                        status_code=403)
+                try:
+                    ai_consents.redeem(body.consent_token, provider.value,
+                                       request.model, [body.review_id],
+                                       [pack["digest"]])
+                except ConsentError as e:
+                    ai_audit.record("denied", provider.value, request.model,
+                                    1, "-", {e.code: 1})
+                    return _AsciiJSON({"error": str(e), "status": e.code},
+                                      status_code=403)
+                consented = True
+                ai_audit.record(
+                    "redeemed", provider.value, request.model, 1,
+                    binding_hash(provider.value, request.model,
+                                 [body.review_id], [pack["digest"]]),
+                    (pack.get("privacy_manifest") or {}).get("redactions"))
             try:
-                result = run_review(request, pack, RequestsTransport())
+                result = run_review(request, pack, RequestsTransport(),
+                                    consented=consented)
             except PrivacyGateError as e:
                 return _AsciiJSON({"error": str(e),
                                    "status": e.code}, status_code=403)
