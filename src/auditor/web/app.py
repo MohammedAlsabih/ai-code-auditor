@@ -264,6 +264,28 @@ class AIBatchIn(BaseModel):
     consent_token: str = ""
 
 
+class AIAuditPreviewIn(BaseModel):
+    """W3-E: the browser picks a PROFILE, projects, provider and model —
+    never a prompt, query text, api_key, or base_url (extra='forbid')."""
+    model_config = {"extra": "forbid"}
+
+    profile: str
+    provider: str
+    model: str
+    projects: list[str] = []
+
+
+class AIAuditIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    profile: str
+    provider: str
+    model: str
+    limits: AIBatchLimitsIn
+    projects: list[str] = []
+    consent_token: str = ""
+
+
 # ONE probe/models call at a time per process: a second concurrent request
 # gets 409 WITHOUT any outbound connection. Module-level on purpose — the
 # guard covers every app instance in the process.
@@ -768,6 +790,7 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         BatchLimits,
         BatchRunner,
         BatchStore,
+        enforce_limits,
         load_pricing,
     )
 
@@ -902,6 +925,247 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             return _err(404, "unknown batch id")
         batch_runner.cancel(batch_id)
         return _AsciiJSON({"batch_id": batch_id, "cancel_requested": True})
+
+    # ---- W3-E: independent AI audit -------------------------------------------
+    # The user picks a PROFILE; the versioned catalog picks the queries; the
+    # deterministic index retrieves bounded context. No prompt anywhere.
+    from auditor.ai.audit import (
+        AUDIT_MAX_OUTPUT_TOKENS,
+        AuditContextError,
+        AuditRunner,
+        build_audit_pack,
+        estimate_units,
+    )
+    from auditor.ai.audit_index import RepositoryAuditIndex
+    from auditor.ai.audit_queries import PROFILES, queries_for_profile
+    from auditor.ai.audit_store import AIAuditStore, AIAuditStoreError
+    from auditor.ai.review import review_timeout
+
+    ai_audit_store = AIAuditStore(
+        report_path.parent / (report_path.stem + ".ai-audit.json"))
+    audit_runner = AuditRunner(
+        audit_store=ai_audit_store,
+        transport_factory=lambda: RequestsTransport())
+
+    _report_projects: list[tuple[str, str]] = [
+        (str(p.get("root", "")), str(p.get("language", "")))
+        for p in report.get("projects", [])
+        if isinstance(p, dict) and isinstance(p.get("root"), str)]
+
+    # static findings by repo-relative (file, line) — for candidate LINKS only
+    _static_by_line: dict[tuple[str, int], list[str]] = {}
+    for _proj in report.get("projects", []):
+        if not isinstance(_proj, dict):
+            continue
+        for _f in _proj.get("findings") or []:
+            if not isinstance(_f, dict):
+                continue
+            _rid2 = _finding_review_id(str(_proj.get("root", "")), _f)
+            if _rid2 is None:
+                continue
+            _rel = repo_relative(str(_proj.get("root", "")),
+                                 str(_f.get("file", "")))
+            _static_by_line.setdefault(
+                (_rel, int(_f.get("line", 0))), []).append(_rid2)
+
+    def _build_audit_packs(profile: str,
+                           projects: list[str]) -> tuple[list, dict]:
+        """Index + packs, built ONCE per request; the same objects feed
+        consent, budgets, and sending. Returns (packs, skip_info)."""
+        assert repo is not None            # _audit_gate 409s before this
+        index = RepositoryAuditIndex(repo, _report_projects)
+        wanted = projects or sorted({r for r, _ in _report_projects})
+        packs = []
+        skipped: dict[str, int] = {}
+        for project in sorted(wanted):
+            langs = {lang for r, lang in _report_projects if r == project}
+            for query in queries_for_profile(profile):
+                if langs and not (langs & set(query.languages)):
+                    skipped["language not covered"] = \
+                        skipped.get("language not covered", 0) + 1
+                    continue
+                pack = build_audit_pack(index, project, query)
+                if pack is None:
+                    skipped["no candidate files"] = \
+                        skipped.get("no candidate files", 0) + 1
+                    continue
+                packs.append(pack)
+        return packs, {"skipped_units": skipped,
+                       "index_skipped": index.skipped}
+
+    def _audit_gate(provider: Provider) -> JSONResponse | None:
+        if repo is None:
+            return _err(409, "AI audit needs the repository: start the "
+                             "server with --repo")
+        if not _ai_local(provider) and not remote_reviews_enabled():
+            return _AsciiJSON(
+                {"error": "remote AI reviews are disabled by server policy",
+                 "status": "privacy_gate_required"}, status_code=403)
+        return None
+
+    @app.post("/api/ai/audits/preview")
+    def ai_audit_preview(body: AIAuditPreviewIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if body.profile not in PROFILES:
+            return _err(400, "unknown audit profile")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        bad = _audit_gate(provider)
+        if bad is not None:
+            return bad
+        known_roots = {r for r, _ in _report_projects}
+        unknown = [p for p in body.projects if p not in known_roots]
+        if unknown:
+            return _err(404, f"{len(unknown)} unknown project root(s)")
+        try:
+            packs, skip_info = _build_audit_packs(body.profile,
+                                                  body.projects)
+        except AuditContextError as e:
+            return _AsciiJSON({"error": str(e), "status": e.code},
+                              status_code=413)
+        preview = estimate_units(packs)
+        preview.update(skip_info)
+        preview["profile"] = body.profile
+        preview["provider"] = provider.value
+        preview["model"] = body.model.strip()
+        preview["queries"] = sorted({p["query_id"] for p in packs})
+        preview["projects"] = sorted({p["project"] for p in packs})
+        preview["cached"] = sum(
+            1 for p in packs
+            if ai_audit_store.result_for_unit(p["unit_id"]) is not None)
+        preview["fresh"] = preview["units"] - preview["cached"]
+        preview["concurrency"] = 1               # local AND remote
+        preview["request_timeout_seconds"] = int(review_timeout())
+        pricing = load_pricing()
+        row = ((pricing or {}).get(provider.value) or {}) \
+            .get(body.model.strip()) if pricing else None
+        if isinstance(row, dict):
+            cost = (preview["estimated_input_tokens"] / 1_000_000) \
+                * row["input_per_mtok"] \
+                + (preview["max_output_tokens"] / 1_000_000) \
+                * row["output_per_mtok"]
+            preview["cost_status"] = "estimated"
+            preview["estimated_cost_usd"] = round(cost, 4)
+        else:
+            preview["cost_status"] = "unknown"
+        if not _ai_local(provider) and packs:
+            token = ai_consents.issue(provider.value, body.model.strip(),
+                                      preview["unit_ids"],
+                                      preview["context_digests"])
+            preview["consent_token"] = token
+            ai_audit.record("issued", provider.value, body.model.strip(),
+                            preview["units"],
+                            binding_hash(provider.value, body.model.strip(),
+                                         preview["unit_ids"],
+                                         preview["context_digests"]),
+                            {"input_bytes": preview["input_bytes"],
+                             "redactions": preview["redaction_total"]})
+        else:
+            preview["consent_token"] = ""
+        return _AsciiJSON(preview)
+
+    @app.post("/api/ai/audits")
+    def ai_audit_start(body: AIAuditIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if body.profile not in PROFILES:
+            return _err(400, "unknown audit profile")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        bad = _audit_gate(provider)
+        if bad is not None:
+            return bad
+        # packs are built ONCE; the same objects feed consent, budgets, and
+        # the requests — no rebuild after redeem (no TOCTOU window)
+        try:
+            packs, _skip = _build_audit_packs(body.profile, body.projects)
+        except AuditContextError as e:
+            return _AsciiJSON({"error": str(e), "status": e.code},
+                              status_code=413)
+        if not packs:
+            return _err(400, "no audit units for this profile/projects")
+        local = _ai_local(provider)
+        # ALL W3-D budgets (incl. max_cost_usd) via the shared helper,
+        # checked BEFORE redeem so an over-budget request never consumes the
+        # one-time consent token — and before any network either way
+        est = estimate_units(packs)
+        try:
+            limits = BatchLimits.parse(body.limits.model_dump(),
+                                       load_pricing() is not None)
+            enforce_limits(limits, request_count=est["request_count"],
+                           input_bytes=est["input_bytes"],
+                           est_input_tokens=est["estimated_input_tokens"],
+                           output_tokens_total=len(packs)
+                           * AUDIT_MAX_OUTPUT_TOKENS,
+                           provider=provider.value,
+                           model=body.model.strip())
+        except BatchError as e:
+            return _err(400, str(e))
+        consented = False
+        if not local:
+            # (unit_id, digest) PAIRS aligned by unit_id — exactly what the
+            # preview issued the token against
+            pairs = sorted((p["unit_id"], p["digest"]) for p in packs)
+            try:
+                ai_consents.redeem(body.consent_token, provider.value,
+                                   body.model.strip(),
+                                   [u for u, _ in pairs],
+                                   [d for _, d in pairs])
+            except ConsentError as e:
+                ai_audit.record("denied", provider.value, body.model.strip(),
+                                len(packs), "-", {e.code: 1})
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=403)
+            consented = True
+        try:
+            audit_id = audit_runner.start(packs, provider,
+                                          body.model.strip(), consented,
+                                          _static_by_line)
+        except RuntimeError as e:
+            return _err(409, str(e))
+        except (ValueError, AIAuditStoreError) as e:
+            return _err(400, str(e))
+        return _AsciiJSON({"audit_id": audit_id, "state": "running"},
+                          status_code=202)
+
+    @app.get("/api/ai/audits/{audit_id}")
+    def ai_audit_status(audit_id: str) -> JSONResponse:
+        row = ai_audit_store.audit(audit_id)
+        if row is None:
+            return _err(404, "unknown audit id")
+        counts = {"completed": 0, "failed": 0, "pending": 0, "running": 0,
+                  "canceled": 0}
+        outcomes = {"issues_found": 0, "no_issue_observed": 0,
+                    "insufficient_context": 0}
+        for u in row.get("units", []):
+            counts[u.get("state", "pending")] = \
+                counts.get(u.get("state", "pending"), 0) + 1
+            oc = u.get("outcome")
+            if oc in outcomes:
+                outcomes[oc] += 1
+        row["counts"] = counts
+        row["outcomes"] = outcomes
+        row["remaining"] = counts["pending"] + counts["running"]
+        return _AsciiJSON(row)
+
+    @app.post("/api/ai/audits/{audit_id}/cancel")
+    def ai_audit_cancel(audit_id: str) -> JSONResponse:
+        if ai_audit_store.audit(audit_id) is None:
+            return _err(404, "unknown audit id")
+        audit_runner.cancel(audit_id)
+        return _AsciiJSON({"audit_id": audit_id, "cancel_requested": True})
+
+    @app.get("/api/ai/audit-results")
+    def ai_audit_results() -> JSONResponse:
+        return _AsciiJSON({"available": ai_audit_store.available,
+                           "error": ai_audit_store.error,
+                           "candidates": ai_audit_store.all_candidates(),
+                           "note": ("AI-generated candidates are advisory "
+                                    "only. Absence of candidates is NOT "
+                                    "evidence the project is safe.")})
 
     @app.get("/api/ai/reviews/{rid}")
     def ai_review_get(rid: str) -> JSONResponse:
