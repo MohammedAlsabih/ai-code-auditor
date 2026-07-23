@@ -11,14 +11,10 @@ build/
 .cache/
 
 # scan OUTPUT is never committed: real reports may contain source snippets.
-# `*-report/` covers auditor-report/, tabi-report/, madar-report/ and any
-# future <name>-report/ output directory; `*-report-*/` covers suffixed round
-# outputs (madar-report-b28b2/, madar-report-latest/, tabi-report-b28a/, ...).
+# `*-report/` covers any <name>-report/ output directory; `*-report-*/`
+# covers suffixed round outputs (<name>-report-<round>/, ...).
 # examples/ (curated fixture output) and src/auditor/web/static/ (the shipped
 # SPA build) stay TRACKED.
-auditor-report/
-tabi-report/
-madar-report/
 *-report/
 *-report-*/
 trial-*/
@@ -34,3 +30,8 @@ field-*/
 web/node_modules/
 web/*.tsbuildinfo
 docs/superpowers/
+
+# W2-B2.8D quality baseline: sampler, source-context dumps, and detailed
+# per-finding labels are LOCAL ONLY (paths/snippets). Only the anonymized
+# docs/quality/baseline-summary.json is committed.
+.quality-local/

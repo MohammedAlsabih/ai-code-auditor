@@ -1,0 +1,697 @@
+{
+  "schema_version": 3,
+  "corpus": {
+    "repo-a": {
+      "findings": 571
+    },
+    "repo-b": {
+      "findings": 57
+    }
+  },
+  "method": "manual source review; deterministic stratified sample; no AI",
+  "axes": {
+    "validity": [
+      "confirmed",
+      "false_positive",
+      "uncertain"
+    ],
+    "level_assessment": [
+      "correct",
+      "too_high",
+      "too_low",
+      "uncertain"
+    ],
+    "gate_assessment": [
+      "correct",
+      "too_strict",
+      "too_lenient",
+      "uncertain"
+    ],
+    "actionability": [
+      "actionable",
+      "needs_context",
+      "non_actionable"
+    ],
+    "reason_code": [
+      "true_defect",
+      "intentional_but_flagged",
+      "test_or_fixture_credential",
+      "local_dev_credential",
+      "parameterized_or_safe",
+      "sanitized_or_guarded",
+      "public_by_design",
+      "package_id_ne_namespace",
+      "metadata_gap",
+      "complexity_over_threshold",
+      "index_key_low_impact",
+      "other"
+    ]
+  },
+  "evidence_classes": [
+    "insufficient_evidence",
+    "needs_hardening",
+    "provisionally_credible"
+  ],
+  "note": "Rates are observed on this deterministic stratified sample only; they are NOT a probabilistic estimate of product-wide precision and carry no confidence interval.",
+  "rules": [
+    {
+      "repo": "repo-a",
+      "rule": "D002",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 1,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 1,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "intentional_but_flagged": 1
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "H002",
+      "population": 8,
+      "reviewed": 8,
+      "validity": {
+        "confirmed": 0,
+        "false_positive": 0,
+        "uncertain": 8
+      },
+      "level_assessment": {
+        "correct": 0,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 8
+      },
+      "gate_assessment": {
+        "correct": 0,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 8
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 8,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "metadata_gap": 3,
+        "package_id_ne_namespace": 5
+      },
+      "sampling": "all",
+      "evidence_class": "insufficient_evidence"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "H007",
+      "population": 2,
+      "reviewed": 2,
+      "validity": {
+        "confirmed": 0,
+        "false_positive": 0,
+        "uncertain": 2
+      },
+      "level_assessment": {
+        "correct": 0,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 2
+      },
+      "gate_assessment": {
+        "correct": 0,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 2
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 2,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "package_id_ne_namespace": 2
+      },
+      "sampling": "all",
+      "evidence_class": "insufficient_evidence"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "N001",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 0,
+        "false_positive": 0,
+        "uncertain": 1
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 1,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "public_by_design": 1
+      },
+      "sampling": "all",
+      "evidence_class": "insufficient_evidence"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "P001",
+      "population": 80,
+      "reviewed": 20,
+      "validity": {
+        "confirmed": 20,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 20,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 20,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 20,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "intentional_but_flagged": 20
+      },
+      "sampling": "stratified_cap",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "P002",
+      "population": 2,
+      "reviewed": 2,
+      "validity": {
+        "confirmed": 2,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 2,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 2,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 2,
+        "needs_context": 0,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "local_dev_credential": 2
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "P003",
+      "population": 32,
+      "reviewed": 20,
+      "validity": {
+        "confirmed": 20,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 20,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 20,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 0,
+        "non_actionable": 20
+      },
+      "reason_code_counts": {
+        "test_or_fixture_credential": 20
+      },
+      "sampling": "stratified_cap",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "P006",
+      "population": 308,
+      "reviewed": 20,
+      "validity": {
+        "confirmed": 20,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 20,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 20,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 20,
+        "needs_context": 0,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "complexity_over_threshold": 20
+      },
+      "sampling": "stratified_cap",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "R004",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 1,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 0,
+        "non_actionable": 1
+      },
+      "reason_code_counts": {
+        "intentional_but_flagged": 1
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "R005",
+      "population": 4,
+      "reviewed": 4,
+      "validity": {
+        "confirmed": 1,
+        "false_positive": 0,
+        "uncertain": 3
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 3
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 3
+      },
+      "actionability": {
+        "actionable": 1,
+        "needs_context": 3,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "metadata_gap": 3,
+        "true_defect": 1
+      },
+      "sampling": "all",
+      "evidence_class": "insufficient_evidence"
+    },
+    {
+      "repo": "repo-a",
+      "rule": "R006",
+      "population": 132,
+      "reviewed": 20,
+      "validity": {
+        "confirmed": 20,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 20,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 20,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 20,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "index_key_low_impact": 20
+      },
+      "sampling": "stratified_cap",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "H002",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 0,
+        "false_positive": 0,
+        "uncertain": 1
+      },
+      "level_assessment": {
+        "correct": 0,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 1
+      },
+      "gate_assessment": {
+        "correct": 0,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 1
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 1,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "metadata_gap": 1
+      },
+      "sampling": "all",
+      "evidence_class": "insufficient_evidence"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "P001",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 1,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 1,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "intentional_but_flagged": 1
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "P002",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 1,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 1,
+        "needs_context": 0,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "local_dev_credential": 1
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "P003",
+      "population": 6,
+      "reviewed": 6,
+      "validity": {
+        "confirmed": 6,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 6,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 6,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 0,
+        "non_actionable": 6
+      },
+      "reason_code_counts": {
+        "test_or_fixture_credential": 6
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "P006",
+      "population": 32,
+      "reviewed": 32,
+      "validity": {
+        "confirmed": 32,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 32,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 32,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 32,
+        "needs_context": 0,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "complexity_over_threshold": 32
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "R004",
+      "population": 1,
+      "reviewed": 1,
+      "validity": {
+        "confirmed": 1,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 1,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 1,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 1,
+        "needs_context": 0,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "true_defect": 1
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    },
+    {
+      "repo": "repo-b",
+      "rule": "R006",
+      "population": 15,
+      "reviewed": 15,
+      "validity": {
+        "confirmed": 15,
+        "false_positive": 0,
+        "uncertain": 0
+      },
+      "level_assessment": {
+        "correct": 15,
+        "too_high": 0,
+        "too_low": 0,
+        "uncertain": 0
+      },
+      "gate_assessment": {
+        "correct": 15,
+        "too_strict": 0,
+        "too_lenient": 0,
+        "uncertain": 0
+      },
+      "actionability": {
+        "actionable": 0,
+        "needs_context": 15,
+        "non_actionable": 0
+      },
+      "reason_code_counts": {
+        "index_key_low_impact": 15
+      },
+      "sampling": "all",
+      "evidence_class": "provisionally_credible"
+    }
+  ],
+  "totals": {
+    "reviewed": 156,
+    "confirmed": 141,
+    "false_positive": 0,
+    "uncertain": 15,
+    "decided": 141,
+    "observed_confirmed_rate": {
+      "numerator": 141,
+      "denominator": 141,
+      "value": 1.0
+    },
+    "uncertainty_rate": {
+      "numerator": 15,
+      "denominator": 156,
+      "value": 0.0962
+    },
+    "level_agreement": {
+      "numerator": 142,
+      "denominator": 142,
+      "value": 1.0
+    },
+    "gate_agreement": {
+      "numerator": 142,
+      "denominator": 142,
+      "value": 1.0
+    },
+    "actionable_rate": {
+      "numerator": 57,
+      "denominator": 156,
+      "value": 0.3654
+    },
+    "reason_code_counts": {
+      "complexity_over_threshold": 52,
+      "index_key_low_impact": 35,
+      "intentional_but_flagged": 23,
+      "local_dev_credential": 3,
+      "metadata_gap": 7,
+      "package_id_ne_namespace": 7,
+      "public_by_design": 1,
+      "test_or_fixture_credential": 26,
+      "true_defect": 2
+    }
+  }
+}
