@@ -709,6 +709,55 @@ tr.sev-blue td.c-sev {
   margin: 0;
 }
 
+/* W3-D: batch panel + AI filter row */
+.ai-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.ai-filter-select {
+  width: auto;
+  padding: 4px 8px;
+}
+.ai-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ai-batch .review-select,
+.ai-batch .ai-model {
+  width: auto;
+  flex: 0 1 150px;
+  min-width: 0;
+  padding: 4px 8px;
+}
+.ai-batch .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: normal;   /* narrow panels wrap the label instead of overflowing */
+  min-width: 0;
+  text-align: left;
+}
+.ai-filter-row,
+.ai-batch,
+.ai-batch-status {
+  min-width: 0;
+}
+.ai-batch-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 /* tabs + coverage (W2-B2) */
 .tabs {
   display: flex;

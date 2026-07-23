@@ -4,6 +4,7 @@ import { Loader2, TriangleAlert } from 'lucide-react'
 import {
   ErrorConfirmationRequired,
   aggregate,
+  fetchAIReviewsSummary,
   fetchReport,
   fetchReviews,
   normalizePathFilter,
@@ -11,6 +12,8 @@ import {
   putReviewBatch,
   sourcePathFor,
 } from './api'
+import { AI_FILTERS, matchesAIFilter, parseAISummary, type AIFilter } from './aiBatch'
+import { AIBatchPanel } from './components/AIBatchPanel'
 import { AIProvidersPanel } from './components/AIProvidersPanel'
 import { CoveragePanel } from './components/CoveragePanel'
 import { DetailPanel } from './components/DetailPanel'
@@ -66,6 +69,9 @@ export default function App() {
   const [reviewF, setReviewF] = useState<Set<string>>(new Set())
   // All/New/Existing — rendered ONLY for reports with a real baseline block
   const [baselineF, setBaselineF] = useState<BaselineFilter>('all')
+  // W3-D: AI-assessment filter + rid -> latest assessment map (local sidecar)
+  const [aiF, setAIF] = useState<AIFilter>('all')
+  const [aiMap, setAIMap] = useState<Record<string, string>>({})
   const [pathFilters, setPathFilters] = useState<string[]>([])
   const [pathInput, setPathInput] = useState('')
   const [pathInvalid, setPathInvalid] = useState(false)
@@ -169,10 +175,14 @@ export default function App() {
         const rel = sourcePathFor(r)
         if (!pathFilters.some((p) => pathFilterMatches(rel, p))) return false
       }
+      if (aiF !== 'all') {
+        const assessment = r.review_id ? aiMap[r.review_id] : undefined
+        if (!matchesAIFilter(assessment, aiF)) return false
+      }
       return true
     })
   }, [allRows, query, projectF, languageF, levelF, precisionF, ruleF, reviewF,
-      baseline, baselineF, pathFilters, reviews])
+      baseline, baselineF, pathFilters, reviews, aiF, aiMap])
 
   const sorted = useMemo(() => {
     const dir = sortDir === 'asc' ? 1 : -1
@@ -232,8 +242,21 @@ export default function App() {
   // hidden) selection so bulk review can never touch rows outside the view
   const filterStamp = JSON.stringify([
     query, [...projectF], [...languageF], [...levelF], [...precisionF],
-    [...ruleF], [...reviewF], baselineF, pathFilters, pageSize,
+    [...ruleF], [...reviewF], baselineF, pathFilters, pageSize, aiF,
   ])
+
+  // W3-D: latest AI assessments (local sidecar read; refreshed after a batch)
+  const refreshAIMap = () => {
+    fetchAIReviewsSummary()
+      .then((raw) => setAIMap(parseAISummary(raw)))
+      .catch(() => {})
+  }
+  useEffect(refreshAIMap, [])
+
+  const openFindingByReviewId = (rid: string) => {
+    const row = allRows.find((r) => r.review_id === rid)
+    if (row) setSelected(row)
+  }
   useEffect(() => {
     setPage(1)
     setSel(emptySelection())
@@ -470,6 +493,30 @@ export default function App() {
                 error={bulkErr}
               />
             )}
+            <div className="ai-filter-row">
+              <label className="ai-conf" htmlFor="ai-filter">
+                AI assessment:
+              </label>
+              <select
+                id="ai-filter"
+                className="review-select ai-filter-select"
+                value={aiF}
+                onChange={(e) => setAIF(e.target.value as AIFilter)}
+              >
+                {AI_FILTERS.map((f) => (
+                  <option key={f} value={f}>
+                    {f === 'all' ? 'any' : f === 'none' ? 'no AI result' : f.replace('_', ' ')}
+                  </option>
+                ))}
+              </select>
+              {selectedIds.length > 0 && (
+                <AIBatchPanel
+                  selectedIds={selectedIds}
+                  onOpenFinding={openFindingByReviewId}
+                  onBatchSettled={refreshAIMap}
+                />
+              )}
+            </div>
             <FindingsTable
               rows={paged}
               showBaseline={baseline !== null}
