@@ -70,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
     ai_review.add_argument("--repo", default=None,
                            help="repository root for the source window "
                                 "(optional)")
+    ai_review.add_argument("--confirm-remote", action="store_true",
+                           help="W3-C: explicitly consent to sending THIS "
+                                "finding's redacted context to a REMOTE "
+                                "provider (also requires "
+                                "AUDITOR_AI_REMOTE_REVIEWS=confirm in the "
+                                "server environment)")
     # deliberately NO prompt option: the prompt is fixed by contract
 
     srv = sub.add_parser("serve",
@@ -263,8 +269,36 @@ def _ai_review(args) -> int:
         return 2
     request = AIReviewRequest(review_id=args.review_id, provider=provider,
                               model=args.model)
+    from auditor.ai.consent import ConsentAudit, binding_hash
+    from auditor.ai.review import is_local_review_provider
+    from auditor.ai.providers import resolve_config as _resolve
+    consented = False
     try:
-        result = run_review(request, pack, RequestsTransport())
+        cfg = _resolve(provider)
+        local = is_local_review_provider(provider, cfg)
+    except AIError:
+        local = False
+    if not local:
+        if not getattr(args, "confirm_remote", False):
+            print("blocked [privacy_gate_required]: remote review requires "
+                  "an explicit --confirm-remote (and "
+                  "AUDITOR_AI_REMOTE_REVIEWS=confirm in the environment)",
+                  file=sys.stderr)
+            return 3
+        consented = True
+        manifest = pack.get("privacy_manifest") or {}
+        ConsentAudit(report_path.parent
+                     / (report_path.stem + ".ai-consent.json")).record(
+            "redeemed", provider.value, args.model, 1,
+            binding_hash(provider.value, args.model, [args.review_id],
+                         [pack["digest"]]),
+            manifest.get("redactions"))
+        print(f"consent: sending {manifest.get('bytes_after', 0)} redacted "
+              f"bytes ({manifest.get('redaction_total', 0)} redactions) to "
+              f"{provider.value} — --confirm-remote given", file=sys.stderr)
+    try:
+        result = run_review(request, pack, RequestsTransport(),
+                            consented=consented)
     except PrivacyGateError as e:
         print(f"blocked [privacy_gate_required]: {e}", file=sys.stderr)
         return 3

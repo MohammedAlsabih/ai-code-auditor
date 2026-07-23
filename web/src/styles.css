@@ -671,6 +671,44 @@ tr.sev-blue td.c-sev {
   font-size: 12px;
 }
 
+/* W3-C: remote-consent modal — nothing is sent until Confirm */
+.consent-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 24, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 16px;
+}
+.consent-modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  max-width: 420px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.consent-facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.consent-facts dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+.consent-facts dd {
+  margin: 0;
+}
+
 /* tabs + coverage (W2-B2) */
 .tabs {
   display: flex;

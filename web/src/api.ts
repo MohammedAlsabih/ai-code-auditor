@@ -195,15 +195,60 @@ export async function postAITest(provider: string, model: string): Promise<AITes
 
 export class AIPrivacyGate extends Error {}
 
+export interface AIConsentPreview {
+  provider: string
+  model: string
+  locality: string
+  findings: number
+  files: number
+  input_bytes: number
+  estimated_input_tokens: number
+  redaction_total: number
+  redactions: Record<string, number>
+  retention: string
+  cost: string
+  consent_token: string
+}
+
+export async function postAIConsentPreview(
+  reviewIds: string[],
+  provider: string,
+  model: string,
+): Promise<AIConsentPreview> {
+  const res = await fetch('/api/ai/consent-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ review_ids: reviewIds, provider, model }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 403) {
+    throw new AIPrivacyGate(
+      (body as { error?: string }).error ?? 'remote AI reviews are disabled by server policy',
+    )
+  }
+  if (!res.ok) {
+    throw new Error(
+      (body as { error?: string }).error ?? `consent preview failed (HTTP ${res.status})`,
+    )
+  }
+  return body as AIConsentPreview
+}
+
 export async function postAIReview(
   reviewId: string,
   provider: string,
   model: string,
+  consentToken = '',
 ): Promise<unknown> {
   const res = await fetch('/api/ai/reviews', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ review_id: reviewId, provider, model }),
+    body: JSON.stringify({
+      review_id: reviewId,
+      provider,
+      model,
+      consent_token: consentToken,
+    }),
   })
   const body = await res.json().catch(() => ({}))
   if (res.status === 403) {
