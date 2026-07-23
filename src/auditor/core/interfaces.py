@@ -58,6 +58,11 @@ class SyntaxProfile:
     # SQL inside the same executable expression — an outer route registration
     # (MapGet/MapPost wrapping a lambda) is never the sink.
     sql_boundary_types: tuple[str, ...] = ()
+    # B2.8C1: adapter oracle — True when the composition node is enclosed by a
+    # call that PARAMETERIZES its interpolation holes (e.g. EF Core's
+    # ExecuteSqlInterpolated*/FromSqlInterpolated* proven by receiver shape).
+    # Such a sink makes the interpolation safe: neither P004 nor P005 fires.
+    sql_parameterizing: Callable[[object, object], bool] | None = None   # (node, sf)
 
 
 class LanguageAdapter(ABC):
