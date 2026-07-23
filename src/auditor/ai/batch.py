@@ -168,6 +168,38 @@ class BatchLimits:
                            max_cost_usd=float(cost) if cost else None)
 
 
+def enforce_limits(limits: BatchLimits, *, request_count: int,
+                   input_bytes: int, est_input_tokens: int,
+                   output_tokens_total: int, provider: str, model: str,
+                   env: dict[str, str] | None = None) -> None:
+    """THE one budget check, shared by batches, audits, web and CLI. Every
+    breach raises BatchError BEFORE any network. The cost comparison uses
+    the UNROUNDED estimate (the same formula the preview displays rounded);
+    a cost cap without a pricing row for this provider/model is refused."""
+    if request_count > limits.max_requests:
+        raise BatchError("limits.max_requests is below the request count")
+    if limits.max_input_bytes is not None \
+            and input_bytes > limits.max_input_bytes:
+        raise BatchError("the run exceeds limits.max_input_bytes")
+    if limits.max_input_tokens is not None \
+            and est_input_tokens > limits.max_input_tokens:
+        raise BatchError("the run exceeds limits.max_input_tokens")
+    if output_tokens_total > limits.max_output_tokens:
+        raise BatchError("the run exceeds limits.max_output_tokens")
+    if limits.max_cost_usd is not None:
+        pricing = load_pricing(env)
+        row = ((pricing or {}).get(provider) or {}).get(model) \
+            if pricing else None
+        if not isinstance(row, dict):
+            raise BatchError("max_cost_usd requires pricing for this "
+                             "provider/model in the pricing config")
+        cost = (est_input_tokens / 1_000_000) * row["input_per_mtok"] \
+            + (output_tokens_total / 1_000_000) * row["output_per_mtok"]
+        if cost > limits.max_cost_usd:
+            raise BatchError("the estimated cost exceeds "
+                             "limits.max_cost_usd")
+
+
 class BatchStore:
     """Atomic, bounded metadata sidecar. On load, any batch persisted as
     running/pending becomes `interrupted` — a restart never resumes."""
@@ -364,30 +396,13 @@ class BatchRunner:
         input_bytes = sum(int((packs[rid].get("privacy_manifest") or {})
                               .get("bytes_after", 0)) for rid in review_ids)
         est_tokens = -(-input_bytes // TOKEN_ESTIMATE_BYTES_PER_TOKEN)
-        # pre-start budget verification — nothing has gone out yet
-        if len(review_ids) > limits.max_requests:
-            raise BatchError("limits.max_requests is below the batch size")
-        if limits.max_input_bytes is not None \
-                and input_bytes > limits.max_input_bytes:
-            raise BatchError("the batch exceeds limits.max_input_bytes")
-        if limits.max_input_tokens is not None \
-                and est_tokens > limits.max_input_tokens:
-            raise BatchError("the batch exceeds limits.max_input_tokens")
-        if len(review_ids) * REVIEW_MAX_TOKENS > limits.max_output_tokens:
-            raise BatchError("the batch exceeds limits.max_output_tokens")
-        if limits.max_cost_usd is not None:
-            pricing = load_pricing(self._env)
-            row = ((pricing or {}).get(provider.value) or {}).get(model) \
-                if pricing else None
-            if not isinstance(row, dict):
-                raise BatchError("max_cost_usd requires pricing for this "
-                                 "provider/model in the pricing config")
-            cost = (est_tokens / 1_000_000) * row["input_per_mtok"] \
-                + (len(review_ids) * REVIEW_MAX_TOKENS / 1_000_000) \
-                * row["output_per_mtok"]
-            if cost > limits.max_cost_usd:
-                raise BatchError("the estimated cost exceeds "
-                                 "limits.max_cost_usd")
+        # pre-start budget verification via THE shared helper — nothing has
+        # gone out yet and every cap (incl. cost) is enforced identically
+        enforce_limits(limits, request_count=len(review_ids),
+                       input_bytes=input_bytes, est_input_tokens=est_tokens,
+                       output_tokens_total=len(review_ids)
+                       * REVIEW_MAX_TOKENS,
+                       provider=provider.value, model=model, env=self._env)
         with self._lock:
             if self._active is not None:
                 raise BatchError("another batch is already running")

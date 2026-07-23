@@ -77,6 +77,25 @@ def build_parser() -> argparse.ArgumentParser:
                                 "AUDITOR_AI_REMOTE_REVIEWS=confirm in the "
                                 "server environment)")
     # deliberately NO prompt option: the prompt is fixed by contract
+    ai_audit = ai_sub.add_parser(
+        "audit",
+        help="W3-E: independent AI audit — predefined queries only, no "
+             "prompt. Exit codes: 0 ok, 1 provider/response error, 2 usage, "
+             "3 privacy gate")
+    ai_audit.add_argument("--report", required=True)
+    ai_audit.add_argument("--repo", required=True,
+                          help="repository root (context retrieval)")
+    ai_audit.add_argument("--provider", required=True)
+    ai_audit.add_argument("--model", required=True)
+    ai_audit.add_argument("--profile", required=True,
+                          help="security | correctness | ai_code_risks | all")
+    ai_audit.add_argument("--project", default=None,
+                          help="limit to one project root (optional)")
+    ai_audit.add_argument("--limits", required=True,
+                          help='JSON, e.g. {"max_requests": 8, '
+                               '"max_output_tokens": 16384, '
+                               '"max_input_bytes": 300000}')
+    ai_audit.add_argument("--confirm-remote", action="store_true")
 
     srv = sub.add_parser("serve",
                          help="open a report.json in a local web explorer (127.0.0.1 only)")
@@ -180,6 +199,8 @@ def _ai(args) -> int:
 
     if args.ai_command == "review":
         return _ai_review(args)
+    if args.ai_command == "audit":
+        return _ai_audit(args)
 
     if args.ai_command not in ("models", "test"):
         print("usage: auditor ai {providers,models,test,review} — "
@@ -313,6 +334,134 @@ def _ai_review(args) -> int:
         print(f"warning: result not stored — {e}", file=sys.stderr)
     print(_json.dumps(result, ensure_ascii=True, indent=1))
     return 0
+
+
+def _ai_audit(args) -> int:
+    """`auditor ai audit` — the W3-E independent audit, synchronous, one
+    request per unit, NO prompt option. Exit: 0 ok, 1 provider/response
+    error on every unit, 2 usage error, 3 privacy gate."""
+    import json as _json
+
+    from auditor.ai import AIError, Provider
+    from auditor.ai.audit import (
+        AUDIT_MAX_OUTPUT_TOKENS,
+        AuditContextError,
+        build_audit_pack,
+        candidates_from_result,
+        run_audit_unit,
+    )
+    from auditor.ai.audit_index import RepositoryAuditIndex
+    from auditor.ai.audit_queries import PROFILES, queries_for_profile
+    from auditor.ai.audit_store import AIAuditStore
+    from auditor.ai.batch import BatchError, BatchLimits, load_pricing
+    from auditor.ai.consent import remote_reviews_enabled
+    from auditor.ai.providers import resolve_config as _resolve
+    from auditor.ai.review import PrivacyGateError, is_local_review_provider
+    from auditor.ai.transport import RequestsTransport
+    from auditor.web.app import ReportError, load_report
+
+    try:
+        provider = Provider(args.provider)
+    except ValueError:
+        print("error | خطأ: unknown provider", file=sys.stderr)
+        return 2
+    if args.profile not in PROFILES:
+        print("error | خطأ: unknown profile "
+              f"(expected one of: {', '.join(PROFILES)})", file=sys.stderr)
+        return 2
+    report_path = Path(args.report)
+    try:
+        report = load_report(report_path)
+    except ReportError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 2
+    repo = Path(args.repo)
+    if not repo.is_dir():
+        print("error | خطأ: --repo is not a directory", file=sys.stderr)
+        return 2
+    try:
+        limits = BatchLimits.parse(_json.loads(args.limits),
+                                   load_pricing() is not None)
+    except (ValueError, BatchError) as e:
+        print(f"error | خطأ: invalid --limits ({e})", file=sys.stderr)
+        return 2
+    try:
+        cfg = _resolve(provider)
+        local = is_local_review_provider(provider, cfg)
+    except AIError:
+        local = False
+    consented = False
+    if not local:
+        if not getattr(args, "confirm_remote", False) \
+                or not remote_reviews_enabled():
+            print("blocked [privacy_gate_required]: remote audit requires "
+                  "--confirm-remote AND AUDITOR_AI_REMOTE_REVIEWS=confirm",
+                  file=sys.stderr)
+            return 3
+        consented = True
+
+    project_roots = [(str(p.get("root", "")), str(p.get("language", "")))
+                     for p in report.get("projects", [])
+                     if isinstance(p, dict)]
+    index = RepositoryAuditIndex(repo, project_roots)
+    wanted = [args.project] if args.project \
+        else sorted({r for r, _ in project_roots})
+    packs = []
+    for project in wanted:
+        for query in queries_for_profile(args.profile):
+            try:
+                pack = build_audit_pack(index, project, query)
+            except AuditContextError:
+                continue
+            if pack is not None:
+                packs.append(pack)
+    if not packs:
+        print("error | خطأ: no audit units for this profile/project",
+              file=sys.stderr)
+        return 2
+    # ALL W3-D caps (requests/input bytes/input tokens/output/cost) via the
+    # shared helper — any breach stops with ZERO network
+    from auditor.ai.audit import estimate_units
+    from auditor.ai.batch import enforce_limits
+    est = estimate_units(packs)
+    try:
+        enforce_limits(limits, request_count=est["request_count"],
+                       input_bytes=est["input_bytes"],
+                       est_input_tokens=est["estimated_input_tokens"],
+                       output_tokens_total=len(packs)
+                       * AUDIT_MAX_OUTPUT_TOKENS,
+                       provider=provider.value, model=args.model)
+    except BatchError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 2
+    store = AIAuditStore(
+        report_path.parent / (report_path.stem + ".ai-audit.json"))
+    ok_units = 0
+    summary = []
+    for pack in packs:
+        try:
+            result = run_audit_unit(pack, provider, args.model,
+                                    RequestsTransport(), consented=consented)
+            cands = candidates_from_result(result)
+            store.put_result(result, cands)
+            ok_units += 1
+            summary.append({"unit": pack["unit_id"][:12],
+                            "project": pack["project"],
+                            "query": pack["query_id"],
+                            "outcome": result["outcome"],
+                            "candidates": len(cands),
+                            "latency_ms": result["latency_ms"]})
+        except PrivacyGateError as e:
+            print(f"blocked [privacy_gate_required]: {e}", file=sys.stderr)
+            return 3
+        except AIError as e:
+            summary.append({"unit": pack["unit_id"][:12],
+                            "project": pack["project"],
+                            "query": pack["query_id"],
+                            "error": e.code})
+    print(_json.dumps({"units": len(packs), "completed": ok_units,
+                       "results": summary}, ensure_ascii=True, indent=1))
+    return 0 if ok_units else 1
 
 
 def _relativize_diag(diag_dict: dict, root) -> dict:
