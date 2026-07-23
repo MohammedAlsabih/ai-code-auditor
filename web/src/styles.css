@@ -578,6 +578,99 @@ tr.sev-blue td.c-sev {
   font-size: 11.5px;
 }
 
+/* ---- AI Review (W3-B): advisory, visually separate from Human Review ---- */
+.ai-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+.ai-notice {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.ai-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.ai-controls .review-select,
+.ai-controls .ai-model {
+  width: auto;
+  flex: 1 1 130px;
+  min-width: 0;
+}
+.ai-controls .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.ai-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.ai-badge {
+  font-weight: 700;
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.ai-bad {
+  background: var(--red-bg);
+  color: var(--red);
+}
+.ai-good {
+  background: var(--green-bg, #ecfdf3);
+  color: var(--green);
+}
+.ai-warn {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.ai-conf {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.ai-stale {
+  border: 1px solid var(--yellow);
+  background: var(--yellow-bg);
+  border-radius: 6px;
+  color: var(--yellow);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.ai-evidence {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ai-chip {
+  background: var(--line);
+  border-radius: 4px;
+  font-size: 10.5px;
+  padding: 1px 5px;
+}
+.ai-sub {
+  font-weight: 600;
+  font-size: 12px;
+}
+
 /* tabs + coverage (W2-B2) */
 .tabs {
   display: flex;

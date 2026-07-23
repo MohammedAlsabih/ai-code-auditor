@@ -55,6 +55,22 @@ def build_parser() -> argparse.ArgumentParser:
     ai_test.add_argument("--provider", required=True)
     ai_test.add_argument("--model", default=None,
                          help="model id (default: AUDITOR_AI_MODEL)")
+    ai_review = ai_sub.add_parser(
+        "review",
+        help="W3-B: AI-review ONE finding with the FIXED prompt (local "
+             "providers only until the privacy gate). Exit codes: 0 ok, "
+             "1 provider/response error, 2 usage or unknown review id, "
+             "3 privacy gate")
+    ai_review.add_argument("--report", required=True,
+                           help="path to a report.json")
+    ai_review.add_argument("--review-id", required=True,
+                           help="the finding's review_id (64 hex chars)")
+    ai_review.add_argument("--provider", required=True)
+    ai_review.add_argument("--model", required=True)
+    ai_review.add_argument("--repo", default=None,
+                           help="repository root for the source window "
+                                "(optional)")
+    # deliberately NO prompt option: the prompt is fixed by contract
 
     srv = sub.add_parser("serve",
                          help="open a report.json in a local web explorer (127.0.0.1 only)")
@@ -156,8 +172,12 @@ def _ai(args) -> int:
               "AUDITOR_OPENAI_COMPAT_BASE_URL, AUDITOR_OPENAI_COMPAT_API_KEY).")
         return 0
 
+    if args.ai_command == "review":
+        return _ai_review(args)
+
     if args.ai_command not in ("models", "test"):
-        print("usage: auditor ai {providers,models,test} — see `auditor ai -h`")
+        print("usage: auditor ai {providers,models,test,review} — "
+              "see `auditor ai -h`")
         return 0
     try:
         provider = Provider(args.provider)
@@ -196,6 +216,69 @@ def _ai(args) -> int:
         return 0
     print(f"failed [{result.status}]: {result.message}", file=sys.stderr)
     return 1
+
+
+def _ai_review(args) -> int:
+    """`auditor ai review` — one finding, the fixed prompt, structured JSON
+    out. Exit codes: 0 success; 1 provider or response error; 2 usage error
+    (bad report / unknown review id / unknown provider); 3 privacy gate."""
+    import json as _json
+
+    from auditor.ai import AIError, Provider
+    from auditor.ai.review import (
+        AIReviewRequest,
+        ContextTooLargeError,
+        PrivacyGateError,
+        build_context_pack,
+        run_review,
+    )
+    from auditor.ai.review_store import AIReviewStore, AIReviewStoreError
+    from auditor.ai.transport import RequestsTransport
+    from auditor.web.app import ReportError, load_report
+
+    try:
+        provider = Provider(args.provider)
+    except ValueError:
+        legal = ", ".join(p.value for p in Provider)
+        print(f"error | خطأ: unknown provider (expected one of: {legal})",
+              file=sys.stderr)
+        return 2
+    report_path = Path(args.report)
+    try:
+        report = load_report(report_path)
+    except ReportError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 2
+    repo = Path(args.repo) if args.repo else None
+    if repo is not None and not repo.is_dir():
+        repo = None
+    try:
+        pack = build_context_pack(report, repo, args.review_id)
+    except ContextTooLargeError as e:
+        print(f"failed [context_too_large]: {e}", file=sys.stderr)
+        return 1
+    if pack is None:
+        print("error | خطأ: unknown review id for this report",
+              file=sys.stderr)
+        return 2
+    request = AIReviewRequest(review_id=args.review_id, provider=provider,
+                              model=args.model)
+    try:
+        result = run_review(request, pack, RequestsTransport())
+    except PrivacyGateError as e:
+        print(f"blocked [privacy_gate_required]: {e}", file=sys.stderr)
+        return 3
+    except AIError as e:
+        print(f"failed [{e.code}]: {e}", file=sys.stderr)
+        return 1
+    store = AIReviewStore(
+        report_path.parent / (report_path.stem + ".ai-reviews.json"))
+    try:
+        store.put(result)
+    except AIReviewStoreError as e:
+        print(f"warning: result not stored — {e}", file=sys.stderr)
+    print(_json.dumps(result, ensure_ascii=True, indent=1))
+    return 0
 
 
 def _relativize_diag(diag_dict: dict, root) -> dict:

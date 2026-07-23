@@ -22,6 +22,8 @@ field-*/
 
 # local review sidecars: private reviewer decisions, never published
 *.reviews.json
+# W3-B AI review results (advisory, local-only) — never published
+*.ai-reviews.json
 
 # W1 web UI build artifacts.
 # NOTE: src/auditor/web/static/ is intentionally NOT ignored — the built SPA is

@@ -219,6 +219,16 @@ class AIRequestIn(BaseModel):
     model: str = ""
 
 
+class AIReviewIn(BaseModel):
+    """W3-B: the browser names ONE finding + provider + model — nothing else.
+    No prompt, no source, no api_key, no base_url (extra='forbid')."""
+    model_config = {"extra": "forbid"}
+
+    review_id: str
+    provider: str
+    model: str
+
+
 # ONE probe/models call at a time per process: a second concurrent request
 # gets 409 WITHOUT any outbound connection. Module-level on purpose — the
 # guard covers every app instance in the process.
@@ -531,6 +541,85 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             return _AsciiJSON(out)
         finally:
             _AI_PROBE_LOCK.release()
+
+    # ---- AI single-finding review (W3-B) -------------------------------------
+    # The context pack is built HERE from the loaded report + confined repo
+    # reads; the browser can only name a finding. Local providers only until
+    # the W3-C privacy gate. Results land in a separate git-ignored sidecar.
+    from auditor.ai.review import (
+        AIReviewRequest,
+        ContextTooLargeError,
+        PrivacyGateError,
+        build_context_pack,
+        run_review,
+    )
+    from auditor.ai.review_store import AIReviewStore, AIReviewStoreError
+    from auditor.ai.transport import RequestsTransport
+
+    ai_store = AIReviewStore(
+        report_path.parent / (report_path.stem + ".ai-reviews.json"))
+    _ai_review_inflight: set[str] = set()
+    _ai_review_lock = threading.Lock()
+
+    @app.post("/api/ai/reviews")
+    def ai_review(body: AIReviewIn) -> JSONResponse:
+        provider = _ai_provider(body.provider)
+        if provider is None:
+            return _err(400, "unknown provider")
+        if not body.model.strip():
+            return _err(400, "model is required")
+        if body.review_id not in valid_review_ids:
+            return _err(404, "unknown review id for the loaded report")
+        with _ai_review_lock:
+            if body.review_id in _ai_review_inflight:
+                return _err(409, "an AI review for this finding is already "
+                                 "in flight")
+            _ai_review_inflight.add(body.review_id)
+        try:
+            try:
+                pack = build_context_pack(report, repo, body.review_id)
+            except ContextTooLargeError as e:
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=413)
+            if pack is None:
+                return _err(404, "unknown review id for the loaded report")
+            request = AIReviewRequest(review_id=body.review_id,
+                                      provider=provider,
+                                      model=body.model.strip())
+            try:
+                result = run_review(request, pack, RequestsTransport())
+            except PrivacyGateError as e:
+                return _AsciiJSON({"error": str(e),
+                                   "status": e.code}, status_code=403)
+            except AIError as e:
+                return _AsciiJSON({"provider": provider.value,
+                                   "model": body.model.strip(),
+                                   "status": e.code, "message": str(e)},
+                                  status_code=502)
+            try:
+                ai_store.put(result)
+            except AIReviewStoreError as e:
+                return _err(503, str(e))
+            return _AsciiJSON({**result, "stale": False})
+        finally:
+            with _ai_review_lock:
+                _ai_review_inflight.discard(body.review_id)
+
+    @app.get("/api/ai/reviews/{rid}")
+    def ai_review_get(rid: str) -> JSONResponse:
+        if rid not in valid_review_ids:
+            return _err(404, "unknown review id for the loaded report")
+        try:
+            pack = build_context_pack(report, repo, rid)
+        except ContextTooLargeError:
+            pack = None
+            digest: str | None = ""     # never matches → stored rows are stale
+        else:
+            digest = pack["digest"] if pack else None
+        return _AsciiJSON({"review_id": rid,
+                           "available": ai_store.available,
+                           "error": ai_store.error,
+                           "results": ai_store.for_review_id(rid, digest)})
 
     # Serve the bundled SPA last so /api/* wins. html=True makes "/" return
     # index.html. Mount only if the build exists — the API is usable without it.

@@ -1,11 +1,32 @@
 import { useEffect, useState } from 'react'
-import { Loader2, X } from 'lucide-react'
+import { Loader2, Sparkles, X } from 'lucide-react'
 
-import { SourceUnavailable, deleteReview, fetchSource, levelColor, putReview, sourcePathFor } from '../api'
+import {
+  AIPrivacyGate,
+  SourceUnavailable,
+  deleteReview,
+  fetchAIProviders,
+  fetchAIReview,
+  fetchSource,
+  levelColor,
+  postAIModels,
+  postAIReview,
+  putReview,
+  sourcePathFor,
+} from '../api'
+import { parseModelIds, parseProviders, type AIProviderInfo } from '../ai'
+import {
+  AI_ADVISORY_NOTICE,
+  assessmentTone,
+  parseAIReviewResult,
+  pickStoredResult,
+  type AIReviewResult,
+} from '../aiReview'
 import type { Finding, Review, SourceWindow } from '../types'
 
 type SrcState = 'idle' | 'loading' | 'ok' | 'unavailable' | 'error'
 type RevState = 'idle' | 'saving' | 'saved' | 'error'
+type AIState = 'idle' | 'running' | 'completed' | 'error'
 
 const STATUS_OPTIONS: Array<[string, string]> = [
   ['confirmed', 'Confirmed'],
@@ -37,6 +58,13 @@ export function DetailPanel({
   const [note, setNote] = useState(review?.note ?? '')
   const [revState, setRevState] = useState<RevState>('idle')
   const [revMsg, setRevMsg] = useState('')
+  const [aiProviders, setAIProviders] = useState<AIProviderInfo[]>([])
+  const [aiProvider, setAIProvider] = useState('ollama')
+  const [aiModel, setAIModel] = useState('')
+  const [aiModels, setAIModels] = useState<string[]>([])
+  const [aiState, setAIState] = useState<AIState>('idle')
+  const [aiMsg, setAIMsg] = useState('')
+  const [aiResult, setAIResult] = useState<AIReviewResult | null>(null)
 
   useEffect(() => {
     // re-seed the form whenever another finding (or its saved review) arrives
@@ -96,6 +124,70 @@ export function DetailPanel({
       })
     return () => ctl.abort()
   }, [finding])
+
+  // providers list = LOCAL server metadata (no outbound call on open)
+  useEffect(() => {
+    let alive = true
+    fetchAIProviders()
+      .then((p) => {
+        if (alive) setAIProviders(parseProviders(p))
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // cached AI result for this finding (local sidecar read, no provider call)
+  useEffect(() => {
+    setAIResult(null)
+    setAIState('idle')
+    setAIMsg('')
+    if (!finding.review_id) return
+    let alive = true
+    fetchAIReview(finding.review_id)
+      .then((payload) => {
+        if (!alive) return
+        const stored = pickStoredResult(payload)
+        if (stored) {
+          setAIResult(stored)
+          setAIState('completed')
+        }
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [finding])
+
+  const loadAIModels = async () => {
+    setAIMsg('')
+    try {
+      setAIModels(parseModelIds(await postAIModels(aiProvider)))
+    } catch (e) {
+      setAIMsg(String((e as Error)?.message ?? e))
+    }
+  }
+
+  const runAIReview = async () => {
+    if (!finding.review_id || !aiModel.trim() || aiState === 'running') return
+    setAIState('running')
+    setAIMsg('')
+    try {
+      const raw = await postAIReview(finding.review_id, aiProvider, aiModel.trim())
+      const parsed = parseAIReviewResult(raw)
+      if (!parsed) throw new Error('the server returned an unexpected result shape')
+      setAIResult(parsed)
+      setAIState('completed')
+    } catch (e) {
+      setAIMsg(
+        e instanceof AIPrivacyGate
+          ? `Blocked by the privacy gate: ${e.message}`
+          : String((e as Error)?.message ?? e),
+      )
+      setAIState('error')
+    }
+  }
 
   const showSnippet = srcState !== 'ok' && Boolean(finding.snippet)
 
@@ -228,6 +320,106 @@ export function DetailPanel({
               )}
             </div>
           )}
+          <div className="detail-label">AI Review</div>
+          <div className="ai-box">
+            <div className="ai-notice">{AI_ADVISORY_NOTICE}</div>
+            <div className="ai-controls">
+              <select
+                className="review-select"
+                value={aiProvider}
+                onChange={(e) => {
+                  setAIProvider(e.target.value)
+                  setAIModels([])
+                }}
+                aria-label="AI provider"
+              >
+                {(aiProviders.length
+                  ? aiProviders
+                  : [{ provider: 'ollama', display: 'Ollama', configured: true, key_present: false, locality: 'local' as const }]
+                ).map((p) => (
+                  <option key={p.provider} value={p.provider}>
+                    {p.display}
+                    {p.locality === 'remote' ? ' (blocked until the privacy gate)' : ''}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="review-select ai-model"
+                list="ai-model-options"
+                placeholder="model id"
+                value={aiModel}
+                onChange={(e) => setAIModel(e.target.value)}
+                aria-label="AI model"
+              />
+              <datalist id="ai-model-options">
+                {aiModels.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+              <button className="btn" onClick={loadAIModels} disabled={aiState === 'running'}>
+                Load models
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={runAIReview}
+                disabled={!aiModel.trim() || aiState === 'running'}
+                title="Run the fixed AI review for this finding"
+              >
+                {aiState === 'running' ? (
+                  <>
+                    <Loader2 className="spin" size={13} /> Reviewing…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={13} /> AI Review
+                  </>
+                )}
+              </button>
+            </div>
+            {aiState === 'error' && <div className="review-msg err">{aiMsg}</div>}
+            {aiMsg && aiState !== 'error' && <div className="review-msg err">{aiMsg}</div>}
+            {aiState === 'completed' && aiResult && (
+              <div className="ai-result">
+                {aiResult.stale && (
+                  <div className="ai-stale">
+                    Stale: the finding&apos;s context changed since this review — re-run for a
+                    fresh assessment.
+                  </div>
+                )}
+                <div className="ai-verdict">
+                  <span className={`ai-badge ai-${assessmentTone(aiResult.assessment)}`}>
+                    {aiResult.assessment}
+                  </span>
+                  <span className="ai-conf">confidence: {aiResult.confidence}</span>
+                  <span className="ai-conf">action: {aiResult.suggested_action}</span>
+                </div>
+                <p className="detail-body">{aiResult.summary}</p>
+                {aiResult.evidence.length > 0 && (
+                  <ul className="ai-evidence">
+                    {aiResult.evidence.map((e, i) => (
+                      <li key={i}>
+                        <span className="ai-chip mono">{e.context_id}</span> {e.statement}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {aiResult.missing_context.length > 0 && (
+                  <>
+                    <div className="ai-sub">Missing context</div>
+                    <ul className="ai-evidence">
+                      {aiResult.missing_context.map((m, i) => (
+                        <li key={i}>{m}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                <div className="review-meta">
+                  {aiResult.provider} · {aiResult.model} · {aiResult.prompt_version} ·{' '}
+                  {aiResult.latency_ms} ms · {aiResult.created_at}
+                </div>
+              </div>
+            )}
+          </div>
         </>
       )}
     </section>
