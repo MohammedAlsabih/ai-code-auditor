@@ -14,6 +14,7 @@ import {
 } from './api'
 import { AI_FILTERS, matchesAIFilter, parseAISummary, type AIFilter } from './aiBatch'
 import { AIBatchPanel } from './components/AIBatchPanel'
+import { AIAuditPanel } from './components/AIAuditPanel'
 import { AIProvidersPanel } from './components/AIProvidersPanel'
 import { CoveragePanel } from './components/CoveragePanel'
 import { DetailPanel } from './components/DetailPanel'
@@ -57,7 +58,7 @@ export default function App() {
   const [reviews, setReviews] = useState<Record<string, Review>>({})
   const [reviewsOk, setReviewsOk] = useState(true)
   const [reviewsError, setReviewsError] = useState('')
-  const [tab, setTab] = useState<'findings' | 'rules' | 'coverage' | 'ai'>('findings')
+  const [tab, setTab] = useState<'findings' | 'rules' | 'coverage' | 'ai' | 'audit'>('findings')
 
   // multi-value filters: OR inside a category, AND across categories
   const [query, setQuery] = useState('')
@@ -406,6 +407,12 @@ export default function App() {
         >
           AI Providers
         </button>
+        <button
+          className={`tab ${tab === 'audit' ? 'active' : ''}`}
+          onClick={() => setTab('audit')}
+        >
+          AI Audit
+        </button>
       </nav>
       {tab === 'rules' ? (
         <div className="body">
@@ -423,6 +430,12 @@ export default function App() {
         <div className="body">
           <main className="main">
             <AIProvidersPanel />
+          </main>
+        </div>
+      ) : tab === 'audit' ? (
+        <div className="body">
+          <main className="main">
+            <AIAuditPanel projects={projects} />
           </main>
         </div>
       ) : (

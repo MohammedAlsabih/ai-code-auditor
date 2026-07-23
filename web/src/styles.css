@@ -1105,3 +1105,50 @@ tr.sev-blue td.c-sev {
   .rc-body { flex-direction: column; }
   .rc-detail { flex: 1 1 auto; max-width: none; width: 100%; }
 }
+
+/* W3-E: independent AI Audit tab */
+.audit-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+.audit-projects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.audit-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  min-width: 0;
+}
+.audit-grid {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.audit-table {
+  flex: 2 1 380px;
+  min-width: 0;
+}
+.audit-detail {
+  flex: 1 1 300px;
+  min-width: 0;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.audit-project .mono {
+  overflow-wrap: anywhere;   /* long monorepo roots wrap instead of overflowing */
+  min-width: 0;
+}

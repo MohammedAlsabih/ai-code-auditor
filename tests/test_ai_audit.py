@@ -620,6 +620,93 @@ def test_cli_audit_has_no_prompt_option():
              "--limits", "{}", "--prompt", "hi"])
 
 
+# ---- W3-E2: candidate review API + evaluator + legacy reports ---------------------
+
+def _completed_client(tmp_path, monkeypatch):
+    import time as _time
+    c = _client(tmp_path, monkeypatch, FakeTransport(
+        _reply_for(_pack(tmp_path))))
+    r = c.post("/api/ai/audits", json={
+        "profile": "security", "provider": "ollama", "model": "m",
+        "limits": LIMITS})
+    aid = r.json()["audit_id"]
+    deadline = _time.time() + 15
+    while _time.time() < deadline:
+        st = c.get(f"/api/ai/audits/{aid}").json()
+        if st["state"] not in ("running", "pending"):
+            break
+        _time.sleep(0.05)
+    return c
+
+
+def test_api_candidate_review_flow(tmp_path, monkeypatch):
+    c = _completed_client(tmp_path, monkeypatch)
+    cands = c.get("/api/ai/audit-results").json()["candidates"]
+    assert cands
+    cid = cands[0]["candidate_id"]
+    r = c.put(f"/api/ai/audit-candidates/{cid}",
+              json={"decision": "uncertain", "note": "needs a human look"})
+    assert r.status_code == 200
+    after = c.get("/api/ai/audit-results").json()["candidates"]
+    mine = next(x for x in after if x["candidate_id"] == cid)
+    assert mine["review"]["decision"] == "uncertain"
+    # bad decision + unknown candidate + extra fields all rejected
+    assert c.put(f"/api/ai/audit-candidates/{cid}",
+                 json={"decision": "maybe"}).status_code == 400
+    assert c.put(f"/api/ai/audit-candidates/{'f' * 64}",
+                 json={"decision": "confirmed"}).status_code == 404
+    assert c.put(f"/api/ai/audit-candidates/{cid}",
+                 json={"decision": "confirmed",
+                       "prompt": "x"}).status_code == 422
+
+
+def test_candidate_review_never_touches_static_reviews(tmp_path,
+                                                       monkeypatch):
+    c = _completed_client(tmp_path, monkeypatch)
+    cid = c.get("/api/ai/audit-results").json()["candidates"][0][
+        "candidate_id"]
+    c.put(f"/api/ai/audit-candidates/{cid}",
+          json={"decision": "confirmed", "note": ""})
+    # the HUMAN static-review sidecar was never created, and the static
+    # review API still reports zero reviews
+    assert not (tmp_path / "the-report.reviews.json").exists()
+    assert c.get("/api/reviews").json()["reviews"] == {}
+
+
+def test_old_reports_without_manifest_still_serve(tmp_path, monkeypatch):
+    legacy = {"summary": {}, "projects": [
+        {"language": "python", "root": "svc", "findings": []}]}
+    make_repo(tmp_path)
+    rp = tmp_path / "legacy.json"
+    rp.write_text(json.dumps(legacy), encoding="utf-8")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    c = TestClient(app_mod.create_app(rp, repo_root=tmp_path))
+    assert c.get("/api/health").status_code == 200
+    pv = c.post("/api/ai/audits/preview",
+                json={"profile": "security", "provider": "ollama",
+                      "model": "m"})
+    assert pv.status_code == 200          # no crash on a manifest-less report
+
+
+def test_audit_evaluator_counters(tmp_path, monkeypatch):
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "tools"))
+    import audit_eval as ae
+    c = _completed_client(tmp_path, monkeypatch)
+    cid = c.get("/api/ai/audit-results").json()["candidates"][0][
+        "candidate_id"]
+    c.put(f"/api/ai/audit-candidates/{cid}",
+          json={"decision": "confirmed", "note": ""})
+    out = ae.evaluate_sidecar(tmp_path / "the-report.ai-audit.json")
+    assert out["candidates"] >= 1 and out["decided"] == 1
+    assert out["confirmed_candidate_rate"]["numerator"] == 1
+    assert out["uncertain"] == 0
+    assert "never derive model quality" in out["note"]
+    with pytest.raises(ae.AuditEvalError):
+        ae.evaluate_sidecar(tmp_path / "missing.json")
+
+
 def test_cli_audit_remote_gate_exit_3(tmp_path, monkeypatch, capsys):
     from auditor.cli import main
     monkeypatch.delenv("AUDITOR_AI_REMOTE_REVIEWS", raising=False)
