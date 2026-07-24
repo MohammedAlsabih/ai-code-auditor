@@ -16,6 +16,7 @@ from auditor.ai.consent import (
 )
 from auditor.ai.contract import HttpResponse, Provider
 from auditor.ai.review import (
+    AI_REVIEW_RESPONSE_SCHEMA_V1,
     REVIEW_MAX_TOKENS,
     SYSTEM_INSTRUCTIONS,
     AIReviewRequest,
@@ -172,10 +173,20 @@ def test_local_provider_needs_no_consent(tmp_path):
 
 
 # ---- five-provider request bodies (doc-verified shapes) ---------------------------
+# W3-E3: the review path always passes the review schema + REVIEW_MAX_TOKENS;
+# only the Ollama body consumes the schema (in `format`) and disables
+# thinking. The remote-provider bodies are byte-identical to the pre-W3-E3
+# wire — the schema argument does not alter them.
+
+def _rb(provider):
+    return _review_body(provider, "m", "SYS", "USER",
+                        schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                        max_tokens=REVIEW_MAX_TOKENS)
+
 
 def test_openai_and_xai_responses_body():
     for provider in (Provider.OPENAI, Provider.XAI):
-        body = _review_body(provider, "m", "SYS", "USER")
+        body = _rb(provider)
         assert body == {"model": "m", "instructions": "SYS", "input": "USER",
                         "max_output_tokens": REVIEW_MAX_TOKENS,
                         "temperature": 0, "store": False,
@@ -183,7 +194,7 @@ def test_openai_and_xai_responses_body():
 
 
 def test_anthropic_messages_body():
-    body = _review_body(Provider.ANTHROPIC, "m", "SYS", "USER")
+    body = _rb(Provider.ANTHROPIC)
     assert body == {"model": "m", "max_tokens": REVIEW_MAX_TOKENS,
                     "system": "SYS",
                     "messages": [{"role": "user", "content": "USER"}],
@@ -191,17 +202,18 @@ def test_anthropic_messages_body():
 
 
 def test_ollama_chat_body():
-    body = _review_body(Provider.OLLAMA, "m", "SYS", "USER")
+    body = _rb(Provider.OLLAMA)
     assert body == {"model": "m",
                     "messages": [{"role": "system", "content": "SYS"},
                                  {"role": "user", "content": "USER"}],
-                    "stream": False, "format": "json",
+                    "stream": False, "think": False,
+                    "format": AI_REVIEW_RESPONSE_SCHEMA_V1,
                     "options": {"temperature": 0,
                                 "num_predict": REVIEW_MAX_TOKENS}}
 
 
 def test_compat_chat_completions_body_minimal():
-    body = _review_body(Provider.OPENAI_COMPATIBLE, "m", "SYS", "USER")
+    body = _rb(Provider.OPENAI_COMPATIBLE)
     assert body == {"model": "m",
                     "messages": [{"role": "system", "content": "SYS"},
                                  {"role": "user", "content": "USER"}],

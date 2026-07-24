@@ -49,7 +49,11 @@ def _anthropic_probe(model: str) -> dict[str, Any]:
 
 
 def _ollama_probe(model: str) -> dict[str, Any]:
-    return {"model": model, "messages": _CHAT_MESSAGES, "stream": False}
+    # W3-E3: think:false keeps a reasoning model from spending the probe on a
+    # thinking channel. This stays a TEXT probe (no schema) — it only checks
+    # connectivity and returns free-form assistant text.
+    return {"model": model, "messages": _CHAT_MESSAGES, "stream": False,
+            "think": False}
 
 
 def _compat_probe(model: str) -> dict[str, Any]:

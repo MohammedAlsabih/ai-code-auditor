@@ -57,6 +57,72 @@ MISSING_MAX = 5
 MISSING_MAX_CHARS = 200
 AUDIT_MAX_OUTPUT_TOKENS = 1536
 WINDOW_LINES = 15                    # source window each side of a hint match
+
+# W3-E3: the EXACT audit-result core contract as a JSON Schema, built from
+# the same enum/limit constants parse_audit_reply enforces (no drift). Sent
+# to Ollama in `format` so a thinking model returns the contract, not prose.
+# REQUEST hint only — the server validator (exact keys, legal enums, and the
+# citation check against the piece map's sent spans) stays the sole
+# authority; the schema neither adds a field nor relaxes any check. The
+# outcome<->issues coupling and the span containment are deliberately NOT in
+# the schema; they remain server-side semantic validation.
+AI_AUDIT_RESPONSE_SCHEMA_V1: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["outcome", "issues"],
+    "properties": {
+        "outcome": {"type": "string", "enum": list(AUDIT_OUTCOMES)},
+        "issues": {
+            "type": "array", "maxItems": MAX_ISSUES,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "category", "confidence", "summary",
+                             "evidence", "missing_context",
+                             "suggested_action"],
+                "properties": {
+                    # minLength:1 on every non-enum text mirrors the
+                    # validator (which rejects empty text) so schema-valid
+                    # replies never fail the server for emptiness.
+                    "title": {"type": "string", "minLength": 1,
+                              "maxLength": TITLE_MAX_CHARS},
+                    "category": {"type": "string",
+                                 "enum": list(AUDIT_CATEGORIES)},
+                    "confidence": {"type": "string",
+                                   "enum": list(CONFIDENCES)},
+                    "summary": {"type": "string", "minLength": 1,
+                                "maxLength": SUMMARY_MAX_CHARS},
+                    "evidence": {
+                        "type": "array",
+                        "minItems": EVIDENCE_MIN, "maxItems": EVIDENCE_MAX,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["context_id", "line_start",
+                                         "line_end", "statement"],
+                            "properties": {
+                                "context_id": {"type": "string",
+                                               "minLength": 1},
+                                "line_start": {"type": "integer"},
+                                "line_end": {"type": "integer"},
+                                "statement": {"type": "string",
+                                              "minLength": 1,
+                                              "maxLength": STATEMENT_MAX_CHARS},
+                            },
+                        },
+                    },
+                    "missing_context": {
+                        "type": "array", "maxItems": MISSING_MAX,
+                        "items": {"type": "string", "minLength": 1,
+                                  "maxLength": MISSING_MAX_CHARS},
+                    },
+                    "suggested_action": {"type": "string",
+                                         "enum": list(SUGGESTED_ACTIONS)},
+                },
+            },
+        },
+    },
+}
 PER_FILE_BYTES = 4 * 1024            # per source piece
 MANIFEST_BYTES = 2 * 1024
 
@@ -424,7 +490,10 @@ def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
     try:
         resp = transport.request(
             "POST", config.base_url + spec.probe_path, headers,
-            _review_body(provider, model, system, user), review_timeout(env))
+            _review_body(provider, model, system, user,
+                         schema=AI_AUDIT_RESPONSE_SCHEMA_V1,
+                         max_tokens=AUDIT_MAX_OUTPUT_TOKENS),
+            review_timeout(env))
     except TransportFailure as e:
         raise AIError(e.code) from None
     latency_ms = int((time.perf_counter() - started) * 1000)

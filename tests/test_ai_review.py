@@ -260,7 +260,11 @@ def test_prompt_is_fixed_and_carries_no_user_text(tmp_path):
     assert msgs[1]["role"] == "user"
     assert msgs[1]["content"] == "CONTEXT PIECES:\n" + pack["canonical"]
     assert t.calls[0]["body"].get("stream") is False
-    assert t.calls[0]["body"].get("format") == "json"
+    # W3-E3: format now carries the full review JSON Schema (not "json"),
+    # and thinking is disabled so a reasoning model returns the contract
+    fmt = t.calls[0]["body"].get("format")
+    assert isinstance(fmt, dict) and fmt["type"] == "object"
+    assert t.calls[0]["body"].get("think") is False
     assert "tools" not in t.calls[0]["body"]
 
 

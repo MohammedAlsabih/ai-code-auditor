@@ -614,6 +614,53 @@ def parse_review_reply(text: str,
             "suggested_action": data["suggested_action"]}
 
 
+# ---- structured-output JSON Schema (W3-E3) --------------------------------------
+# The EXACT AIReviewResult v1 core contract as a JSON Schema, built from the
+# same enum/limit constants parse_review_reply enforces so the two can never
+# drift. Sent to Ollama in `format` (docs.ollama.com/capabilities/
+# structured-outputs) so a thinking model returns the contract shape instead
+# of prose. This is a REQUEST hint only: the server validator (exact keys,
+# legal enums, sent context_ids) remains the sole authority — the schema does
+# not add, remove, or relax any field or check.
+
+AI_REVIEW_RESPONSE_SCHEMA_V1: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["assessment", "confidence", "summary", "evidence",
+                 "missing_context", "suggested_action"],
+    "properties": {
+        "assessment": {"type": "string", "enum": list(ASSESSMENTS)},
+        "confidence": {"type": "string", "enum": list(CONFIDENCES)},
+        # minLength:1 mirrors the validator, which rejects empty text — so a
+        # reply that satisfies the schema can never fail the server for
+        # emptiness (no schema/validator gap).
+        "summary": {"type": "string", "minLength": 1,
+                    "maxLength": SUMMARY_MAX_CHARS},
+        "evidence": {
+            "type": "array",
+            "minItems": EVIDENCE_MIN, "maxItems": EVIDENCE_MAX,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["context_id", "statement"],
+                "properties": {
+                    "context_id": {"type": "string", "minLength": 1},
+                    "statement": {"type": "string", "minLength": 1,
+                                  "maxLength": STATEMENT_MAX_CHARS},
+                },
+            },
+        },
+        "missing_context": {
+            "type": "array", "maxItems": MISSING_MAX,
+            "items": {"type": "string", "minLength": 1,
+                      "maxLength": MISSING_MAX_CHARS},
+        },
+        "suggested_action": {"type": "string",
+                             "enum": list(SUGGESTED_ACTIONS)},
+    },
+}
+
+
 # ---- provider call ---------------------------------------------------------------
 # Request shapes verified against the providers' current official docs
 # (2026-07): OpenAI Responses API (model/instructions/input/
@@ -621,37 +668,46 @@ def parse_review_reply(text: str,
 # openai-python api.md); Anthropic Messages (model/max_tokens/system/
 # messages/temperature — platform.claude.com/docs/en/api/messages); xAI
 # Responses (input/max_output_tokens/text.format/store — docs.x.ai/docs/
-# api-reference); Ollama chat (messages/stream/format/options — github.com/
-# ollama/ollama/docs/api.md); OpenAI-compatible stays least-common-
-# denominator Chat Completions. No tools, no web search, no streaming, no
-# retries; temperature 0 and store=false wherever the provider supports it;
-# structured JSON output where the provider supports it.
+# api-reference); Ollama chat (messages/stream/think/format/options —
+# docs.ollama.com/api/chat + structured-outputs + thinking); OpenAI-
+# compatible stays least-common-denominator Chat Completions. No tools, no
+# web search, no streaming, no retries; temperature 0 and store=false
+# wherever the provider supports it; structured JSON output where supported.
 
 def _review_body(provider: Provider, model: str, system: str,
-                 user: str) -> dict[str, Any]:
+                 user: str, *, schema: dict[str, Any],
+                 max_tokens: int) -> dict[str, Any]:
+    """Build the ONE request body for a fixed-contract call. `schema` is the
+    contract's JSON Schema and `max_tokens` is the contract's own output cap
+    (so the wire number always matches the preview/limits budget). Only
+    Ollama carries the full schema in `format` and disables thinking; the
+    remote providers keep their documented json_object shape unchanged."""
     if provider in (Provider.OPENAI, Provider.XAI):
         return {"model": model, "instructions": system, "input": user,
-                "max_output_tokens": REVIEW_MAX_TOKENS, "temperature": 0,
+                "max_output_tokens": max_tokens, "temperature": 0,
                 "store": False,
                 "text": {"format": {"type": "json_object"}}}
     if provider is Provider.ANTHROPIC:
-        return {"model": model, "max_tokens": REVIEW_MAX_TOKENS,
+        return {"model": model, "max_tokens": max_tokens,
                 "system": system,
                 "messages": [{"role": "user", "content": user}],
                 "temperature": 0}
     if provider is Provider.OLLAMA:
+        # think:false so a reasoning model spends the budget on the answer,
+        # not on a thinking channel that leaves content empty; format carries
+        # the full schema so the reply is the contract, not prose.
         return {"model": model,
                 "messages": [{"role": "system", "content": system},
                              {"role": "user", "content": user}],
-                "stream": False, "format": "json",
+                "stream": False, "think": False, "format": schema,
                 "options": {"temperature": 0,
-                            "num_predict": REVIEW_MAX_TOKENS}}
+                            "num_predict": max_tokens}}
     # openai_compatible: required Chat Completions fields only — no
     # response_format, which compatible servers may not implement
     return {"model": model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
-            "max_tokens": REVIEW_MAX_TOKENS, "temperature": 0}
+            "max_tokens": max_tokens, "temperature": 0}
 
 
 def run_review(request: AIReviewRequest, pack: dict[str, Any],
@@ -680,7 +736,9 @@ def run_review(request: AIReviewRequest, pack: dict[str, Any],
     try:
         resp = transport.request(
             "POST", config.base_url + spec.probe_path, headers,
-            _review_body(request.provider, request.model, system, user),
+            _review_body(request.provider, request.model, system, user,
+                         schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                         max_tokens=REVIEW_MAX_TOKENS),
             review_timeout(env))
     except TransportFailure as e:
         raise AIError(e.code) from None
