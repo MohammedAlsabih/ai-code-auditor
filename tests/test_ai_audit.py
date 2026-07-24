@@ -81,18 +81,56 @@ def _reply(outcome="issues_found", issues=None):
     return {"outcome": outcome, "issues": issues or []}
 
 
+def _smart_reply(json_body):
+    """W3-E4A1: build a per-request reply that satisfies the category
+    contract — it reads the query piece's required_category and the first
+    src piece's first sent span from the outgoing request, so a default
+    FakeTransport emits an issue with the RIGHT category and a valid
+    citation for whatever query/unit is on the wire (like an obedient
+    model would)."""
+    content = json_body["messages"][-1]["content"]
+    canonical = content.split("\n", 1)[1] if "\n" in content else content
+    pieces = json.loads(canonical)
+    cat = "other"
+    cid = None
+    span = None
+    for p in pieces:
+        if p.get("context_id") == "query":
+            cat = p.get("required_category", "other")
+        elif str(p.get("context_id", "")).startswith("src:") and cid is None:
+            cid = p["context_id"]
+            span = p["spans"][0]
+    if cid is None:
+        return {"outcome": "no_issue_observed", "issues": []}
+    return {"outcome": "issues_found", "issues": [{
+        "title": "issue", "category": cat, "confidence": "medium",
+        "summary": "a conclusion about the sent context",
+        "evidence": [{"context_id": cid, "line_start": span[0],
+                      "line_end": span[0], "statement": "evidence"}],
+        "missing_context": [], "suggested_action": "inspect"}]}
+
+
 class FakeTransport:
     def __init__(self, reply_obj=None, raw=None, status=200):
         self.calls = []
-        self._raw = raw if raw is not None else json.dumps(
-            reply_obj if reply_obj is not None else _reply())
+        # None reply_obj + None raw => "smart" mode: the reply is built per
+        # request to satisfy the query's required_category + a valid citation
+        self._reply_obj = reply_obj
+        self._raw = raw
+        self._smart = reply_obj is None and raw is None
         self._status = status
 
     def request(self, method, url, headers, json_body, timeout):
         self.calls.append({"url": url, "headers": headers,
                            "body": json_body})
+        if self._raw is not None:
+            content = self._raw
+        elif self._smart:
+            content = json.dumps(_smart_reply(json_body))
+        else:
+            content = json.dumps(self._reply_obj)
         return HttpResponse(self._status, json.dumps(
-            {"message": {"role": "assistant", "content": self._raw}})
+            {"message": {"role": "assistant", "content": content}})
             .encode("utf-8"))
 
 

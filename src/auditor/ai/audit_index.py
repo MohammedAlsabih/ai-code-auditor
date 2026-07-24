@@ -79,6 +79,7 @@ class RepositoryAuditIndex:
         self.files: list[IndexedFile] = []
         self.skipped: dict[str, int] = {}
         self.accounting: dict[str, QueryAccounting] = {}
+        self._folded_hints: dict[tuple[str, int, str], tuple[str, ...]] = {}
         self._build()
 
     # ---- build -----------------------------------------------------------------
@@ -179,7 +180,10 @@ class RepositoryAuditIndex:
         matches. Only files with REAL hint evidence qualify — no filler."""
         acct = self.accounting.setdefault(
             f"{project}::{query.id}", QueryAccounting())
-        scored: list[tuple[float, str, IndexedFile, list[int]]] = []
+        # (distinct-marker count, path score, evidence-line count, rel path,
+        #  file, matched line numbers)
+        scored: list[tuple[int, float, int, str, IndexedFile,
+                           list[int]]] = []
         for f in self.files:
             if f.project != project or f.language == "manifest":
                 continue
@@ -187,21 +191,50 @@ class RepositoryAuditIndex:
                 acct.skip("language not covered by query")
                 continue
             acct.eligible_files += 1
-            path_l = f.rel.lower()
-            score = sum(2.0 for h in query.path_hints if h in path_l)
+            # W3-E4A1: Unicode-safe, case-INSENSITIVE matching (casefold) for
+            # both path and symbol hints — a lowercase hint like "password"
+            # must match "Password=" in a connection string. Hints are
+            # casefolded once at module import.
+            path_cf = f.rel.casefold()
+            symbol_hints = self._pf(query, "symbol")
+            path_score = sum(2.0 for h in self._pf(query, "path")
+                             if h in path_cf)
             match_lines: list[int] = []
+            matched_hints: set[str] = set()
             for n, line in enumerate(f.text.splitlines(), start=1):
                 if len(match_lines) >= _MATCH_SCAN_CAP:
                     break
-                if any(h in line for h in query.symbol_hints):
+                line_cf = line.casefold()
+                hits = [h for h in symbol_hints if h in line_cf]
+                if hits:
                     match_lines.append(n)
-            score += float(len(match_lines))
+                    matched_hints.update(hits)
             if not match_lines:
                 continue                    # no structural evidence — never filler
-            scored.append((score, f.rel, f, match_lines))
-        scored.sort(key=lambda t: (-t[0], t[1]))
+            # the STRONGEST evidence leads. Diversity of DISTINCT symbol
+            # markers is the primary signal — a file that hits several
+            # different credential markers (a literal Password=, a driver
+            # call, a Host=) is stronger evidence than one that repeats a
+            # single generic marker on many lines. Then the path-hint score,
+            # then how many lines carry evidence, then the path (stable). A
+            # file named like a config but with no real markers can never
+            # outrank a file that actually carries the evidence.
+            scored.append((len(matched_hints), path_score, len(match_lines),
+                           f.rel, f, match_lines))
+        scored.sort(key=lambda t: (-t[0], -t[1], -t[2], t[3]))
         top = scored[:MAX_CANDIDATES_PER_QUERY]
         acct.candidate_files = len(top)
         if len(scored) > len(top):
             acct.skip("ranked below candidate cap", len(scored) - len(top))
-        return [(f, lines) for _, _, f, lines in top]
+        return [(f, lines) for _, _, _, _, f, lines in top]
+
+    def _pf(self, query: "AuditQuery", kind: str) -> tuple[str, ...]:
+        """Casefolded hints for `query`, computed once and cached. kind is
+        'path' or 'symbol'."""
+        key = (query.id, query.query_version, kind)
+        cached = self._folded_hints.get(key)
+        if cached is None:
+            raw = query.path_hints if kind == "path" else query.symbol_hints
+            cached = tuple(h.casefold() for h in raw)
+            self._folded_hints[key] = cached
+        return cached
