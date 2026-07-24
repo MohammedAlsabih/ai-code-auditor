@@ -1,17 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, TriangleAlert } from 'lucide-react'
+import { ArrowLeft, Loader2, TriangleAlert } from 'lucide-react'
 
 import {
   ErrorConfirmationRequired,
   aggregate,
   fetchAIReviewsSummary,
+  fetchLibrarySession,
   fetchReport,
   fetchReviews,
   normalizePathFilter,
   pathFilterMatches,
   putReviewBatch,
+  setControlToken,
+  setReportBase,
   sourcePathFor,
 } from './api'
+import { parseSession } from './library'
+import { ProjectsPanel } from './components/ProjectsPanel'
 import { AI_FILTERS, matchesAIFilter, parseAISummary, type AIFilter } from './aiBatch'
 import { AIBatchPanel } from './components/AIBatchPanel'
 import { AIAuditPanel } from './components/AIAuditPanel'
@@ -51,7 +56,10 @@ function toggleSet(set: Set<string>, value: string): Set<string> {
   return next
 }
 
-export default function App() {
+function ReportExplorer({ onBack, contextLabel }: {
+  onBack?: () => void
+  contextLabel?: string
+}) {
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Finding | null>(null)
@@ -374,6 +382,15 @@ export default function App() {
 
   return (
     <div className="app">
+      {onBack && (
+        <div className="lib-backbar">
+          <button className="btn lib-back" onClick={onBack}
+            title="Back to the project library">
+            <ArrowLeft size={13} /> Library
+          </button>
+          {contextLabel && <span className="lib-ctx mono">{contextLabel}</span>}
+        </div>
+      )}
       <TopBar
         summary={report.summary}
         target={report.target}
@@ -565,5 +582,65 @@ export default function App() {
         </div>
       )}
     </div>
+  )
+}
+
+// ---- W4-A2: mode root ----------------------------------------------------------------
+// Classic serve mode renders the explorer exactly as before (report base '',
+// no token). Library mode shows the Projects screen first; opening a report
+// mounts a FRESH explorer bound to that report's own backend context, so two
+// reports can never mix findings, reviews, or AI sidecars. Going back keeps
+// the library filters (they live here, not in the panel).
+export default function App() {
+  const [mode, setMode] = useState<'detect' | 'serve' | 'library'>('detect')
+  const [open, setOpen] = useState<{ rid: string; name: string } | null>(null)
+  const [libQuery, setLibQuery] = useState('')
+  const [libState, setLibState] = useState('all')
+
+  useEffect(() => {
+    fetchLibrarySession().then((raw) => {
+      const session = parseSession(raw)
+      if (session) {
+        setControlToken(session.token)
+        setMode('library')
+      } else {
+        setMode('serve')
+      }
+    })
+  }, [])
+
+  if (mode === 'detect') {
+    return (
+      <div className="loading">
+        <Loader2 className="spin" size={18} /> Connecting…
+      </div>
+    )
+  }
+  if (mode === 'serve') return <ReportExplorer />
+  if (open === null) {
+    return (
+      <div className="app">
+        <header className="lib-head">
+          <strong>AI Code Auditor — Project Library</strong>
+        </header>
+        <ProjectsPanel
+          query={libQuery}
+          onQuery={setLibQuery}
+          stateFilter={libState}
+          onStateFilter={setLibState}
+          onOpenReport={(rid, name) => {
+            setReportBase(`/api/library/reports/${rid}`)
+            setOpen({ rid, name })
+          }}
+        />
+      </div>
+    )
+  }
+  return (
+    <ReportExplorer
+      key={open.rid}
+      contextLabel={open.name}
+      onBack={() => setOpen(null)}
+    />
   )
 }

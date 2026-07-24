@@ -1152,3 +1152,271 @@ tr.sev-blue td.c-sev {
   overflow-wrap: anywhere;   /* long monorepo roots wrap instead of overflowing */
   min-width: 0;
 }
+
+/* ---- W4-A2: Project Library ---------------------------------------------------- */
+/* Dense, functional table screen. No hero, no nested cards. Fits 1280 and
+   375 without horizontal page overflow (the table scrolls inside itself). */
+
+.lib-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.projects-panel {
+  padding: 10px 14px;
+  overflow-x: auto;
+  flex: 1;
+  min-width: 0;
+}
+
+.lib-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lib-search {
+  min-width: 160px;
+  flex: 1 1 160px;
+  max-width: 320px;
+}
+
+.lib-count {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.input {
+  background: var(--bg-input, var(--bg));
+  border: 1px solid var(--border);
+  color: inherit;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 13px;
+}
+
+.muted { color: var(--muted); }
+.link {
+  background: none;
+  border: none;
+  color: var(--accent, #4ea1ff);
+  cursor: pointer;
+  padding: 0;
+  font-size: 13px;
+  text-align: left;
+}
+.link:hover { text-decoration: underline; }
+
+.icon-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  padding: 3px 5px;
+  line-height: 0;
+}
+.icon-btn:hover { border-color: var(--border); }
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
+.icon-btn.danger:hover { color: #e5484d; border-color: #e5484d; }
+
+.btn-danger-outline {
+  border: 1px solid #e5484d;
+  color: #e5484d;
+  background: none;
+}
+
+.lib-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+.lib-banner-error {
+  border: 1px solid #e5484d66;
+  background: #e5484d14;
+}
+
+.lib-empty {
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 28px 16px;
+  text-align: center;
+  max-width: 520px;
+  margin: 40px auto;
+}
+
+.lib-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  min-width: 860px; /* dense table scrolls inside .projects-panel on 375px */
+}
+.lib-table th,
+.lib-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.lib-table th { color: var(--muted); font-weight: 600; }
+.lib-table td.num, .lib-table th.num { text-align: right; }
+.lib-row.open td { background: var(--bg-hover, rgba(128, 128, 128, 0.06)); }
+
+.lib-name { max-width: 260px; }
+.lib-name .lib-loc {
+  display: block;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lib-badge {
+  font-size: 10.5px;
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 6px;
+}
+.lib-badge-warn { background: #f5a52333; color: #b97d10; }
+
+.lib-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.lib-state-running, .lib-state-pending { color: #4ea1ff; }
+.lib-state-completed { color: #2f9e44; }
+.lib-state-failed { color: #e5484d; }
+.lib-state-canceled, .lib-state-interrupted { color: var(--muted); }
+.lib-err {
+  display: block;
+  color: #e5484d;
+  font-size: 11px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-verdict {
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.verdict-pass { background: #2f9e4433; color: #2f9e44; }
+.verdict-review { background: #f5a52333; color: #b97d10; }
+.verdict-block { background: #e5484d33; color: #e5484d; }
+.verdict-unknown { background: var(--border); color: var(--muted); }
+
+.lib-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.lib-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.lib-reports-row td { padding: 8px 12px 12px 24px; }
+.lib-subtable {
+  width: auto;
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.lib-subtable th, .lib-subtable td {
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.lib-subtable td.num, .lib-subtable th.num { text-align: right; }
+.lib-del-src { margin-top: 8px; font-size: 12px; }
+
+/* back bar shown above the explorer in library mode */
+.lib-backbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.lib-back { display: inline-flex; align-items: center; gap: 5px; }
+.lib-ctx {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* add-project modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 60px 12px 12px;
+  z-index: 50;
+}
+.modal {
+  background: var(--bg, #fff);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 460px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-tabs { padding: 0 12px; }
+.modal-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.field > span { color: var(--muted); }
+.field .input { width: 100%; box-sizing: border-box; }
+.lib-field-error {
+  color: #e5484d;
+  font-size: 12px;
+  border: 1px solid #e5484d55;
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+.lib-note { font-size: 11.5px; margin: 0; }
+
+@media (max-width: 480px) {
+  .lib-toolbar { gap: 6px; }
+  .lib-count { display: none; }
+  .modal { max-width: 100%; }
+}

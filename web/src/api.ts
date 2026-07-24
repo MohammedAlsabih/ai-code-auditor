@@ -1,13 +1,44 @@
 import type { Coverage, Finding, Report, Review, ReviewsResponse, SourceWindow } from './types'
 
+// ---- W4-A2: explicit report context + library control token -------------------------
+// In classic serve mode the base is '' and the token is unset — every request
+// is byte-identical to before. In Library mode the App sets the base to
+// /api/library/reports/<rid> before mounting the explorer (each report gets
+// its own backend context) and attaches the control token to every mutating
+// request (the server refuses them without it).
+let reportBase = ''
+let controlToken = ''
+
+export function setReportBase(base: string): void {
+  reportBase = base
+}
+
+export function setControlToken(token: string): void {
+  controlToken = token
+}
+
+export const CONTROL_HEADER = 'X-Auditor-Control'
+
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const merged: RequestInit = { ...init }
+  if (controlToken && method !== 'GET' && method !== 'HEAD') {
+    merged.headers = { ...(init?.headers as Record<string, string>),
+      [CONTROL_HEADER]: controlToken }
+  }
+  // library endpoints are server-global; report endpoints get the base
+  const target = path.startsWith('/api/library/') ? path : `${reportBase}${path}`
+  return fetch(target, merged)
+}
+
 export async function fetchCoverage(): Promise<Coverage> {
-  const res = await fetch('/api/coverage')
+  const res = await apiFetch('/api/coverage')
   if (!res.ok) throw new Error(`coverage request failed (HTTP ${res.status})`)
   return res.json()
 }
 
 export async function fetchReport(): Promise<Report> {
-  const res = await fetch('/api/report')
+  const res = await apiFetch('/api/report')
   if (!res.ok) throw new Error(`report request failed (HTTP ${res.status})`)
   return res.json()
 }
@@ -35,7 +66,7 @@ export async function fetchSource(
   signal?: AbortSignal,
 ): Promise<SourceWindow> {
   const q = `path=${encodeURIComponent(path)}&line=${line}`
-  const res = await fetch(`/api/source?${q}`, { signal })
+  const res = await apiFetch(`/api/source?${q}`, { signal })
   const body = await res.json().catch(() => ({}))
   if (res.status === 409) throw new SourceUnavailable(body.error ?? 'source unavailable')
   if (!res.ok) throw new Error(body.error ?? `source request failed (HTTP ${res.status})`)
@@ -71,7 +102,7 @@ export function aggregate(report: Report): Finding[] {
 }
 
 export async function fetchReviews(): Promise<ReviewsResponse> {
-  const res = await fetch('/api/reviews')
+  const res = await apiFetch('/api/reviews')
   if (!res.ok) throw new Error(`reviews request failed (HTTP ${res.status})`)
   return res.json()
 }
@@ -81,7 +112,7 @@ export async function putReview(
   status: string,
   note: string,
 ): Promise<Review> {
-  const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, {
+  const res = await apiFetch(`/api/reviews/${encodeURIComponent(rid)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status, note }),
@@ -112,7 +143,7 @@ export async function putReviewBatch(
   note: string,
   confirmError: boolean,
 ): Promise<BatchResult> {
-  const res = await fetch('/api/review-batch', {
+  const res = await apiFetch('/api/review-batch', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -152,13 +183,13 @@ export function pathFilterMatches(repoRelative: string, filter: string): boolean
 // ONLY calls that reach a provider, and only on an explicit click.
 
 export async function fetchAIProviders(): Promise<unknown> {
-  const res = await fetch('/api/ai/providers')
+  const res = await apiFetch('/api/ai/providers')
   if (!res.ok) throw new Error(`providers request failed (HTTP ${res.status})`)
   return res.json()
 }
 
 export async function postAIModels(provider: string): Promise<unknown> {
-  const res = await fetch('/api/ai/models', {
+  const res = await apiFetch('/api/ai/models', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider }),
@@ -177,7 +208,7 @@ export interface AITestResult {
 }
 
 export async function postAITest(provider: string, model: string): Promise<AITestResult> {
-  const res = await fetch('/api/ai/test', {
+  const res = await apiFetch('/api/ai/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider, model }),
@@ -215,7 +246,7 @@ export async function postAIConsentPreview(
   provider: string,
   model: string,
 ): Promise<AIConsentPreview> {
-  const res = await fetch('/api/ai/consent-preview', {
+  const res = await apiFetch('/api/ai/consent-preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ review_ids: reviewIds, provider, model }),
@@ -240,7 +271,7 @@ export async function postAIReview(
   model: string,
   consentToken = '',
 ): Promise<unknown> {
-  const res = await fetch('/api/ai/reviews', {
+  const res = await apiFetch('/api/ai/reviews', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -266,7 +297,7 @@ export async function postAIReview(
 }
 
 export async function fetchAIReview(reviewId: string): Promise<unknown> {
-  const res = await fetch(`/api/ai/reviews/${encodeURIComponent(reviewId)}`)
+  const res = await apiFetch(`/api/ai/reviews/${encodeURIComponent(reviewId)}`)
   if (!res.ok) throw new Error(`AI review lookup failed (HTTP ${res.status})`)
   return res.json()
 }
@@ -292,7 +323,7 @@ export async function postAIBatchPreview(
   model: string,
 ): Promise<unknown> {
   return aiJson(
-    await fetch('/api/ai/batches/preview', {
+    await apiFetch('/api/ai/batches/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ review_ids: reviewIds, provider, model }),
@@ -314,7 +345,7 @@ export async function postAIBatch(
   consentToken = '',
 ): Promise<unknown> {
   return aiJson(
-    await fetch('/api/ai/batches', {
+    await apiFetch('/api/ai/batches', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -329,17 +360,17 @@ export async function postAIBatch(
 }
 
 export async function fetchAIBatch(batchId: string): Promise<unknown> {
-  return aiJson(await fetch(`/api/ai/batches/${encodeURIComponent(batchId)}`))
+  return aiJson(await apiFetch(`/api/ai/batches/${encodeURIComponent(batchId)}`))
 }
 
 export async function cancelAIBatch(batchId: string): Promise<void> {
   await aiJson(
-    await fetch(`/api/ai/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
+    await apiFetch(`/api/ai/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   )
 }
 
 export async function fetchAIReviewsSummary(): Promise<unknown> {
-  const res = await fetch('/api/ai/reviews')
+  const res = await apiFetch('/api/ai/reviews')
   if (!res.ok) throw new Error(`AI summary failed (HTTP ${res.status})`)
   return res.json()
 }
@@ -353,7 +384,7 @@ export async function postAIAuditPreview(
   projects: string[],
 ): Promise<unknown> {
   return aiJson(
-    await fetch('/api/ai/audits/preview', {
+    await apiFetch('/api/ai/audits/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile, provider, model, projects }),
@@ -370,7 +401,7 @@ export async function postAIAudit(
   consentToken = '',
 ): Promise<unknown> {
   return aiJson(
-    await fetch('/api/ai/audits', {
+    await apiFetch('/api/ai/audits', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -386,17 +417,17 @@ export async function postAIAudit(
 }
 
 export async function fetchAIAudit(auditId: string): Promise<unknown> {
-  return aiJson(await fetch(`/api/ai/audits/${encodeURIComponent(auditId)}`))
+  return aiJson(await apiFetch(`/api/ai/audits/${encodeURIComponent(auditId)}`))
 }
 
 export async function cancelAIAudit(auditId: string): Promise<void> {
   await aiJson(
-    await fetch(`/api/ai/audits/${encodeURIComponent(auditId)}/cancel`, { method: 'POST' }),
+    await apiFetch(`/api/ai/audits/${encodeURIComponent(auditId)}/cancel`, { method: 'POST' }),
   )
 }
 
 export async function fetchAIAuditResults(): Promise<unknown> {
-  return aiJson(await fetch('/api/ai/audit-results'))
+  return aiJson(await apiFetch('/api/ai/audit-results'))
 }
 
 export async function putAICandidateReview(
@@ -405,7 +436,7 @@ export async function putAICandidateReview(
   note: string,
 ): Promise<unknown> {
   return aiJson(
-    await fetch(`/api/ai/audit-candidates/${encodeURIComponent(candidateId)}`, {
+    await apiFetch(`/api/ai/audit-candidates/${encodeURIComponent(candidateId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ decision, note }),
@@ -414,9 +445,97 @@ export async function putAICandidateReview(
 }
 
 export async function deleteReview(rid: string): Promise<void> {
-  const res = await fetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/reviews/${encodeURIComponent(rid)}`, { method: 'DELETE' })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.error ?? `clear failed (HTTP ${res.status})`)
   }
+}
+
+// ---- W4-A2: Library mode API -------------------------------------------------------
+// All mutating calls carry the control token via apiFetch automatically.
+
+async function libJson(res: Response): Promise<unknown> {
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(
+      (body as { error?: string }).error ?? `request failed (HTTP ${res.status})`)
+  }
+  return body
+}
+
+export async function fetchLibrarySession(): Promise<unknown | null> {
+  try {
+    const res = await fetch('/api/library/session')
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+export async function fetchLibraryCapabilities(): Promise<unknown> {
+  return libJson(await apiFetch('/api/library/capabilities'))
+}
+
+export async function fetchLibraryProjects(): Promise<unknown> {
+  return libJson(await apiFetch('/api/library/projects'))
+}
+
+export async function addLibraryProject(
+  body: { kind: string; name?: string; path?: string; url?: string },
+): Promise<unknown> {
+  return libJson(await apiFetch('/api/library/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }))
+}
+
+export async function removeLibraryProject(pid: string): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/projects/${encodeURIComponent(pid)}?confirm=true`,
+    { method: 'DELETE' }))
+}
+
+export async function deleteLibrarySource(pid: string): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/projects/${encodeURIComponent(pid)}/delete-source`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    }))
+}
+
+export async function startLibraryScan(
+  pid: string, online: boolean, semgrep: boolean,
+): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/projects/${encodeURIComponent(pid)}/scans`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ online, semgrep }),
+    }))
+}
+
+export async function fetchLibraryScan(jid: string): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/scans/${encodeURIComponent(jid)}`))
+}
+
+export async function cancelLibraryScan(jid: string): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/scans/${encodeURIComponent(jid)}/cancel`,
+    { method: 'POST' }))
+}
+
+export async function fetchLibraryReports(pid: string): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/projects/${encodeURIComponent(pid)}/reports`))
+}
+
+export async function deleteLibraryReport(rid: string): Promise<unknown> {
+  return libJson(await apiFetch(
+    `/api/library/reports/${encodeURIComponent(rid)}?confirm=true`,
+    { method: 'DELETE' }))
 }
