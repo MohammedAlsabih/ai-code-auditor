@@ -74,7 +74,7 @@ def test_c1_production_guard_comment_does_not_change_level():
 # ═════ 2. EF parameterizing sinks clear P005 ════════════════════════════════════
 
 def test_c1_execute_sql_interpolated_is_parameterized():
-    # the Sample TaskComputedStateTests shape
+    # the sample TaskComputedStateTests shape
     sf = _cs('class A { async Task F(DbContext ctx, object ts, int id) {\n'
              '  await ctx.Database.ExecuteSqlInterpolatedAsync('
              '$"UPDATE tasks SET created_at = {ts} WHERE id = {id}");\n'

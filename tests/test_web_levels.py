@@ -219,8 +219,8 @@ def test_error_gate_works_on_legacy_and_new_reports(tmp_path):
         _batch(c, [rid], "unreviewed")
 
 
-@pytest.mark.skipif(not LOCAL_REPORT.exists(), reason="Sample report not on this machine")
-def test_sample_legacy_report_shows_2_error_77_warning_25_note():
+@pytest.mark.skipif(not LOCAL_REPORT.exists(), reason="local report not on this machine")
+def test_local_legacy_report_shows_2_error_77_warning_25_note():
     c = TestClient(create_app(LOCAL_REPORT))
     h = c.get("/api/health").json()
     assert h["level_counts"] == {"error": 2, "warning": 77, "note": 25}

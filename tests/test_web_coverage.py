@@ -296,8 +296,8 @@ def test_coverage_endpoint_serves_payload(tmp_path):
     assert c.get("/api/source", params={"path": "x.py", "line": 1}).status_code in (400, 403, 409)
 
 
-@pytest.mark.skipif(not LOCAL_REPORT.exists(), reason="Sample report not on this machine")
-def test_sample_report_coverage_evidence():
+@pytest.mark.skipif(not LOCAL_REPORT.exists(), reason="local report not on this machine")
+def test_local_report_coverage_evidence():
     report = json.loads(LOCAL_REPORT.read_text(encoding="utf-8"))
     cov = build_coverage(report)
     assert len(cov["projects"]) == 3

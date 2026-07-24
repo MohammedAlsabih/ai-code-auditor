@@ -227,7 +227,7 @@ def test_source_max_bytes_matches_scanner_cap():
 
 
 def test_nested_project_root_uses_repo_relative_path(tmp_path):
-    """Monorepo case (the Sample layout): finding files are PROJECT-relative
+    """Monorepo case (the sample layout): finding files are PROJECT-relative
     (root='frontend', file='src/page.tsx'); the allowlist and the request must
     both use the REPO-relative join, and the bare project-relative path must
     NOT be accepted."""
