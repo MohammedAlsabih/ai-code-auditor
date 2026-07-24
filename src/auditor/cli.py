@@ -105,6 +105,22 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--port", type=int, default=8765)
     # NOTE: deliberately NO --host. W1 binds to loopback only; a public bind is
     # not selectable from the CLI.
+
+    lib = sub.add_parser(
+        "library",
+        help="W4-A: Project Library mode — manage projects, run scans, and "
+             "browse many reports from one local server (127.0.0.1 only)")
+    lib.add_argument("root",
+                     help="library directory (created if missing): holds "
+                          "library.json, managed clones, and reports")
+    lib.add_argument("--allow", action="append", default=[],
+                     metavar="DIR", required=True,
+                     help="an allowed root for LOCAL project registration "
+                          "(repeatable); folders outside every allowed root "
+                          "are refused")
+    lib.add_argument("--port", type=int, default=8765)
+    # NOTE: deliberately NO --host here either. Project management (clone,
+    # scan, delete) is never exposed on a non-loopback bind.
     return p
 
 
@@ -123,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         return _serve(args)
+    if args.command == "library":
+        return _library(args)
     if args.command == "ai":
         return _ai(args)
     if args.command != "scan":
@@ -173,6 +191,46 @@ def _serve(args) -> int:
 
     url = f"http://{SERVE_HOST}:{args.port}"
     print(f"AI Code Auditor Report Explorer | {url}  (report: {args.report})")
+    uvicorn.run(app, host=SERVE_HOST, port=args.port, log_level="warning")
+    return 0
+
+
+def _library(args) -> int:
+    """W4-A: Library mode. Loopback only (SERVE_HOST), like `serve` — a
+    public bind is not selectable, so project management (clone/scan/delete)
+    is never reachable from another machine. Allowed roots gate LOCAL
+    project registration; they must exist."""
+    try:
+        import uvicorn
+
+        from auditor.web.library_app import create_library_app
+    except ModuleNotFoundError as e:
+        if (e.name or "").split(".")[0] in _WEB_DEPS:
+            print('Web explorer dependencies are not installed.\n'
+                  'Install with: pip install "ai-code-auditor[web]"',
+                  file=sys.stderr)
+            return 2
+        raise
+
+    allowed: list[Path] = []
+    for raw in args.allow:
+        root = Path(raw)
+        if not root.is_dir():
+            print("error | خطأ: --allow root is not a directory",
+                  file=sys.stderr)
+            return 2
+        allowed.append(root.resolve())
+    library_root = Path(args.root)
+    try:
+        library_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        print("error | خطأ: cannot create the library root",
+              file=sys.stderr)
+        return 2
+
+    app = create_library_app(library_root.resolve(), allowed, args.port)
+    url = f"http://{SERVE_HOST}:{args.port}"
+    print(f"AI Code Auditor Library | {url}")
     uvicorn.run(app, host=SERVE_HOST, port=args.port, log_level="warning")
     return 0
 
