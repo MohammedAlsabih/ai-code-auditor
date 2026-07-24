@@ -176,7 +176,8 @@ export function ProjectsPanel({
           <p>No projects yet.</p>
           <p className="muted">
             Register a local folder (under an allowed root) or add a public
-            Git repository over HTTPS, then run an offline scan.
+            GitHub/GitLab/Bitbucket repository over HTTPS, then run an
+            offline scan.
           </p>
           <button className="btn btn-primary" onClick={() => setModalOpen(true)}>
             <FolderPlus size={14} /> Add your first project
@@ -523,7 +524,10 @@ function AddProjectModal({ caps, onClose, onAdd }: {
             </label>
           ) : (
             <label className="field">
-              <span>Public repository URL (https only, no credentials)</span>
+              <span>
+                Public repository URL — github.com, gitlab.com, or
+                bitbucket.org over https only, no credentials
+              </span>
               <input className="input mono" value={url}
                 placeholder="https://github.com/owner/repo.git"
                 onChange={(e) => { setUrl(e.target.value); setProblem(null) }} />

@@ -19,6 +19,18 @@ PROFILES = ("security", "correctness", "ai_code_risks", "all")
 # languages the index recognizes (project languages of real reports)
 AUDIT_LANGUAGES = ("python", "typescript", "csharp", "java")
 
+# W4-A3: THE central language alias for the AI-audit gate. Real reports call
+# the .NET project language "dotnet" while the catalog (and the index's
+# extension map) speak "csharp" — without this alias every dotnet project
+# was skipped as "language not covered". The stored report language and the
+# catalog itself are NOT changed; only the gate translates.
+LANGUAGE_ALIASES = {"dotnet": "csharp"}
+
+
+def audit_language(language: str) -> str:
+    """Report project language -> catalog language for the audit gate."""
+    return LANGUAGE_ALIASES.get(language, language)
+
 
 @dataclass(frozen=True)
 class AuditQuery:

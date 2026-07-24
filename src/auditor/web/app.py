@@ -944,7 +944,11 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         estimate_units,
     )
     from auditor.ai.audit_index import RepositoryAuditIndex
-    from auditor.ai.audit_queries import PROFILES, queries_for_profile
+    from auditor.ai.audit_queries import (
+        PROFILES,
+        audit_language,
+        queries_for_profile,
+    )
     from auditor.ai.audit_store import AIAuditStore, AIAuditStoreError
     from auditor.ai.review import review_timeout
 
@@ -985,7 +989,10 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         packs = []
         skipped: dict[str, int] = {}
         for project in sorted(wanted):
-            langs = {lang for r, lang in _report_projects if r == project}
+            # W4-A3: gate on the ALIASED language ("dotnet" -> "csharp");
+            # the report rows and the query catalog stay untouched
+            langs = {audit_language(lang)
+                     for r, lang in _report_projects if r == project}
             for query in queries_for_profile(profile):
                 if langs and not (langs & set(query.languages)):
                     skipped["language not covered"] = \

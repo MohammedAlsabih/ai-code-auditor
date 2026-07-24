@@ -119,9 +119,13 @@ class LibraryDispatch:
             if reason is not None:
                 await _err(403, reason)(scope, receive, send)
                 return
-        ctx = lib.acquire_context(rid)
+        ctx, why = lib.acquire_context(rid)
         if ctx is None:
-            await _err(404, "unknown report id")(scope, receive, send)
+            if why == "deleting":
+                await _err(409, "report is being deleted")(scope, receive,
+                                                           send)
+            else:
+                await _err(404, "unknown report id")(scope, receive, send)
             return
         sub_scope = dict(scope)
         sub_scope["path"] = "/api/" + rest
@@ -141,13 +145,24 @@ class LibraryState:
                  env: dict[str, str] | None = None) -> None:
         self.paths = LibraryPaths(library_root)
         self.store = LibraryStore(self.paths.store_path())
-        self.runner = JobRunner(self.store, self.paths, spawn=spawn, env=env)
+        self._ctx_lock = threading.Lock()
+        self._contexts: dict[str, _Ctx] = {}
+        self._deleting: set[str] = set()   # deletion leases (under _ctx_lock)
+        # W4-A closing: project-operation lease, SEPARATE from the report
+        # deletion lease and its own lock. Serializes start_scan /
+        # remove_project / delete_source per project so a scan can never
+        # begin between a removal's active-job check and its store mutation.
+        self._proj_lock = threading.Lock()
+        self._proj_busy: set[str] = set()
+        # retention pruning takes the same lease as manual deletion, with
+        # the stricter rule that ANY cached context counts as loaded
+        self.runner = JobRunner(self.store, self.paths, spawn=spawn, env=env,
+                                reserve=self.reserve_for_prune,
+                                release=self.release_delete)
         self.allowed_roots = allowed_roots
         self.token = secrets.token_urlsafe(32)
         self.origins = {f"http://127.0.0.1:{port}",
                         f"http://localhost:{port}"}
-        self._ctx_lock = threading.Lock()
-        self._contexts: dict[str, _Ctx] = {}
 
     # -- security ----------------------------------------------------------
 
@@ -168,6 +183,27 @@ class LibraryState:
             {k.lower(): v for k, v in request.headers.items()})
         return _err(403, reason) if reason is not None else None
 
+    # -- project-operation lease (W4-A closing) -----------------------------
+    # A per-project mutual-exclusion held across a whole scan-start /
+    # removal / source-delete. Distinct from the report deletion lease
+    # (different lock, different set); the two never merge. No I/O or
+    # waiting happens under _proj_lock.
+
+    def reserve_project(self, pid: str) -> bool:
+        """Atomically claim the project. Returns False if another operation
+        already holds it (the caller answers a stable 409)."""
+        with self._proj_lock:
+            if pid in self._proj_busy:
+                return False
+            self._proj_busy.add(pid)
+            return True
+
+    def release_project(self, pid: str) -> None:
+        """ALWAYS called in finally — success, error, or exception — so a
+        failed operation is retryable and never wedges a project id."""
+        with self._proj_lock:
+            self._proj_busy.discard(pid)
+
     # -- report contexts ----------------------------------------------------
 
     def source_dir_for(self, project: dict[str, Any]) -> Path | None:
@@ -177,21 +213,70 @@ class LibraryState:
         p = Path(project["local_path"])
         return p if p.is_dir() else None
 
-    def acquire_context(self, rid: str) -> _Ctx | None:
+    # -- deletion leases (W4-A closing) --------------------------------------
+    # The lease and the context check live in ONE critical section, so the
+    # old TOCTOU window (delete passes the in-use check, a request acquires
+    # a context, delete removes the files under it) cannot open. No I/O or
+    # waiting ever happens while _ctx_lock is held here.
+
+    def reserve_for_delete(self, rids: list[str]) -> str | None:
+        """Atomic ALL-OR-NONE lease for manual deletion. Refuses if any id
+        is already being deleted or has in-flight requests; idle cached
+        contexts are evicted inside the same critical section. Returns a
+        safe refusal reason or None (all ids leased)."""
         with self._ctx_lock:
+            for rid in rids:
+                if rid in self._deleting:
+                    return "report is being deleted"
+                ctx = self._contexts.get(rid)
+                if ctx is not None and ctx.refs > 0:
+                    return "report is currently open"
+            for rid in rids:
+                self._contexts.pop(rid, None)      # evict the idle context
+                self._deleting.add(rid)
+            return None
+
+    def reserve_for_prune(self, rids: list[str]) -> str | None:
+        """Retention lease: stricter — a report that is in the context
+        cache AT ALL (even with refs == 0) counts as loaded and is kept
+        above the cap temporarily instead of pruned."""
+        with self._ctx_lock:
+            for rid in rids:
+                if rid in self._deleting:
+                    return "report is being deleted"
+                if rid in self._contexts:
+                    return "report context is loaded"
+            self._deleting.update(rids)
+            return None
+
+    def release_delete(self, rids: list[str]) -> None:
+        """ALWAYS called in finally by every lease holder — including
+        filesystem or store failures — so a failed deletion is retryable
+        and can never wedge a report id."""
+        with self._ctx_lock:
+            for rid in rids:
+                self._deleting.discard(rid)
+
+    def acquire_context(self, rid: str) -> tuple[_Ctx | None, str]:
+        """Returns (ctx, "") or (None, reason) where reason is 'deleting'
+        (the id is leased for deletion — the caller answers 409, never a
+        misleading 404) or 'unknown'."""
+        with self._ctx_lock:
+            if rid in self._deleting:
+                return None, "deleting"
             ctx = self._contexts.get(rid)
             if ctx is not None:
                 ctx.refs += 1
-                return ctx
+                return ctx, ""
             row = self.store.report(rid)
             if row is None:
-                return None
+                return None, "unknown"
             project = self.store.project(row["project_id"])
             repo = self.source_dir_for(project) if project else None
             try:
                 app = create_app(self.paths.report_json(rid), repo_root=repo)
             except ReportError:
-                return None
+                return None, "unknown"
             ctx = _Ctx(app)
             ctx.refs += 1
             # bounded cache: evict the oldest idle context beyond the cap
@@ -202,7 +287,7 @@ class LibraryState:
                     break
                 del self._contexts[idle]
             self._contexts[rid] = ctx
-            return ctx
+            return ctx, ""
 
     def release_context(self, rid: str) -> None:
         with self._ctx_lock:
@@ -322,9 +407,12 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
                    "location": safe_location("git", body.url),
                    "created_at": _now(), "git_url": body.url,
                    "local_path": "", "managed": True}
+            # W4-A3: registration + clone job are ONE store transaction under
+            # the runner's slot lock — a busy runner or a store failure
+            # leaves zero project rows, directories, or subprocesses.
             try:
-                state.store.put_project(row)
-                jid = state.runner.start(row, "clone")
+                jid = state.runner.start(row, "clone",
+                                         register_project=True)
             except LibraryStoreError as e:
                 return _err(409, str(e))
             return _AsciiJSON({"project": _project_view(state, row),
@@ -339,24 +427,51 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
             return denied
         if not confirm:
             return _err(409, "removal requires confirm=true")
-        project = state.store.project(pid)
-        if project is None:
-            return _err(404, "unknown project id")
-        active = state.store.active_job()
-        if active is not None and active["project_id"] == pid:
-            return _err(409, "a job is running for this project")
-        if any(state.context_in_use(r["report_id"])
-               for r in state.store.reports_for(pid)):
-            return _err(409, "a report of this project is currently open")
+        # W4-A closing: take the project lease FIRST — a scan cannot start
+        # between the active-job check below and the store mutation.
+        if not state.reserve_project(pid):
+            return _err(409, "another operation is in progress for this "
+                             "project")
         try:
-            removed = state.store.remove_project(pid)
-        except LibraryStoreError as e:
-            return _err(503, str(e))
-        for rid in removed:
-            state.evict_context(rid)
-            state.paths.confined_delete(state.paths.report_dir(rid))
-        # the SOURCE is never deleted here: a local folder is external by
-        # definition; a managed clone needs the separate delete-source call.
+            project = state.store.project(pid)
+            if project is None:
+                return _err(404, "unknown project id")
+            # authoritative in-memory slot check under the project lease:
+            # catches a job that is still winding down (its store row may
+            # already show a terminal state) so no orphan slot survives
+            if state.runner.active_project_id() == pid:
+                return _err(409, "a job is running for this project")
+            report_rows = state.store.reports_for(pid)
+            rids = [r["report_id"] for r in report_rows]
+            # report deletion lease: ALL ids in one atomic step or none (no
+            # partial lease); a request after it cannot acquire a context.
+            # Distinct lock from the project lease — both are held here.
+            denied_reason = state.reserve_for_delete(rids)
+            if denied_reason is not None:
+                return _err(409, denied_reason)
+            try:
+                # W4-A3 contract: report FILES first — if any tree cannot be
+                # verified gone, stop with 503 and keep ALL metadata
+                # (already-deleted trees count as gone on retry). Only then
+                # drop the registration. The SOURCE is never touched here: a
+                # local folder is external; a managed clone needs
+                # delete-source.
+                for rid in rids:
+                    if not state.paths.confined_delete(
+                            state.paths.report_dir(rid)):
+                        return _err(503, "a report of this project could not "
+                                         "be deleted — nothing was "
+                                         "unregistered; retry")
+                try:
+                    removed = state.store.remove_project(pid)
+                except LibraryStoreError:
+                    return _err(503, "report files are deleted but the "
+                                     "library metadata update failed — retry "
+                                     "to finish")
+            finally:
+                state.release_delete(rids)    # ALWAYS, even on failures
+        finally:
+            state.release_project(pid)        # ALWAYS, even on failures
         return _AsciiJSON({"removed": pid, "reports_removed": len(removed),
                            "source_deleted": False})
 
@@ -368,17 +483,30 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
             return denied
         if not body.confirm:
             return _err(409, "source deletion requires confirm=true")
-        project = state.store.project(pid)
-        if project is None:
-            return _err(404, "unknown project id")
-        if project["kind"] != "git" or not project["managed"]:
-            return _err(409, "only managed git clones can be deleted")
-        active = state.store.active_job()
-        if active is not None and active["project_id"] == pid:
-            return _err(409, "a job is running for this project")
-        deleted = state.paths.confined_delete(
-            state.paths.clone_dir(pid).parent)
-        return _AsciiJSON({"project_id": pid, "source_deleted": deleted})
+        # W4-A closing: same project lease — no scan can start (and thus
+        # read the source) between the active-job check and the delete.
+        if not state.reserve_project(pid):
+            return _err(409, "another operation is in progress for this "
+                             "project")
+        try:
+            project = state.store.project(pid)
+            if project is None:
+                return _err(404, "unknown project id")
+            if project["kind"] != "git" or not project["managed"]:
+                return _err(409, "only managed git clones can be deleted")
+            # authoritative in-memory slot check under the project lease:
+            # catches a job that is still winding down (its store row may
+            # already show a terminal state) so no orphan slot survives
+            if state.runner.active_project_id() == pid:
+                return _err(409, "a job is running for this project")
+            target = state.paths.clone_dir(pid).parent
+            existed = target.exists()
+            if not state.paths.confined_delete(target):
+                return _err(503, "the managed clone could not be deleted — "
+                                 "nothing was changed; retry")
+        finally:
+            state.release_project(pid)        # ALWAYS, even on failures
+        return _AsciiJSON({"project_id": pid, "source_deleted": existed})
 
     # -- scans ----------------------------------------------------------------
 
@@ -387,17 +515,28 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         denied = state.guard(request)
         if denied is not None:
             return denied
-        project = state.store.project(pid)
-        if project is None:
-            return _err(404, "unknown project id")
-        if state.source_dir_for(project) is None:
-            return _err(409, "project source is not available "
-                             "(clone it first or restore the folder)")
+        # W4-A closing: the project lease is held across the WHOLE start —
+        # the job row and runner slot exist before it is released, so a
+        # concurrent removal/source-delete sees the active job and refuses.
+        if not state.reserve_project(pid):
+            return _err(409, "another operation is in progress for this "
+                             "project")
         try:
-            jid = state.runner.start(project, "scan", online=body.online,
-                                     semgrep=body.semgrep)
-        except LibraryStoreError as e:
-            return _err(409, str(e))
+            project = state.store.project(pid)
+            if project is None:
+                return _err(404, "unknown project id")
+            if state.source_dir_for(project) is None:
+                return _err(409, "project source is not available "
+                                 "(clone it first or restore the folder)")
+            try:
+                jid = state.runner.start(project, "scan", online=body.online,
+                                         semgrep=body.semgrep)
+            except LibraryStoreError as e:
+                # runner.start rolls back its own slot/job on failure; the
+                # lease is freed here so a retry works and nothing leaks
+                return _err(409, str(e))
+        finally:
+            state.release_project(pid)
         return _AsciiJSON({"job_id": jid, "state": "pending"},
                           status_code=202)
 
@@ -436,18 +575,30 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
             return _err(409, "report deletion requires confirm=true")
         if state.store.report(rid) is None:
             return _err(404, "unknown report id")
-        if state.context_in_use(rid):
-            return _err(409, "report is currently open")
         active = state.store.active_job()
         if active is not None and active.get("report_id") == rid:
             return _err(409, "report is being written by a running job")
+        # W4-A closing: the in-use check and the deletion lease are ONE
+        # atomic step — a request that arrives after the lease cannot
+        # acquire the context (it gets 409 "report is being deleted").
+        denied_reason = state.reserve_for_delete([rid])
+        if denied_reason is not None:
+            return _err(409, denied_reason)
         try:
-            state.store.remove_report(rid)
-        except LibraryStoreError as e:
-            return _err(503, str(e))
-        state.evict_context(rid)
-        # the report DIRECTORY (report.json + its own sidecars) — nothing else
-        state.paths.confined_delete(state.paths.report_dir(rid))
+            # W4-A3 contract: FILES first (verified gone), metadata second.
+            # A file-delete failure changes nothing and returns 503; a
+            # metadata failure after the files are gone is retryable (the
+            # absent directory counts as deleted on the retry).
+            if not state.paths.confined_delete(state.paths.report_dir(rid)):
+                return _err(503, "report files could not be deleted — "
+                                 "nothing was changed; retry the deletion")
+            try:
+                state.store.remove_report(rid)
+            except LibraryStoreError:
+                return _err(503, "report files are deleted but the library "
+                                 "metadata update failed — retry to finish")
+        finally:
+            state.release_delete([rid])       # ALWAYS, even on failures
         return _AsciiJSON({"deleted": rid})
 
     @api.get("/api/library/reports/{rid}")

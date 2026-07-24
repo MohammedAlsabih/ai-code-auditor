@@ -163,3 +163,15 @@ test('filterProjects applies query and state together', () => {
   // query matches location too
   assert.equal(filterProjects(rows, 'gh/front', 'all').length, 1)
 })
+
+// ---- W4-A3: host allowlist mirror ----------------------------------------------
+
+test('gitUrlProblem mirrors the Alpha host allowlist', () => {
+  assert.equal(gitUrlProblem('https://gitlab.com/g/p.git'), null)
+  assert.equal(gitUrlProblem('https://bitbucket.org/t/r.git'), null)
+  assert.match(gitUrlProblem('https://127.0.0.1/private/repo.git'), /github\.com/)
+  assert.match(gitUrlProblem('https://localhost/x/y.git'), /github\.com/)
+  assert.match(gitUrlProblem('https://10.0.0.5/a/b.git'), /github\.com/)
+  assert.match(gitUrlProblem('https://github.com:8443/a/b.git'), /ports/)
+  assert.match(gitUrlProblem('https://git.corp.example/a/b'), /github\.com/)
+})

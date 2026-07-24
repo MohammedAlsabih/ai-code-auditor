@@ -174,6 +174,9 @@ export function parseJob(raw: unknown): LibraryJobRow | null {
 
 // ---- client-side pre-validation mirrors ---------------------------------------------
 
+// W4-A3: fixed Alpha host policy — mirrors the server's ALLOWED_GIT_HOSTS.
+export const ALLOWED_GIT_HOSTS = ['github.com', 'gitlab.com', 'bitbucket.org']
+
 export function gitUrlProblem(url: string): string | null {
   const u = url.trim()
   if (!u) return 'Enter a repository URL.'
@@ -189,6 +192,12 @@ export function gitUrlProblem(url: string): string | null {
   const slash = rest.indexOf('/')
   if (slash <= 0 || slash === rest.length - 1) {
     return 'The URL must include a host and a repository path.'
+  }
+  const host = rest.slice(0, slash).toLowerCase()
+  if (host.includes(':')) return 'Custom ports are not allowed.'
+  if (!ALLOWED_GIT_HOSTS.includes(host)) {
+    return 'Only public repositories on github.com, gitlab.com, or '
+      + 'bitbucket.org are supported in Alpha.'
   }
   return null
 }

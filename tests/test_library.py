@@ -82,9 +82,13 @@ class FakeSpawn:
 
     def __init__(self, rc: int = 0, block: bool = False,
                  write_report: bool = True,
-                 report: dict | None = None) -> None:
+                 report: dict | None = None,
+                 block_scans_only: bool = False) -> None:
         self.rc = rc
         self.block = block
+        # clones complete, scans block — lets a git project finish cloning
+        # and then hold an active scan job
+        self.block_scans_only = block_scans_only
         self.write_report = write_report
         self.report = report or GOOD_REPORT
         self.calls: list[list[str]] = []
@@ -94,8 +98,10 @@ class FakeSpawn:
         self.calls.append(list(argv))
         Path(stdout_path).write_bytes(b"")
         Path(stderr_path).write_bytes(b"")
-        if not self.block:
-            if "clone" in argv:
+        is_clone = "clone" in argv
+        block = self.block or (self.block_scans_only and not is_clone)
+        if not block:
+            if is_clone:
                 dest = Path(argv[-1])
                 dest.mkdir(parents=True, exist_ok=True)
                 (dest / "app.py").write_text("x = 1\n", encoding="utf-8")
@@ -104,7 +110,7 @@ class FakeSpawn:
                 out.mkdir(parents=True, exist_ok=True)
                 (out / "report.json").write_text(
                     json.dumps(self.report), encoding="utf-8")
-        proc = FakeProc(rc=self.rc, block=self.block)
+        proc = FakeProc(rc=self.rc, block=block)
         self.procs.append(proc)
         return proc
 
@@ -679,10 +685,13 @@ def test_delete_report_in_use_is_refused(tmp_path):
     pid = add_local(client, token, allowed)
     rid = run_scan(client, token, app, pid)["report_id"]
     lib = app.library
-    assert lib.acquire_context(rid) is not None    # a request is in flight
+    ctx, why = lib.acquire_context(rid)            # a request is in flight
+    assert ctx is not None and why == ""
     r = client.delete(f"/api/library/reports/{rid}?confirm=true",
                       headers=H(token))
     assert r.status_code == 409 and "open" in r.json()["error"]
+    assert lib.store.report(rid) is not None       # metadata intact
+    assert lib.paths.report_json(rid).is_file()    # files intact
     lib.release_context(rid)
     r = client.delete(f"/api/library/reports/{rid}?confirm=true",
                       headers=H(token))
@@ -834,3 +843,694 @@ def test_store_unavailable_is_surfaced_not_crashed(tmp_path):
                     json={"kind": "local", "path": str(src)},
                     headers=H(token))
     assert r.status_code == 503
+
+
+# ---- W4-A3 closing regressions -------------------------------------------------------
+
+def test_w4a3_git_hosts_are_allowlisted():
+    """Case 1: IP literals, localhost, custom ports, and non-allowlisted
+    hosts are refused BEFORE any network/subprocess, without echoing."""
+    rejected = ("https://127.0.0.1/private/repo.git",
+                "https://localhost/x/y.git",
+                "https://10.0.0.5/a/b.git",
+                "https://169.254.169.254/a/b.git",
+                "https://github.com:8443/a/b.git",
+                "https://git.internal.corp/a/b.git")
+    for url in rejected:
+        reason = bad_git_url(url)
+        assert reason is not None, url
+        assert url not in reason
+        assert "supported" in reason or "ports" in reason, (url, reason)
+    for url in ("https://github.com/octocat/hello.git",
+                "https://gitlab.com/group/project.git",
+                "https://bitbucket.org/team/repo.git",
+                "https://GITHUB.com/case/insensitive"):
+        assert bad_git_url(url) is None, url
+
+
+def test_w4a3_git_host_rejected_at_api_before_subprocess(tmp_path):
+    spawn = FakeSpawn()
+    client, token, app, allowed = make_client(tmp_path, spawn)
+    r = client.post("/api/library/projects",
+                    json={"kind": "git",
+                          "url": "https://127.0.0.1/private/repo.git"},
+                    headers=H(token))
+    assert r.status_code == 400
+    assert "127.0.0.1" not in r.json()["error"]
+    assert spawn.calls == []                       # zero subprocess/network
+    assert client.get("/api/library/projects").json()["projects"] == []
+
+
+def test_w4a3_clone_argv_disables_redirects():
+    argv = git_clone_argv("https://github.com/a/b.git", Path("d"))
+    assert "http.followRedirects=false" in " ".join(argv)
+
+
+def test_w4a3_confined_delete_never_lies(tmp_path, monkeypatch):
+    """Case 2: success MEANS the target is gone; a no-op or failing rmtree
+    returns False; an already-absent target is True (retry-safe)."""
+    paths = LibraryPaths(tmp_path / "library")
+    target = paths.root / "reports" / "aaaa"
+    target.mkdir(parents=True)
+    (target / "f").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(lib_mod.shutil, "rmtree", lambda *a, **k: None)
+    assert paths.confined_delete(target) is False          # no-op rmtree
+    assert target.exists()
+
+    def boom(*a, **k):
+        raise OSError("locked")
+    monkeypatch.setattr(lib_mod.shutil, "rmtree", boom)
+    assert paths.confined_delete(target) is False          # raising rmtree
+    assert target.exists()
+    monkeypatch.undo()
+    assert paths.confined_delete(target) is True
+    assert paths.confined_delete(target) is True           # absent -> gone
+
+
+def test_w4a3_delete_report_failure_keeps_metadata(tmp_path, monkeypatch):
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid = run_scan(client, token, app, pid)["report_id"]
+    monkeypatch.setattr(lib_mod.shutil, "rmtree", lambda *a, **k: None)
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 503
+    assert str(tmp_path) not in r.text                     # safe message
+    assert app.library.store.report(rid) is not None       # metadata KEPT
+    assert app.library.paths.report_json(rid).is_file()    # files KEPT
+    monkeypatch.undo()
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))                    # retry succeeds
+    assert r.status_code == 200
+    assert app.library.store.report(rid) is None
+    assert not app.library.paths.report_dir(rid).exists()
+
+
+def test_w4a3_delete_report_store_failure_is_retryable(tmp_path, monkeypatch):
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid = run_scan(client, token, app, pid)["report_id"]
+
+    def store_boom(_rid):
+        raise LibraryStoreError("store detached")
+    monkeypatch.setattr(app.library.store, "remove_report", store_boom)
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 503 and "metadata" in r.json()["error"]
+    assert not app.library.paths.report_dir(rid).exists()  # files ARE gone
+    assert app.library.store.report(rid) is not None       # row remains
+    monkeypatch.undo()
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))                    # absent == gone
+    assert r.status_code == 200
+    assert app.library.store.report(rid) is None
+
+
+def test_w4a3_partial_project_removal_keeps_all_metadata(tmp_path,
+                                                         monkeypatch):
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid1 = run_scan(client, token, app, pid)["report_id"]
+    rid2 = run_scan(client, token, app, pid)["report_id"]
+    src_dir = Path(app.library.store.project(pid)["local_path"])
+    blocked = app.library.paths.report_dir(rid2).resolve()
+    real_rmtree = lib_mod.shutil.rmtree
+
+    def selective(path, *a, **k):
+        if Path(path) == blocked:
+            raise OSError("locked")
+        return real_rmtree(path, *a, **k)
+    monkeypatch.setattr(lib_mod.shutil, "rmtree", selective)
+    r = client.delete(f"/api/library/projects/{pid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 503
+    assert app.library.store.project(pid) is not None      # registration kept
+    assert app.library.store.report(rid1) is not None      # ALL rows kept
+    assert app.library.store.report(rid2) is not None
+    assert src_dir.is_dir()                                # source untouched
+    monkeypatch.undo()
+    r = client.delete(f"/api/library/projects/{pid}?confirm=true",
+                      headers=H(token))                    # retry finishes
+    assert r.status_code == 200
+    assert src_dir.is_dir()                                # source still kept
+
+
+def test_w4a3_retention_never_deletes_an_open_report(tmp_path, monkeypatch):
+    # deterministic, strictly increasing created_at stamps: the real
+    # _now_iso has 1-second granularity, which makes "oldest" ambiguous
+    # inside a same-second burst of scans (test-only concern)
+    counter = {"n": 0}
+
+    def ticking_now():
+        counter["n"] += 1
+        return f"2026-07-24T00:00:{counter['n']:02d}Z"
+    monkeypatch.setattr(lib_mod, "_now_iso", ticking_now)
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    first = run_scan(client, token, app, pid)["report_id"]
+    ctx, why = app.library.acquire_context(first)          # OPEN context
+    assert ctx is not None and why == ""
+    for _ in range(MAX_REPORTS_PER_PROJECT + 1):
+        run_scan(client, token, app, pid)
+        time.sleep(0.01)
+    rows = app.library.store.reports_for(pid)
+    kept = {r["report_id"] for r in rows}
+    assert first in kept                     # kept ABOVE the cap, not deleted
+    assert app.library.paths.report_json(first).is_file()
+    assert len(rows) == MAX_REPORTS_PER_PROJECT + 1
+    # refs -> 0 but the context stays CACHED: still counted as loaded, so
+    # retention keeps it above the cap (W4-A closing contract)
+    app.library.release_context(first)
+    run_scan(client, token, app, pid)
+    kept = {r["report_id"] for r in app.library.store.reports_for(pid)}
+    assert first in kept
+    # only after the context is evicted may the next prune reclaim it
+    app.library.evict_context(first)
+    run_scan(client, token, app, pid)
+    kept = {r["report_id"] for r in app.library.store.reports_for(pid)}
+    assert first not in kept
+    assert len(kept) == MAX_REPORTS_PER_PROJECT
+
+
+def test_w4a3_store_load_is_a_bounded_read(tmp_path, monkeypatch):
+    """Case 3: one bounded read of cap+1; read_bytes() never used; an
+    oversized file is refused before parse; a lying stat cannot bypass."""
+    import pathlib as _pl
+    p = tmp_path / "library.json"
+    p.write_bytes(b'{"x": "' + b"A" * (3 * 1024 * 1024) + b'"}')
+
+    def no_read_bytes(self):
+        raise AssertionError("read_bytes() used for the store load")
+    monkeypatch.setattr(_pl.Path, "read_bytes", no_read_bytes)
+    read_sizes = []
+    orig_open = _pl.Path.open
+
+    def spy_open(self, *a, **k):
+        fh = orig_open(self, *a, **k)
+        if self.name == "library.json" and a and a[0] == "rb":
+            orig_read = fh.read
+
+            def bounded_read(n=-1):
+                read_sizes.append(n)
+                return orig_read(n)
+            fh.read = bounded_read
+        return fh
+    monkeypatch.setattr(_pl.Path, "open", spy_open)
+    store = LibraryStore(p)
+    monkeypatch.undo()
+    assert store.available is False and "cap" in store.error
+    assert str(tmp_path) not in store.error
+    # stat pre-rejected the 3MB file: zero reads is legal; any read that DID
+    # happen must have been bounded (never -1 / unbounded)
+    assert all(n != -1 and n <= lib_mod.STORE_MAX_BYTES + 1
+               for n in read_sizes)
+
+    # lying stat: claims a tiny size; the bounded read still catches it
+    class FakeStat:
+        st_size = 10
+
+        def __getattr__(self, name):
+            return 0
+    real_stat = _pl.Path.stat
+
+    def lying_stat(self, *a, **k):
+        if self.name == "library.json":
+            return FakeStat()
+        return real_stat(self, *a, **k)
+    monkeypatch.setattr(_pl.Path, "stat", lying_stat)
+    store2 = LibraryStore(p)
+    monkeypatch.undo()
+    assert store2.available is False and "cap" in store2.error
+
+
+def test_w4a3_git_registration_is_atomic(tmp_path, monkeypatch):
+    """Case 4: a busy runner or a store failure leaves ZERO project rows,
+    directories, and subprocesses; success lands project+job together."""
+    spawn = FakeSpawn(block=True)
+    client, token, app, allowed = make_client(tmp_path, spawn)
+    pid = add_local(client, token, allowed)
+    r = client.post(f"/api/library/projects/{pid}/scans", json={},
+                    headers=H(token))
+    jid = r.json()["job_id"]                     # runner busy (blocked)
+    deadline = time.monotonic() + 5              # wait for the scan spawn
+    while len(spawn.calls) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    clone_calls_before = len(spawn.calls)
+    r = client.post("/api/library/projects",
+                    json={"kind": "git",
+                          "url": "https://github.com/a/hello.git"},
+                    headers=H(token))
+    assert r.status_code == 409
+    rows = client.get("/api/library/projects").json()["projects"]
+    assert [p for p in rows if p["kind"] == "git"] == []    # NO orphan
+    assert len(spawn.calls) == clone_calls_before           # no subprocess
+    assert not (tmp_path / "library" / "projects").exists()
+    client.post(f"/api/library/scans/{jid}/cancel", headers=H(token))
+    app.library.runner.wait(jid)
+
+    # store failure inside the transaction -> nothing persisted
+    def txn_boom(project_row, job_row):
+        raise LibraryStoreError("store detached")
+    monkeypatch.setattr(app.library.store, "put_project_and_job", txn_boom)
+    r = client.post("/api/library/projects",
+                    json={"kind": "git",
+                          "url": "https://github.com/a/hello.git"},
+                    headers=H(token))
+    assert r.status_code == 409
+    monkeypatch.undo()
+    rows = client.get("/api/library/projects").json()["projects"]
+    assert [p for p in rows if p["kind"] == "git"] == []
+    assert app.library.runner.active_job_id() is None       # slot free
+
+    # normal registration still lands project + clone job TOGETHER
+    app.library.runner._spawn = FakeSpawn()
+    r = client.post("/api/library/projects",
+                    json={"kind": "git",
+                          "url": "https://github.com/a/hello.git"},
+                    headers=H(token))
+    assert r.status_code == 201
+    jid2 = r.json()["job_id"]
+    pid2 = r.json()["project"]["project_id"]
+    assert app.library.store.project(pid2) is not None
+    assert app.library.store.job(jid2)["project_id"] == pid2
+    app.library.runner.wait(jid2)
+
+
+# ---- W4-A closing: deletion-lease race regressions (real concurrency) ----------------
+
+def test_w4a4_delete_lease_blocks_concurrent_acquire(tmp_path, monkeypatch):
+    """The reproduced race, gated by Events (no timing assumptions):
+    DELETE takes the lease, a concurrent request tries to acquire the
+    context MID-DELETE and must be refused with 'deleting'; the deletion
+    then completes normally."""
+    import threading
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid = run_scan(client, token, app, pid)["report_id"]
+    lib = app.library
+
+    inside_delete = threading.Event()
+    acquired = threading.Event()
+    result = {}
+    real_confined = LibraryPaths.confined_delete
+
+    def gated(self, target, _real=real_confined):
+        if target.name == rid:
+            inside_delete.set()          # lease already taken by the route
+            assert acquired.wait(10)
+        return _real(self, target)
+    monkeypatch.setattr(LibraryPaths, "confined_delete", gated)
+
+    def deleter():
+        result["delete"] = client.delete(
+            f"/api/library/reports/{rid}?confirm=true", headers=H(token))
+
+    def requester():
+        assert inside_delete.wait(10)
+        result["ctx"] = lib.acquire_context(rid)
+        acquired.set()
+
+    t1 = threading.Thread(target=deleter)
+    t2 = threading.Thread(target=requester)
+    t1.start()
+    t2.start()
+    t1.join(15)
+    t2.join(15)
+    monkeypatch.undo()
+
+    ctx, why = result["ctx"]
+    assert ctx is None and why == "deleting"       # race window CLOSED
+    assert result["delete"].status_code == 200
+    assert lib.store.report(rid) is None
+    assert not lib.paths.report_dir(rid).exists()
+    with lib._ctx_lock:
+        assert rid not in lib._deleting            # lease released
+
+
+def test_w4a4_dispatcher_answers_409_while_deleting(tmp_path, monkeypatch):
+    """An HTTP request for a report under deletion gets a stable, safe 409
+    'report is being deleted' — never a misleading 404."""
+    import threading
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid = run_scan(client, token, app, pid)["report_id"]
+
+    inside_delete = threading.Event()
+    proceed = threading.Event()
+    result = {}
+    real_confined = LibraryPaths.confined_delete
+
+    def gated(self, target, _real=real_confined):
+        if target.name == rid:
+            inside_delete.set()
+            assert proceed.wait(10)
+        return _real(self, target)
+    monkeypatch.setattr(LibraryPaths, "confined_delete", gated)
+
+    def deleter():
+        result["delete"] = client.delete(
+            f"/api/library/reports/{rid}?confirm=true", headers=H(token))
+
+    t1 = threading.Thread(target=deleter)
+    t1.start()
+    assert inside_delete.wait(10)
+    r = client.get(f"/api/library/reports/{rid}/report")
+    proceed.set()
+    t1.join(15)
+    monkeypatch.undo()
+    assert r.status_code == 409
+    assert r.json()["error"] == "report is being deleted"
+    assert str(tmp_path) not in r.text
+    assert result["delete"].status_code == 200
+
+
+def test_w4a4_lease_released_on_rmtree_and_store_failures(tmp_path,
+                                                          monkeypatch):
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid = run_scan(client, token, app, pid)["report_id"]
+    lib = app.library
+
+    # rmtree failure -> 503, lease is FREE again (acquire + retry work)
+    monkeypatch.setattr(lib_mod.shutil, "rmtree", lambda *a, **k: None)
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 503
+    monkeypatch.undo()
+    with lib._ctx_lock:
+        assert rid not in lib._deleting
+    ctx, why = lib.acquire_context(rid)
+    assert ctx is not None                          # acquirable again
+    lib.release_context(rid)
+    lib.evict_context(rid)
+
+    # store failure after files gone -> 503, lease free, retry finishes
+    def store_boom(_rid):
+        raise LibraryStoreError("store detached")
+    monkeypatch.setattr(lib.store, "remove_report", store_boom)
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 503
+    monkeypatch.undo()
+    with lib._ctx_lock:
+        assert rid not in lib._deleting
+    r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 200
+
+
+def test_w4a4_project_removal_reserves_all_or_none(tmp_path):
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid1 = run_scan(client, token, app, pid)["report_id"]
+    rid2 = run_scan(client, token, app, pid)["report_id"]
+    lib = app.library
+    ctx, _ = lib.acquire_context(rid2)              # rid2 is open
+    assert ctx is not None
+    r = client.delete(f"/api/library/projects/{pid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 409
+    with lib._ctx_lock:
+        assert rid1 not in lib._deleting            # NO partial lease
+        assert rid2 not in lib._deleting
+    got, why = lib.acquire_context(rid1)            # rid1 fully usable
+    assert got is not None and why == ""
+    lib.release_context(rid1)
+    assert lib.store.report(rid1) is not None
+    assert lib.paths.report_json(rid1).is_file()
+    lib.release_context(rid2)
+    lib.evict_context(rid1)
+    lib.evict_context(rid2)
+    r = client.delete(f"/api/library/projects/{pid}?confirm=true",
+                      headers=H(token))
+    assert r.status_code == 200
+
+
+def test_w4a4_stress_no_delete_under_live_refs(tmp_path, monkeypatch):
+    """Short concurrency hammer: acquire/release threads race a deleting
+    thread. Invariant, checked AT DELETE TIME inside confined_delete: the
+    report never has a cached context when its files are removed."""
+    import threading
+    client, token, app, allowed = make_client(tmp_path)
+    pid = add_local(client, token, allowed)
+    rid = run_scan(client, token, app, pid)["report_id"]
+    lib = app.library
+
+    violations = []
+    real_confined = LibraryPaths.confined_delete
+
+    def checking(self, target, _real=real_confined):
+        if target.name == rid:
+            with lib._ctx_lock:
+                if rid in lib._contexts:
+                    violations.append("context alive at delete time")
+        return _real(self, target)
+    monkeypatch.setattr(LibraryPaths, "confined_delete", checking)
+
+    stop = threading.Event()
+    outcomes = []
+
+    def hammer():
+        while not stop.is_set():
+            ctx, why = lib.acquire_context(rid)
+            if ctx is not None:
+                lib.release_context(rid)
+            elif why == "unknown":
+                return                              # deleted -> done
+
+    def deleter():
+        for _ in range(200):
+            r = client.delete(f"/api/library/reports/{rid}?confirm=true",
+                              headers=H(token))
+            outcomes.append(r.status_code)
+            if r.status_code in (200, 404):
+                break
+        stop.set()
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    dt = threading.Thread(target=deleter)
+    for t in threads:
+        t.start()
+    dt.start()
+    dt.join(30)
+    stop.set()
+    for t in threads:
+        t.join(10)
+    monkeypatch.undo()
+    assert violations == []
+    assert 200 in outcomes                          # the delete DID happen
+    assert lib.store.report(rid) is None
+
+
+# ---- W4-A closing: project-operation lease (start_scan / remove / delete-source) -----
+
+def _blocking_client(tmp_path):
+    """A client whose scans block until killed, with the project source
+    registered. Returns (client, token, app, allowed, pid, spawn)."""
+    spawn = FakeSpawn(block=True)
+    client, token, app, allowed = make_client(tmp_path, spawn)
+    pid = add_local(client, token, allowed)
+    return client, token, app, allowed, pid, spawn
+
+
+def test_w4a5_remove_reserves_then_scan_is_refused(tmp_path, monkeypatch):
+    """Event-gated: remove_project takes the project lease first; a
+    concurrent scan is refused 409 with ZERO subprocess; then remove
+    completes 200 and the runner is not left active."""
+    import threading
+    client, token, app, allowed, pid, spawn = _blocking_client(tmp_path)
+    inside = threading.Event()
+    scan_done = threading.Event()
+    result = {}
+    real_remove = app.library.store.remove_project
+
+    def gated(_pid):
+        inside.set()
+        assert scan_done.wait(10)
+        return real_remove(_pid)
+    monkeypatch.setattr(app.library.store, "remove_project", gated)
+
+    def remover():
+        result["remove"] = client.delete(
+            f"/api/library/projects/{pid}?confirm=true", headers=H(token))
+
+    def scanner():
+        assert inside.wait(10)
+        result["scan"] = client.post(
+            f"/api/library/projects/{pid}/scans", json={}, headers=H(token))
+        scan_done.set()
+
+    t1 = threading.Thread(target=remover)
+    t2 = threading.Thread(target=scanner)
+    t1.start()
+    t2.start()
+    t1.join(15)
+    t2.join(15)
+    monkeypatch.undo()
+    assert result["scan"].status_code == 409
+    assert "another operation is in progress" in result["scan"].json()["error"]
+    assert spawn.calls == []                       # zero subprocess
+    assert result["remove"].status_code == 200
+    assert app.library.store.project(pid) is None
+    assert app.library.runner.active_job_id() is None
+    with app.library._proj_lock:
+        assert pid not in app.library._proj_busy   # lease freed
+
+
+def test_w4a5_scan_reserves_then_remove_is_refused(tmp_path):
+    """A live scan (blocked) holds an active job; remove_project sees it and
+    refuses 409; then the scan is cancelable and project/job rows survive."""
+    client, token, app, allowed, pid, spawn = _blocking_client(tmp_path)
+    r = client.post(f"/api/library/projects/{pid}/scans", json={},
+                    headers=H(token))
+    assert r.status_code == 202
+    jid = r.json()["job_id"]
+    rr = client.delete(f"/api/library/projects/{pid}?confirm=true",
+                       headers=H(token))
+    assert rr.status_code == 409
+    assert app.library.store.project(pid) is not None
+    assert app.library.store.job(jid) is not None      # job row readable
+    # invariant: job accepted with 202 stays readable + cancelable via API
+    assert client.get(f"/api/library/scans/{jid}").status_code == 200
+    assert client.post(f"/api/library/scans/{jid}/cancel",
+                       headers=H(token)).status_code == 200
+    app.library.runner.wait(jid)
+
+
+def test_w4a5_delete_source_reserves_then_scan_refused(tmp_path):
+    """delete_source on a managed clone excludes a concurrent scan; the
+    source is deleted safely and no scan reads it mid-delete."""
+    spawn = FakeSpawn(block_scans_only=True)   # clone completes, scan blocks
+    client, token, app, allowed = make_client(tmp_path, spawn)
+    r = client.post("/api/library/projects",
+                    json={"kind": "git",
+                          "url": "https://github.com/a/hello.git"},
+                    headers=H(token))
+    pid = r.json()["project"]["project_id"]
+    app.library.runner.wait(r.json()["job_id"])        # clone completes
+    # hold the project lease manually to model an in-flight delete_source,
+    # then prove a scan is refused
+    assert app.library.reserve_project(pid) is True
+    try:
+        rs = client.post(f"/api/library/projects/{pid}/scans", json={},
+                         headers=H(token))
+        assert rs.status_code == 409
+    finally:
+        app.library.release_project(pid)
+    # now the real delete_source succeeds and a later scan is refused only
+    # because the source is gone
+    rd = client.post(f"/api/library/projects/{pid}/delete-source",
+                     json={"confirm": True}, headers=H(token))
+    assert rd.status_code == 200 and rd.json()["source_deleted"]
+    rs = client.post(f"/api/library/projects/{pid}/scans", json={},
+                     headers=H(token))
+    assert rs.status_code == 409                        # source not available
+
+
+def test_w4a5_active_scan_blocks_remove_and_delete_source(tmp_path):
+    spawn = FakeSpawn(block_scans_only=True)   # clone completes, scan blocks
+    client, token, app, allowed = make_client(tmp_path, spawn)
+    r = client.post("/api/library/projects",
+                    json={"kind": "git",
+                          "url": "https://github.com/a/hello.git"},
+                    headers=H(token))
+    pid = r.json()["project"]["project_id"]
+    app.library.runner.wait(r.json()["job_id"])
+    assert app.library.store.job(r.json()["job_id"])["state"] == "completed"
+    r = client.post(f"/api/library/projects/{pid}/scans", json={},
+                    headers=H(token))
+    assert r.status_code == 202
+    jid = r.json()["job_id"]                            # scan now active
+    assert client.delete(f"/api/library/projects/{pid}?confirm=true",
+                         headers=H(token)).status_code == 409
+    assert client.post(f"/api/library/projects/{pid}/delete-source",
+                       json={"confirm": True},
+                       headers=H(token)).status_code == 409
+    client.post(f"/api/library/scans/{jid}/cancel", headers=H(token))
+    app.library.runner.wait(jid)
+
+
+def test_w4a5_lease_released_on_runner_failure(tmp_path, monkeypatch):
+    """A runner.start failure frees the project lease and leaves no job,
+    process, or slot; a retry then works."""
+    client, token, app, allowed, pid, spawn = _blocking_client(tmp_path)
+
+    def boom(*a, **k):
+        raise LibraryStoreError("runner detached")
+    monkeypatch.setattr(app.library.runner, "start", boom)
+    r = client.post(f"/api/library/projects/{pid}/scans", json={},
+                    headers=H(token))
+    assert r.status_code == 409
+    monkeypatch.undo()
+    with app.library._proj_lock:
+        assert pid not in app.library._proj_busy       # lease freed
+    assert app.library.runner.active_job_id() is None
+    r = client.post(f"/api/library/projects/{pid}/scans", json={},
+                    headers=H(token))                   # retry works
+    assert r.status_code == 202
+    app.library.runner.cancel(r.json()["job_id"])
+    app.library.runner.wait(r.json()["job_id"])
+
+
+def test_w4a5_stress_invariants_hold(tmp_path):
+    """Short concurrency hammer across scan / remove / delete-source. The
+    invariant checked throughout: the runner is never active without a
+    matching project row AND job row (the reproduced orphan state)."""
+    import threading
+    client, token, app, allowed, pid, spawn = _blocking_client(tmp_path)
+    lib = app.library
+    stop = threading.Event()
+    violations = []
+
+    def invariant_watch():
+        # The reproduced orphan condition, tied to THIS project: the project
+        # row is removed while the runner is still active for it. (A just-
+        # cancelled job's row may briefly be pruned while _active clears —
+        # that transient is not the orphan bug and is not flagged here.)
+        while not stop.is_set():
+            jid = lib.runner.active_job_id()
+            if jid is not None and lib.store.project(pid) is None:
+                # the only job the runner can hold here is this project's
+                job = lib.store.job(jid)
+                if job is None or job["project_id"] == pid:
+                    violations.append("runner active after project removed")
+            time.sleep(0.001)
+
+    def scanner():
+        while not stop.is_set():
+            r = client.post(f"/api/library/projects/{pid}/scans", json={},
+                            headers=H(token))
+            if r.status_code == 202:
+                jid = r.json()["job_id"]
+                client.post(f"/api/library/scans/{jid}/cancel",
+                            headers=H(token))
+                lib.runner.wait(jid)
+            elif r.status_code == 404:
+                return                                  # project removed
+
+    def remover():
+        for _ in range(40):
+            r = client.delete(f"/api/library/projects/{pid}?confirm=true",
+                              headers=H(token))
+            if r.status_code == 200:
+                return
+            time.sleep(0.005)
+
+    watch = threading.Thread(target=invariant_watch)
+    watch.start()
+    scanners = [threading.Thread(target=scanner) for _ in range(3)]
+    for t in scanners:
+        t.start()
+    rm = threading.Thread(target=remover)
+    rm.start()
+    rm.join(30)
+    stop.set()
+    for t in scanners:
+        t.join(10)
+    watch.join(10)
+    assert violations == []
+    # end state is coherent: either fully removed, or present with no
+    # orphaned runner
+    if lib.store.project(pid) is None:
+        assert lib.runner.active_job_id() is None

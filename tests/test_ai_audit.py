@@ -1029,3 +1029,72 @@ def test_index_bounded_read_catches_a_lying_stat(tmp_path, monkeypatch):
     monkeypatch.undo()
     assert not any(f.rel.endswith("huge_authorize.py") for f in index.files)
     assert index.skipped.get("exceeds byte cap", 0) >= 1
+
+
+# ---- W4-A3 closing regression: dotnet projects reach csharp audit queries --------
+
+def test_audit_language_alias_is_central_and_minimal():
+    from auditor.ai.audit_queries import LANGUAGE_ALIASES, audit_language
+    assert audit_language("dotnet") == "csharp"
+    assert audit_language("csharp") == "csharp"
+    assert audit_language("python") == "python"
+    assert audit_language("") == ""
+    assert LANGUAGE_ALIASES == {"dotnet": "csharp"}
+
+
+def _dotnet_repo(tmp_path, with_hints: bool):
+    repo = tmp_path / "dnrepo"
+    (repo / "Api").mkdir(parents=True)
+    if with_hints:
+        (repo / "Api" / "OrdersController.cs").write_text(
+            "public class OrdersController {\n"
+            "  public object Get(string id) {\n"
+            "    // authorize / role / tenant check missing\n"
+            "    return db.Execute(\"SELECT * FROM o WHERE id = \" + id);\n"
+            "  }\n}\n", encoding="utf-8")
+    else:
+        (repo / "Api" / "Plain.cs").write_text(
+            "public class Plain { public int Add(int a, int b)"
+            " { return a + b; } }\n", encoding="utf-8")
+    rp = tmp_path / "dn-report.json"
+    rp.write_text(json.dumps({
+        "summary": {"counts": {}},
+        "analysis_manifest": {"catalog": [],
+                              "execution": {"projects": []}, "policy": {}},
+        "projects": [{"language": "dotnet", "root": ".", "findings": []}],
+    }), encoding="utf-8")
+    return repo, rp
+
+
+def test_dotnet_report_language_reaches_csharp_queries(tmp_path, monkeypatch):
+    """Real Web/API check: language='dotnet' + a .cs file with valid hints
+    -> the security profile builds at least one audit unit (before W4-A3
+    every unit was skipped as 'language not covered')."""
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.delenv("AUDITOR_AI_REMOTE_REVIEWS", raising=False)
+    repo, rp = _dotnet_repo(tmp_path, with_hints=True)
+    c = TestClient(app_mod.create_app(rp, repo_root=repo))
+    pv = c.post("/api/ai/audits/preview",
+                json={"profile": "security", "provider": "ollama",
+                      "model": "m"})
+    assert pv.status_code == 200, pv.text
+    body = pv.json()
+    assert body["units"] >= 1, body
+    assert body["skipped_units"].get("language not covered", 0) == 0
+
+
+def test_dotnet_without_candidates_stays_no_units(tmp_path, monkeypatch):
+    """A dotnet project with NO real hint evidence is still honestly empty:
+    the alias opens the gate; retrieval evidence is not invented."""
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.delenv("AUDITOR_AI_REMOTE_REVIEWS", raising=False)
+    repo, rp = _dotnet_repo(tmp_path, with_hints=False)
+    c = TestClient(app_mod.create_app(rp, repo_root=repo))
+    pv = c.post("/api/ai/audits/preview",
+                json={"profile": "security", "provider": "ollama",
+                      "model": "m"})
+    assert pv.status_code == 200
+    body = pv.json()
+    assert body["units"] == 0
+    assert body["skipped_units"].get("language not covered", 0) == 0
+    assert body["skipped_units"].get("no candidate files", 0) >= 1

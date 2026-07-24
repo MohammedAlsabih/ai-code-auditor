@@ -76,11 +76,19 @@ def _now_iso() -> str:
 
 # ---- validation ---------------------------------------------------------------------
 
+# W4-A3: the FIXED Alpha host policy — public repositories on the three
+# major public services only. IP literals, localhost, intranet names,
+# custom ports, and anything else are refused BEFORE any network or
+# subprocess (SSRF/private-fetch guard, not just hygiene).
+ALLOWED_GIT_HOSTS = ("github.com", "gitlab.com", "bitbucket.org")
+
+
 def bad_git_url(url: Any) -> str | None:
     """Pure validation of a Git URL BEFORE any network or subprocess.
     Returns a safe rejection reason (never echoes the input) or None.
-    Alpha policy: public HTTPS only — no credentials, no query, no
-    fragment, no ssh/git/file/scp-like forms."""
+    Alpha policy: public HTTPS on github.com/gitlab.com/bitbucket.org
+    only — no credentials, no query, no fragment, no custom port, no
+    ssh/git/file/scp-like forms, no IP or localhost hosts."""
     if not isinstance(url, str) or not url:
         return "url must be a non-empty string"
     if len(url) > URL_MAX_CHARS:
@@ -103,6 +111,15 @@ def bad_git_url(url: Any) -> str | None:
     if parts.username is not None or parts.password is not None \
             or "@" in parts.netloc:
         return "credentials in the url are not allowed"
+    try:
+        port = parts.port
+    except ValueError:
+        return "url has an invalid port"
+    if port is not None:
+        return "custom ports are not allowed"
+    if parts.hostname.lower() not in ALLOWED_GIT_HOSTS:
+        return ("host is not supported (public repositories on "
+                "github.com, gitlab.com, or bitbucket.org only)")
     if parts.query or parts.fragment:
         return "query strings and fragments are not allowed"
     if not parts.path or parts.path == "/":
@@ -178,6 +195,7 @@ def git_clone_argv(url: str, dest: Path) -> list[str]:
         "-c", "filter.lfs.required=false",
         "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always",
+        "-c", "http.followRedirects=false",
         "-c", "credential.helper=",
         "clone", "--depth", "1", "--single-branch",
         "--no-recurse-submodules", "--no-tags",
@@ -302,14 +320,27 @@ class LibraryStore:
     def _load(self) -> None:
         if not self._path.exists():
             return
+        # W4-A3: the size limit is the BOUNDED READ (cap+1), never a full
+        # read_bytes() slice. stat is only a cheap early reject — it can lie
+        # (TOCTOU), so the read length is the enforced truth, and an
+        # oversized file is refused BEFORE any JSON parse.
         try:
-            raw = self._path.read_bytes()[:STORE_MAX_BYTES + 1]
-            data = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            if self._path.stat().st_size > STORE_MAX_BYTES:
+                self.available, self.error = False, \
+                    "library store exceeds cap"
+                return
+            with self._path.open("rb") as fh:
+                raw = fh.read(STORE_MAX_BYTES + 1)
+        except OSError:
             self.available, self.error = False, "library store unreadable"
             return
         if len(raw) > STORE_MAX_BYTES:
             self.available, self.error = False, "library store exceeds cap"
+            return
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.available, self.error = False, "library store unreadable"
             return
         if not isinstance(data, dict) \
                 or set(data) != {"schema_version", "projects", "reports",
@@ -452,19 +483,38 @@ class LibraryStore:
 
     # -- jobs --------------------------------------------------------------
 
+    @staticmethod
+    def _put_job_into(d: dict[str, Any], row: dict[str, Any]) -> None:
+        d["jobs"][row["job_id"]] = dict(row)
+        finished = [j for j, r in sorted(
+            d["jobs"].items(),
+            key=lambda kv: (kv[1]["created_at"], kv[0]))
+            if r["state"] not in _ACTIVE_JOB_STATES]
+        excess = len(d["jobs"]) - MAX_JOBS_KEPT
+        for jid in finished[:max(excess, 0)]:
+            del d["jobs"][jid]
+
     def put_job(self, row: dict[str, Any]) -> None:
         if not _valid_job(row):
             raise LibraryStoreError("malformed job row")
+        self._commit(lambda d: self._put_job_into(d, row))
+
+    def put_project_and_job(self, project_row: dict[str, Any],
+                            job_row: dict[str, Any]) -> None:
+        """W4-A3: git registration is ONE transaction — the project row and
+        its clone job land together or not at all (no orphan projects when
+        the job cannot be created)."""
+        if not _valid_project(project_row):
+            raise LibraryStoreError("malformed project row")
+        if not _valid_job(job_row):
+            raise LibraryStoreError("malformed job row")
 
         def mutate(d: dict[str, Any]) -> None:
-            d["jobs"][row["job_id"]] = dict(row)
-            finished = [j for j, r in sorted(
-                d["jobs"].items(),
-                key=lambda kv: (kv[1]["created_at"], kv[0]))
-                if r["state"] not in _ACTIVE_JOB_STATES]
-            excess = len(d["jobs"]) - MAX_JOBS_KEPT
-            for jid in finished[:max(excess, 0)]:
-                del d["jobs"][jid]
+            if len(d["projects"]) >= MAX_PROJECTS:
+                raise LibraryStoreError(
+                    f"library holds the maximum of {MAX_PROJECTS} projects")
+            d["projects"][project_row["project_id"]] = dict(project_row)
+            self._put_job_into(d, job_row)
         self._commit(mutate)
 
     def job(self, jid: str) -> dict[str, Any] | None:
@@ -522,21 +572,27 @@ class LibraryPaths:
 
     def confined_delete(self, target: Path) -> bool:
         """Delete a directory tree ONLY if it is strictly inside the library
-        root, is not a symlink itself, and still exists. Returns True when
-        something was removed."""
+        root and is not a symlink itself. W4-A3 contract: True means the
+        target is ACTUALLY GONE afterwards (an already-absent target counts
+        as gone, so a failed metadata step can be retried); an unsafe target
+        (symlink, outside the root, the root itself) or a tree that still
+        exists after the attempt is False — never a claimed success."""
         try:
             if target.is_symlink():
                 return False
             if not target.exists():
-                return False
+                return True                    # already gone -> retry-safe
             resolved = target.resolve(strict=True)
             root = self.root.resolve(strict=True)
         except (OSError, RuntimeError):
             return False
         if resolved == root or root not in resolved.parents:
             return False
-        shutil.rmtree(resolved, ignore_errors=True)
-        return True
+        try:
+            shutil.rmtree(resolved)            # NO ignore_errors: verify below
+        except OSError:
+            pass
+        return not target.exists()
 
 
 # ---- jobs ----------------------------------------------------------------------------
@@ -588,6 +644,7 @@ def tail_of(path: Path, cap: int = OUTPUT_TAIL_BYTES) -> str:
 @dataclass
 class _ActiveJob:
     job_id: str
+    project_id: str = ""
     proc: Any = None
     cancel_requested: bool = False
     thread: threading.Thread | None = None
@@ -603,18 +660,34 @@ class JobRunner:
 
     def __init__(self, store: LibraryStore, paths: LibraryPaths,
                  spawn: Callable[..., Any] | None = None,
-                 env: dict[str, str] | None = None) -> None:
+                 env: dict[str, str] | None = None,
+                 reserve: Callable[[list[str]], str | None] | None = None,
+                 release: Callable[[list[str]], None] | None = None) -> None:
         self._store = store
         self._paths = paths
         self._spawn = spawn if spawn is not None else _default_spawn
         self._env = env
+        # W4-A closing: retention takes the SAME deletion lease as manual
+        # deletion (reserve -> delete files -> metadata -> release in
+        # finally). reserve returns a safe refusal reason or None; a report
+        # whose context is cached (even idle) is refused and kept above the
+        # retention cap temporarily.
+        self._reserve = reserve
+        self._release = release
         self._lock = threading.Lock()
         self._active: _ActiveJob | None = None
 
     # -- public ------------------------------------------------------------
 
     def start(self, project: dict[str, Any], kind: str, *,
-              online: bool = False, semgrep: bool = False) -> str:
+              online: bool = False, semgrep: bool = False,
+              register_project: bool = False) -> str:
+        """Start a job. With register_project=True the project row itself is
+        committed IN THE SAME store transaction as the job, under the SAME
+        runner slot reservation — a busy runner or a store failure leaves
+        zero project rows, zero directories, zero subprocesses (the
+        active-slot check and the commit happen inside one lock, so there is
+        no separate racy pre-check)."""
         if kind not in JOB_KINDS:
             raise LibraryStoreError("unknown job kind")
         with self._lock:
@@ -626,8 +699,13 @@ class JobRunner:
                    "semgrep": semgrep, "created_at": _now_iso(),
                    "started_at": "", "finished_at": "", "error": "",
                    "report_id": ""}
-            self._store.put_job(row)      # raises before the slot is taken
-            active = _ActiveJob(job_id=jid)
+            # raises before the slot is taken — nothing persisted on failure
+            if register_project:
+                self._store.put_project_and_job(project, row)
+            else:
+                self._store.put_job(row)
+            active = _ActiveJob(job_id=jid,
+                                project_id=project["project_id"])
             self._active = active
         thread = threading.Thread(
             target=self._run, args=(active, project, row), daemon=True)
@@ -659,6 +737,16 @@ class JobRunner:
     def active_job_id(self) -> str | None:
         with self._lock:
             return self._active.job_id if self._active else None
+
+    def active_project_id(self) -> str | None:
+        """The project whose job currently holds the runner slot, in-memory
+        and authoritative — set the instant a job is accepted and cleared
+        only after the job thread fully unwinds. Unlike store.active_job()
+        (which reads the persisted row state), this still reports the
+        project during a job's cancel/finish transition, so a removal
+        checking it never races the slot to an orphan."""
+        with self._lock:
+            return self._active.project_id if self._active else None
 
     # -- internals ----------------------------------------------------------
 
@@ -716,10 +804,11 @@ class JobRunner:
                              else "failed", error=reason)
                 return
             final = self._paths.clone_dir(project["project_id"])
+            if not self._paths.confined_delete(final):
+                self._finish(row, "failed", error="clone promotion failed")
+                return
             try:
                 final.parent.mkdir(parents=True, exist_ok=True)
-                if final.exists():
-                    self._paths.confined_delete(final)
                 os.replace(dest, final)
             except OSError:
                 self._finish(row, "failed", error="clone promotion failed")
@@ -787,14 +876,28 @@ class JobRunner:
         self._finish(row, "completed", report_id=rid)
 
     def _prune_reports(self, pid: str) -> None:
+        """Retention: FILES first, metadata second — the same contract as
+        report deletion. A report with a loaded context or an unsafe/failed
+        file delete is kept ABOVE the cap temporarily; a files-gone-but-
+        store-failed row is retried on the next prune."""
         rows = self._store.reports_for(pid)     # newest first
         for row in rows[MAX_REPORTS_PER_PROJECT:]:
             rid = row["report_id"]
+            if self._reserve is not None \
+                    and self._reserve([rid]) is not None:
+                continue          # loaded/being-deleted: kept above the cap
             try:
-                self._store.remove_report(rid)
-            except LibraryStoreError:
-                continue
-            self._paths.confined_delete(self._paths.report_dir(rid))
+                if not self._paths.confined_delete(
+                        self._paths.report_dir(rid)):
+                    continue                    # keep the metadata aligned
+                try:
+                    self._store.remove_report(rid)
+                except LibraryStoreError:
+                    continue                    # retried next prune
+            finally:
+                if self._release is not None:
+                    self._release([rid])        # ALWAYS frees the lease
+
 
     def _wait_proc(self, active: _ActiveJob, argv: list[str], cwd: Path,
                    stdout_p: Path, stderr_p: Path,
