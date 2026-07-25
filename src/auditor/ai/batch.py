@@ -479,7 +479,10 @@ class BatchRunner:
                         env=self._env, consented=consented)
                     self._ai_store.put(result)
                     item["state"] = "completed"
-                    item["assessment"] = result["assessment"]
+                    # W3-B2: the per-item batch label is the DEFECT axis
+                    # (confirmed | acceptable | uncertain) — `acceptable` is a
+                    # distinct outcome, never folded into a false positive.
+                    item["assessment"] = result["defect_assessment"]
                 except (AIError, PrivacyGateError, ConsentError) as e:
                     item["state"] = "failed"
                     item["error"] = getattr(e, "code", "error")
@@ -536,7 +539,9 @@ class BatchRunner:
             return None
         counts = {"completed": 0, "failed": 0, "pending": 0, "running": 0,
                   "canceled": 0}
-        assessments = {"confirmed": 0, "false_positive": 0, "uncertain": 0}
+        # W3-B2: buckets are the DEFECT axis — `acceptable` is reported on its
+        # own and is never collapsed into a false positive.
+        assessments = {"confirmed": 0, "acceptable": 0, "uncertain": 0}
         for item in row.get("items", []):
             counts[item.get("state", "pending")] = \
                 counts.get(item.get("state", "pending"), 0) + 1

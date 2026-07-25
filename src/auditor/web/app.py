@@ -776,18 +776,26 @@ def create_app(report_path: Path, repo_root: Path | None = None,
 
     @app.get("/api/ai/reviews")
     def ai_reviews_summary() -> JSONResponse:
-        """Latest AI assessment per finding (for the table filter). Fresh
-        results only carry their assessment; stale ones are flagged. Local
-        sidecar read — no provider call."""
+        """Latest AI review per finding (for the table filter). W3-B2: a v2
+        result carries the four decision axes; a legacy w3c-v2 row is flagged
+        `legacy` and surfaces only its old single assessment (never remapped
+        to a v2 axis). Local sidecar read — no provider call."""
         out: dict[str, Any] = {}
         for rid in valid_review_ids:
             rows = ai_store.for_review_id(rid, None)
             if not rows:
                 continue
             latest = rows[0]
-            out[rid] = {"assessment": latest["assessment"],
-                        "provider": latest["provider"],
-                        "created_at": latest["created_at"]}
+            row: dict[str, Any] = {"provider": latest["provider"],
+                                   "created_at": latest["created_at"],
+                                   "legacy": bool(latest.get("legacy"))}
+            if latest.get("legacy"):
+                row["assessment"] = latest.get("assessment")   # v1 history
+            else:
+                for k in ("match_assessment", "defect_assessment", "impact",
+                          "actionability", "suggested_action"):
+                    row[k] = latest.get(k)
+            out[rid] = row
         return _AsciiJSON({"available": ai_store.available,
                            "results": out})
 

@@ -423,7 +423,9 @@ def _wait_done(c, bid, timeout=10.0):
 
 
 def test_api_full_local_batch_flow(tmp_path, monkeypatch):
-    c = _client(tmp_path, monkeypatch, FakeTransport(_reply("uncertain")))
+    # the P002 fixture pack now carries the review_policy, so the canned reply
+    # must be policy-conforming (confirmed/actionable/fix_code)
+    c = _client(tmp_path, monkeypatch, FakeTransport(_reply("confirmed")))
     pv = c.post("/api/ai/batches/preview",
                 json={"review_ids": [_rid(), _rid()], "provider": "ollama",
                       "model": "m"})
@@ -442,7 +444,8 @@ def test_api_full_local_batch_flow(tmp_path, monkeypatch):
     assert st["state"] == "completed" and st["counts"]["completed"] == 1
     # results visible in the summary endpoint for the UI filter
     summary = c.get("/api/ai/reviews").json()
-    assert summary["results"][_rid()]["assessment"] == "uncertain"
+    row = summary["results"][_rid()]
+    assert row["defect_assessment"] == "confirmed" and row["legacy"] is False
 
 
 def test_api_batch_remote_needs_consent_token(tmp_path, monkeypatch):

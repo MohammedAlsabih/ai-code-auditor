@@ -14,11 +14,12 @@ import pytest
 
 import auditor.ai.audit as audit_mod
 from auditor.ai.audit import (
-    REDACTION_FACT_KEYS, REDACTION_FACT_KINDS, REDACTION_FACT_TEXT,
     AuditContextError, build_audit_pack, redaction_facts)
 from auditor.ai.audit_index import RepositoryAuditIndex
 from auditor.ai.audit_queries import query_by_id
-from auditor.ai.review import REDACTION_CATEGORIES, redaction_events
+from auditor.ai.review import (
+    REDACTION_CATEGORIES, REDACTION_FACT_KEYS, REDACTION_FACT_KINDS,
+    REDACTION_FACT_TEXT, redaction_events)
 
 PROVEN = "literal_credential_proven"
 APPLIED = "redaction_applied"

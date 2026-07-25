@@ -257,8 +257,8 @@ export function AIBatchPanel({
             {status.remaining} remaining
           </span>
           <span className="ai-conf">
-            ✓{status.assessments.confirmed ?? 0} · FP {status.assessments.false_positive ?? 0} ·
-            ? {status.assessments.uncertain ?? 0}
+            defect: confirmed {status.assessments.confirmed ?? 0} · acceptable{' '}
+            {status.assessments.acceptable ?? 0} · uncertain {status.assessments.uncertain ?? 0}
           </span>
           {state === 'running' && (
             <button className="btn" onClick={cancel}>

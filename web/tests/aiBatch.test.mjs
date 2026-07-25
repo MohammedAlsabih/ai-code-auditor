@@ -65,24 +65,29 @@ test('parseBatchStatus enforces the legal states', () => {
   assert.equal(parseBatchStatus({ batch_id: 'b', state: 'exploded', items: [] }), null)
 })
 
-test('AI filter semantics: all / specific / none', () => {
-  assert.deepEqual([...AI_FILTERS], ['all', 'confirmed', 'false_positive', 'uncertain', 'none'])
+test('AI filter semantics over the defect axis: acceptable is its own bucket', () => {
+  // W3-B2: `acceptable` replaces `false_positive`; `legacy` is a new bucket
+  assert.deepEqual([...AI_FILTERS],
+    ['all', 'confirmed', 'acceptable', 'uncertain', 'legacy', 'none'])
   assert.ok(matchesAIFilter(undefined, 'all'))
   assert.ok(matchesAIFilter(undefined, 'none'))
   assert.ok(!matchesAIFilter('confirmed', 'none'))
   assert.ok(matchesAIFilter('confirmed', 'confirmed'))
-  assert.ok(!matchesAIFilter('uncertain', 'confirmed'))
+  assert.ok(matchesAIFilter('acceptable', 'acceptable'))
+  assert.ok(matchesAIFilter('legacy', 'legacy'))
+  assert.ok(!matchesAIFilter('acceptable', 'confirmed'))
 })
 
-test('parseAISummary keeps only well-formed rows', () => {
+test('parseAISummary maps the defect axis (v2) and legacy (v1) rows', () => {
   const map = parseAISummary({
     results: {
-      r1: { assessment: 'uncertain', provider: 'ollama', created_at: 't' },
-      r2: { assessment: 7 },
-      r3: 'junk',
+      r1: { defect_assessment: 'acceptable', legacy: false, provider: 'ollama', created_at: 't' },
+      r2: { assessment: 'confirmed', legacy: true, created_at: 't' },  // legacy
+      r3: { defect_assessment: 7 },                                    // junk
+      r4: 'junk',
     },
   })
-  assert.deepEqual(map, { r1: 'uncertain' })
+  assert.deepEqual(map, { r1: 'acceptable', r2: 'legacy' })   // acceptable kept, not remapped
   assert.deepEqual(parseAISummary(null), {})
 })
 

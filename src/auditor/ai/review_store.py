@@ -26,24 +26,38 @@ from typing import Any
 
 from auditor.ai.contract import Provider
 from auditor.ai.review import (
-    ASSESSMENTS,
+    ACTIONABILITIES,
     CONFIDENCES,
+    DEFECT_ASSESSMENTS,
     EVIDENCE_MAX,
     EVIDENCE_MIN,
+    IMPACTS,
+    LEGACY_ASSESSMENTS,
+    MATCH_ASSESSMENTS,
     MISSING_MAX,
     MISSING_MAX_CHARS,
+    REVIEW_CONTRACT_VERSION,
     STATEMENT_MAX_CHARS,
     SUGGESTED_ACTIONS,
     SUMMARY_MAX_CHARS,
 )
 
-SCHEMA_VERSION = 1
+# W3-B2: schema 1 held only w3c-v2 (v1) rows; schema 2 holds w3c-v3 (v2)
+# four-axis rows and MAY still carry legacy v1 rows read as history. Each row
+# is validated by its OWN contract; a legacy v1 row never drops the store.
+SCHEMA_VERSION = 2
+_ACCEPTED_SCHEMAS = (1, SCHEMA_VERSION)
 SIDECAR_MAX_BYTES = 10 * 1024 * 1024
 
-_RESULT_KEYS = {"review_id", "provider", "model", "prompt_version",
-                "latency_ms", "context_digest", "created_at", "assessment",
-                "confidence", "summary", "evidence", "missing_context",
-                "suggested_action"}
+# fields shared by both result contracts (the result identity + envelope)
+_BASE_KEYS = {"review_id", "provider", "model", "prompt_version",
+              "latency_ms", "context_digest", "created_at", "summary",
+              "evidence", "missing_context", "suggested_action"}
+# legacy w3c-v2 result row
+_V1_KEYS = _BASE_KEYS | {"assessment", "confidence"}
+# w3c-v3 four-axis result row
+_V2_KEYS = _BASE_KEYS | {"contract_version", "match_assessment",
+                         "defect_assessment", "impact", "actionability"}
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROMPT_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,31}$")
 _CREATED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -83,15 +97,9 @@ def _ok_text(v: Any, max_chars: int, allow_empty: bool = False) -> bool:
     return not any(ord(c) < 0x20 and c not in "\n\t" for c in v)
 
 
-def _valid_result(entry: Any) -> bool:
-    """The FULL AIReviewResult v1 contract re-checked at the storage
-    boundary: exact keys, legal enums, the same text limits as the parser,
-    strictly shaped evidence objects, and well-formed identity fields."""
-    if not isinstance(entry, dict) or set(entry) != _RESULT_KEYS:
-        return False
-    if entry["assessment"] not in ASSESSMENTS \
-            or entry["confidence"] not in CONFIDENCES \
-            or entry["suggested_action"] not in SUGGESTED_ACTIONS:
+def _valid_common(entry: dict[str, Any]) -> bool:
+    """The identity + text envelope shared by both result contracts."""
+    if entry["suggested_action"] not in SUGGESTED_ACTIONS:
         return False
     if not (isinstance(entry["review_id"], str)
             and _HEX64_RE.match(entry["review_id"])):
@@ -134,6 +142,35 @@ def _valid_result(entry: Any) -> bool:
         and entry["latency_ms"] >= 0
 
 
+def is_legacy_result(entry: dict[str, Any]) -> bool:
+    """A w3c-v2 (v1) result — no four-axis contract. Read as history only."""
+    return entry.get("contract_version") != REVIEW_CONTRACT_VERSION
+
+
+def _valid_result(entry: Any) -> bool:
+    """A stored row is valid iff it matches EXACTLY one contract — the legacy
+    v1 (assessment/confidence) OR the v2 four-axis contract — and passes the
+    shared envelope. A single legacy v1 row is therefore legal and never makes
+    the whole store unavailable."""
+    if not isinstance(entry, dict):
+        return False
+    keys = set(entry)
+    if keys == _V1_KEYS:
+        if entry["assessment"] not in LEGACY_ASSESSMENTS \
+                or entry["confidence"] not in CONFIDENCES:
+            return False
+        return _valid_common(entry)
+    if keys == _V2_KEYS:
+        if entry["contract_version"] != REVIEW_CONTRACT_VERSION \
+                or entry["match_assessment"] not in MATCH_ASSESSMENTS \
+                or entry["defect_assessment"] not in DEFECT_ASSESSMENTS \
+                or entry["impact"] not in IMPACTS \
+                or entry["actionability"] not in ACTIONABILITIES:
+            return False
+        return _valid_common(entry)
+    return False
+
+
 class AIReviewStore:
     """Load-on-open, validate strictly, write atomically. A corrupt sidecar
     makes the store unavailable — nothing is repaired or dropped silently."""
@@ -166,7 +203,7 @@ class AIReviewStore:
             return
         if not isinstance(data, dict) \
                 or set(data) != {"schema_version", "results"} \
-                or data.get("schema_version") != SCHEMA_VERSION \
+                or data.get("schema_version") not in _ACCEPTED_SCHEMAS \
                 or not isinstance(data.get("results"), dict):
             self.available, self.error = False, \
                 "sidecar has an unsupported shape or schema_version"
@@ -230,4 +267,9 @@ class AIReviewStore:
         for row in rows:
             row["stale"] = (current_digest is not None
                             and row["context_digest"] != current_digest)
+            # W3-B2: a w3c-v2 row is legacy history — always stale relative to
+            # the current four-axis contract, and shown without an Apply path.
+            row["legacy"] = is_legacy_result(row)
+            if row["legacy"]:
+                row["stale"] = True
         return rows

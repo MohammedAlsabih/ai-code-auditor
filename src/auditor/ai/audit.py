@@ -35,6 +35,7 @@ from auditor.ai.providers import ANTHROPIC_VERSION, PROVIDER_SPECS, resolve_conf
 from auditor.ai.review import (
     PACK_MAX_BYTES,
     REDACTION_CATEGORIES,
+    REDACTION_FACT_TEXT,
     OllamaNumCtxError,
     PrivacyGateError,
     _canonical,
@@ -245,26 +246,11 @@ def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
     return "\n...\n".join(parts), sent, counts, bytes_before, line_facts
 
 
-# W3-E4C-FINAL: a redaction fact separates PRIVACY masking from PROOF. Both
-# kinds mask the value identically; only `literal_credential_proven` asserts a
-# committed literal credential was present before masking. `redaction_applied`
-# is the conservative default — the value may be an env/config/secret-manager
-# REFERENCE that masks the same way. The sentence and `kind` are the ONLY
-# things that vary; no value or derivative is ever stored. Classes come from
-# the redactor's own rule names.
-REDACTION_FACT_TEXT = {
-    "literal_credential_proven": (
-        "a committed literal credential value was present here and was "
-        "replaced with *** before sending; the original value was NOT sent"),
-    "redaction_applied": (
-        "a sensitive-looking value here was replaced with *** before sending "
-        "for privacy; this is NOT proof of a hardcoded credential (it may be "
-        "an environment/config/secret-manager reference); the original value "
-        "was NOT sent"),
-}
-REDACTION_FACT_KINDS = tuple(REDACTION_FACT_TEXT)      # fixed allowlist
-REDACTION_FACT_KEYS = ("context_id", "file", "line_start", "line_end",
-                       "redaction_class", "kind", "fact")
+# W3-E4C-FINAL: the redaction-fact contract now lives in review.py so the audit
+# AND the single-finding review share ONE definition (W3-B2 closing — no
+# divergent logic). Both kinds mask the value; only literal_credential_proven
+# asserts a committed literal credential was present before masking. Re-exported
+# for the audit-side callers/tests that import them from here.
 
 
 def _cid_sort_key(cid: str) -> tuple[str, int]:

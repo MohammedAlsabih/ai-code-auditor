@@ -19,7 +19,8 @@ import {
 import { parseModelIds, parseProviders, type AIProviderInfo } from '../ai'
 import {
   AI_ADVISORY_NOTICE,
-  assessmentTone,
+  AI_LEGACY_NOTICE,
+  defectTone,
   parseAIReviewResult,
   pickStoredResult,
   type AIReviewResult,
@@ -466,13 +467,24 @@ export function DetailPanel({
                     fresh assessment.
                   </div>
                 )}
-                <div className="ai-verdict">
-                  <span className={`ai-badge ai-${assessmentTone(aiResult.assessment)}`}>
-                    {aiResult.assessment}
-                  </span>
-                  <span className="ai-conf">confidence: {aiResult.confidence}</span>
-                  <span className="ai-conf">action: {aiResult.suggested_action}</span>
-                </div>
+                {aiResult.legacy ? (
+                  <div className="ai-verdict">
+                    <span className="ai-badge ai-warn">Legacy review</span>
+                    <span className="ai-conf">assessment: {aiResult.assessment}</span>
+                    <span className="ai-conf">action: {aiResult.suggested_action}</span>
+                    <div className="ai-stale">{AI_LEGACY_NOTICE}</div>
+                  </div>
+                ) : (
+                  <div className="ai-verdict ai-axes">
+                    <span className="ai-conf">Rule match: {aiResult.match_assessment}</span>
+                    <span className={`ai-badge ai-${defectTone(aiResult.defect_assessment)}`}>
+                      Actual defect: {aiResult.defect_assessment}
+                    </span>
+                    <span className="ai-conf">Impact: {aiResult.impact}</span>
+                    <span className="ai-conf">Actionability: {aiResult.actionability}</span>
+                    <span className="ai-conf">Suggested action: {aiResult.suggested_action}</span>
+                  </div>
+                )}
                 <p className="detail-body">{aiResult.summary}</p>
                 {aiResult.evidence.length > 0 && (
                   <ul className="ai-evidence">

@@ -115,24 +115,32 @@ export function parseBatchStatus(raw: unknown): AIBatchStatus | null {
 
 // ---- AI assessment filter -----------------------------------------------------
 
-export const AI_FILTERS = ['all', 'confirmed', 'false_positive', 'uncertain', 'none'] as const
+// W3-B2: the filter is over the DEFECT axis (confirmed | acceptable |
+// uncertain) — `acceptable` is its own bucket, never remapped to a false
+// positive — plus `legacy` for w3c-v2 history rows.
+export const AI_FILTERS = ['all', 'confirmed', 'acceptable', 'uncertain', 'legacy', 'none'] as const
 export type AIFilter = (typeof AI_FILTERS)[number]
 
-/** Does a finding pass the AI-assessment filter? `assessment` is undefined
- * when the finding has no stored AI result. */
-export function matchesAIFilter(assessment: string | undefined, filter: AIFilter): boolean {
+/** Does a finding pass the AI filter? `value` (the defect axis, or 'legacy')
+ * is undefined when the finding has no stored AI result. */
+export function matchesAIFilter(value: string | undefined, filter: AIFilter): boolean {
   if (filter === 'all') return true
-  if (filter === 'none') return assessment === undefined
-  return assessment === filter
+  if (filter === 'none') return value === undefined
+  return value === filter
 }
 
-/** rid -> assessment map from GET /api/ai/reviews — strict, drops junk. */
+/** rid -> filter value from GET /api/ai/reviews — the defect axis for a v2
+ * row, or 'legacy' for a w3c-v2 history row. Strict; drops junk. */
 export function parseAISummary(raw: unknown): Record<string, string> {
   if (!isObj(raw) || !isObj(raw.results)) return {}
   const out: Record<string, string> = {}
   for (const [rid, row] of Object.entries(raw.results)) {
-    if (!isObj(row) || typeof row.assessment !== 'string') continue
-    out[rid] = row.assessment
+    if (!isObj(row)) continue
+    if (row.legacy === true) {
+      out[rid] = 'legacy'
+    } else if (typeof row.defect_assessment === 'string') {
+      out[rid] = row.defect_assessment
+    }
   }
   return out
 }

@@ -18,9 +18,12 @@ from auditor.ai.audit import (
 from auditor.ai.contract import AIError, HttpResponse, Provider
 from auditor.ai.providers import _ollama_probe
 from auditor.ai.review import (
-    AI_REVIEW_RESPONSE_SCHEMA_V1,
-    ASSESSMENTS,
+    ACTIONABILITIES,
+    AI_REVIEW_RESPONSE_SCHEMA,
     CONFIDENCES,
+    DEFECT_ASSESSMENTS,
+    IMPACTS,
+    MATCH_ASSESSMENTS,
     REVIEW_MAX_TOKENS,
     SUGGESTED_ACTIONS as REVIEW_ACTIONS,
     _review_body,
@@ -37,14 +40,14 @@ def _audit_body():
 
 def _review_ollama_body():
     return _review_body(Provider.OLLAMA, "m", "S", "U",
-                        schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                        schema=AI_REVIEW_RESPONSE_SCHEMA,
                         max_tokens=REVIEW_MAX_TOKENS)
 
 
 # 1 + 2: the full schema is carried, per contract
 def test_ollama_review_carries_full_review_schema():
     body = _review_ollama_body()
-    assert body["format"] is AI_REVIEW_RESPONSE_SCHEMA_V1
+    assert body["format"] is AI_REVIEW_RESPONSE_SCHEMA
     assert isinstance(body["format"], dict) and body["format"]["type"] == "object"
 
 
@@ -69,14 +72,18 @@ def test_ollama_token_caps_match_the_contract_budgets():
 
 # 5: each schema declares required + enum + limits + additionalProperties:false
 def test_review_schema_mirrors_the_contract():
-    s = AI_REVIEW_RESPONSE_SCHEMA_V1
+    s = AI_REVIEW_RESPONSE_SCHEMA
     assert s["additionalProperties"] is False
-    assert set(s["required"]) == {"assessment", "confidence", "summary",
+    assert set(s["required"]) == {"match_assessment", "defect_assessment",
+                                  "impact", "actionability", "summary",
                                   "evidence", "missing_context",
                                   "suggested_action"}
     p = s["properties"]
-    assert p["assessment"]["enum"] == list(ASSESSMENTS)
-    assert p["confidence"]["enum"] == list(CONFIDENCES)
+    assert p["match_assessment"]["enum"] == list(MATCH_ASSESSMENTS)
+    assert p["defect_assessment"]["enum"] == list(DEFECT_ASSESSMENTS)
+    assert p["impact"]["enum"] == list(IMPACTS)
+    assert p["actionability"]["enum"] == list(ACTIONABILITIES)
+    assert "confidence" not in p and "assessment" not in p
     assert p["suggested_action"]["enum"] == list(REVIEW_ACTIONS)
     assert p["evidence"]["maxItems"] == 5 and p["evidence"]["minItems"] == 1
     ev = p["evidence"]["items"]
@@ -228,17 +235,17 @@ def test_schema_is_not_in_the_context_pack_or_digest(tmp_path):
 # 12: remote-provider bodies do not regress (byte-identical wire)
 def test_remote_bodies_unchanged_by_the_schema_argument():
     oi = _review_body(Provider.OPENAI, "m", "S", "U",
-                      schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                      schema=AI_REVIEW_RESPONSE_SCHEMA,
                       max_tokens=REVIEW_MAX_TOKENS)
     assert oi == {"model": "m", "instructions": "S", "input": "U",
                   "max_output_tokens": REVIEW_MAX_TOKENS, "temperature": 0,
                   "store": False, "text": {"format": {"type": "json_object"}}}
     an = _review_body(Provider.ANTHROPIC, "m", "S", "U",
-                      schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                      schema=AI_REVIEW_RESPONSE_SCHEMA,
                       max_tokens=REVIEW_MAX_TOKENS)
     assert "format" not in an and an["max_tokens"] == REVIEW_MAX_TOKENS
     co = _review_body(Provider.OPENAI_COMPATIBLE, "m", "S", "U",
-                      schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                      schema=AI_REVIEW_RESPONSE_SCHEMA,
                       max_tokens=REVIEW_MAX_TOKENS)
     assert "format" not in co and "response_format" not in co
 
@@ -246,15 +253,17 @@ def test_remote_bodies_unchanged_by_the_schema_argument():
 # ---- W3-E3 closing 1: schema minLength mirrors the validator (no gap) --------------
 
 def test_review_schema_forbids_empty_text_like_the_validator():
-    rp = AI_REVIEW_RESPONSE_SCHEMA_V1["properties"]
+    rp = AI_REVIEW_RESPONSE_SCHEMA["properties"]
     assert rp["summary"]["minLength"] == 1
     ev = rp["evidence"]["items"]["properties"]
     assert ev["context_id"]["minLength"] == 1
     assert ev["statement"]["minLength"] == 1
     assert rp["missing_context"]["items"]["minLength"] == 1
     # enum fields carry no minLength (a legal enum can never be empty)
-    assert "minLength" not in rp["assessment"]
-    assert "minLength" not in rp["confidence"]
+    assert "minLength" not in rp["match_assessment"]
+    assert "minLength" not in rp["defect_assessment"]
+    assert "minLength" not in rp["impact"]
+    assert "minLength" not in rp["actionability"]
     assert "minLength" not in rp["suggested_action"]
 
 
@@ -278,13 +287,15 @@ def test_every_validator_rejected_empty_string_is_also_schema_invalid():
     through the real validator and asserting the matching schema node has
     minLength:1 — the two can never diverge again."""
     from auditor.ai.review import parse_review_reply
-    rp = AI_REVIEW_RESPONSE_SCHEMA_V1["properties"]
+    rp = AI_REVIEW_RESPONSE_SCHEMA["properties"]
     good_ev = {"context_id": "src:1", "statement": "x"}
 
     def review(**over):
-        base = {"assessment": "confirmed", "confidence": "low",
-                "summary": "s", "evidence": [dict(good_ev)],
-                "missing_context": [], "suggested_action": "inspect"}
+        base = {"match_assessment": "uncertain",
+                "defect_assessment": "uncertain", "impact": "uncertain",
+                "actionability": "uncertain", "summary": "s",
+                "evidence": [dict(good_ev)], "missing_context": [],
+                "suggested_action": "inspect"}
         base.update(over)
         return json.dumps(base)
 
@@ -375,7 +386,7 @@ def test_audit_and_review_remote_caps_differ_by_contract():
     provider-specific shape, only the output cap follows the audit budget."""
     for provider in (Provider.OPENAI, Provider.XAI):
         r = _review_body(provider, "m", "S", "U",
-                         schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                         schema=AI_REVIEW_RESPONSE_SCHEMA,
                          max_tokens=REVIEW_MAX_TOKENS)
         a = _review_body(provider, "m", "S", "U",
                          schema=AI_AUDIT_RESPONSE_SCHEMA_V1,

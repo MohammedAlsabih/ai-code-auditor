@@ -14,9 +14,9 @@ from auditor.ai.consent import (
     build_consent_preview,
     remote_reviews_enabled,
 )
-from auditor.ai.contract import HttpResponse, Provider
+from auditor.ai.contract import AIError, HttpResponse, Provider
 from auditor.ai.review import (
-    AI_REVIEW_RESPONSE_SCHEMA_V1,
+    AI_REVIEW_RESPONSE_SCHEMA,
     REVIEW_MAX_TOKENS,
     SYSTEM_INSTRUCTIONS,
     AIReviewRequest,
@@ -169,7 +169,7 @@ def test_local_provider_needs_no_consent(tmp_path):
     result = run_review(AIReviewRequest(_rid(), Provider.OLLAMA, "m"),
                         build_context_pack(REPORT, None, _rid()),
                         FakeTransport(), env=LOCAL_ENV)
-    assert result["assessment"] == "confirmed"
+    assert result["defect_assessment"] == "confirmed"
 
 
 # ---- five-provider request bodies (doc-verified shapes) ---------------------------
@@ -180,7 +180,7 @@ def test_local_provider_needs_no_consent(tmp_path):
 
 def _rb(provider):
     return _review_body(provider, "m", "SYS", "USER",
-                        schema=AI_REVIEW_RESPONSE_SCHEMA_V1,
+                        schema=AI_REVIEW_RESPONSE_SCHEMA,
                         max_tokens=REVIEW_MAX_TOKENS)
 
 
@@ -207,7 +207,7 @@ def test_ollama_chat_body():
                     "messages": [{"role": "system", "content": "SYS"},
                                  {"role": "user", "content": "USER"}],
                     "stream": False, "think": False,
-                    "format": AI_REVIEW_RESPONSE_SCHEMA_V1,
+                    "format": AI_REVIEW_RESPONSE_SCHEMA,
                     "options": {"temperature": 0,
                                 "num_predict": REVIEW_MAX_TOKENS}}
 
@@ -251,7 +251,7 @@ def test_remote_providers_end_to_end_with_consent(tmp_path, provider, env,
     pack = build_context_pack(REPORT, None, _rid())
     result = run_review(AIReviewRequest(_rid(), provider, "m"), pack, T(),
                         env=env, consented=True)
-    assert result["assessment"] == "uncertain"
+    assert result["defect_assessment"] == "uncertain"
     assert auth_check(T.calls[0]["headers"])
     assert SECRET.split("=", 1)[1] not in json.dumps(T.calls[0]["body"])
 
@@ -302,10 +302,11 @@ def test_model_shaped_json_inside_code_does_not_leak_into_the_verdict():
                        "missing_context": [], "suggested_action": "dismiss"})
     real = json.dumps(_reply("confirmed"))
     out = parse_review_reply(real, {"finding"})
-    assert out["assessment"] == "confirmed"
-    # and the fake blob alone is still validated strictly if it WERE a reply
-    assert parse_review_reply(fake, {"finding"})["assessment"] \
-        == "false_positive"
+    assert out["defect_assessment"] == "confirmed" \
+        and out["contract_version"] == 2
+    # and the old w3c-v2-shaped blob is now rejected by the v2 validator
+    with pytest.raises(AIError):
+        parse_review_reply(fake, {"finding"})
 
 
 def test_privacy_manifest_counts_without_values(tmp_path):
@@ -372,8 +373,9 @@ def test_consent_preview_local_provider_no_token_needed(tmp_path,
 def test_full_remote_consent_flow_and_reuse_rejected(tmp_path, monkeypatch):
     class T:
         def request(self, method, url, headers, json_body, timeout):
+            # policy-conforming reply: the server pack carries review_policy
             return HttpResponse(200, json.dumps(
-                {"output_text": json.dumps(_reply("uncertain"))}).encode())
+                {"output_text": json.dumps(_reply("confirmed"))}).encode())
     c = _client(tmp_path, monkeypatch, transport=T(), remote=True)
     pv = c.post("/api/ai/consent-preview",
                 json={"review_ids": [_rid()], "provider": "openai",

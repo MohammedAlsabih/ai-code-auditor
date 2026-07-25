@@ -72,12 +72,24 @@ def _rid():
     return finding_review_id(".", REPORT["projects"][0]["findings"][0])
 
 
-def _reply(assessment="confirmed", **over):
-    body = {"assessment": assessment, "confidence": "high",
+def _reply(defect="confirmed", *, match="matched", impact="high",
+           actionability=None, action=None, **over):
+    # W3-B2 v2: a CONSISTENT four-axis reply. When actionability/action are not
+    # pinned, derive them from the defect so a bare `_reply("uncertain")` is
+    # legal: confirmed=>actionable+fix_code, acceptable=>not_actionable+dismiss,
+    # uncertain=>uncertain+inspect.
+    if actionability is None:
+        actionability = {"confirmed": "actionable", "acceptable":
+                         "not_actionable", "uncertain": "uncertain"}[defect]
+    if action is None:
+        action = {"confirmed": "fix_code", "acceptable": "dismiss",
+                  "uncertain": "inspect"}[defect]
+    body = {"match_assessment": match, "defect_assessment": defect,
+            "impact": impact, "actionability": actionability,
             "summary": "the literal credential is committed",
             "evidence": [{"context_id": "finding",
                           "statement": "connection string carries a literal password"}],
-            "missing_context": [], "suggested_action": "fix_code"}
+            "missing_context": [], "suggested_action": action}
     body.update(over)
     return body
 
@@ -117,15 +129,25 @@ def _run(tmp_path, transport, assessment=None, env=None, repo=True):
     return run_review(req, pack, transport, env=env or LOCAL_ENV)
 
 
-# ---- the three legal assessments -------------------------------------------------
+# ---- the four decision axes round-trip -------------------------------------------
 
-@pytest.mark.parametrize("assessment", ["confirmed", "false_positive",
-                                        "uncertain"])
-def test_legal_assessments_round_trip(tmp_path, assessment):
-    t = FakeTransport(_reply(assessment))
-    result = _run(tmp_path, t)
-    assert result["assessment"] == assessment
-    assert result["prompt_version"] == PROMPT_VERSION
+@pytest.mark.parametrize("defect,match,action", [
+    ("confirmed", "matched", "fix_code"),
+    ("acceptable", "matched", "dismiss"),
+    ("uncertain", "matched", "inspect"),
+])
+def test_legal_axes_round_trip(tmp_path, defect, match, action):
+    t = FakeTransport(_reply(defect, match=match, action=action))
+    # repo=False: no source piece => no proven fact, no review_policy — this
+    # exercises the plain four-axis contract. (With the repo, the P002 fixture
+    # now carries a policy that binds the verdict — tested separately.)
+    result = _run(tmp_path, t, repo=False)
+    assert result["defect_assessment"] == defect
+    assert result["match_assessment"] == match
+    assert result["suggested_action"] == action
+    assert result["contract_version"] == 2
+    assert "assessment" not in result and "confidence" not in result
+    assert result["prompt_version"] == PROMPT_VERSION == "w3c-v5"
     assert result["provider"] == "ollama" and result["model"] == "qwen"
     assert isinstance(result["latency_ms"], int)
     assert len(result["context_digest"]) == 64
@@ -137,8 +159,8 @@ def test_legal_assessments_round_trip(tmp_path, assessment):
     "not json at all",
     "[1,2,3]",
     json.dumps({**_reply(), "extra_field": 1}),                  # extra field
-    json.dumps({**_reply(), "assessment": "maybe"}),             # bad enum
-    json.dumps(_reply(confidence="huge")),
+    json.dumps({**_reply(), "match_assessment": "maybe"}),       # bad enum
+    json.dumps(_reply(impact="huge")),                           # bad enum
     json.dumps(_reply(suggested_action="rewrite_everything")),
     json.dumps(_reply(summary="")),                              # empty text
     json.dumps(_reply(summary="x" * 801)),                       # over cap
@@ -160,7 +182,7 @@ def test_malformed_replies_are_one_invalid_response(tmp_path, bad):
 
 def test_fenced_json_is_the_only_tolerated_normalization(tmp_path):
     fenced = "```json\n" + json.dumps(_reply()) + "\n```"
-    assert _run(tmp_path, FakeTransport(raw_text=fenced))["assessment"] \
+    assert _run(tmp_path, FakeTransport(raw_text=fenced))["defect_assessment"] \
         == "confirmed"
 
 
@@ -213,7 +235,7 @@ def test_loopback_openai_compatible_is_allowed(tmp_path):
                           provider=Provider.OPENAI_COMPATIBLE, model="m")
     result = run_review(req, pack, ct, env={
         "AUDITOR_OPENAI_COMPAT_BASE_URL": "http://127.0.0.1:8080"})
-    assert result["assessment"] == "confirmed"
+    assert result["defect_assessment"] == "confirmed"
     assert ct.calls[0]["url"].startswith("http://127.0.0.1:8080")
 
 
@@ -312,7 +334,7 @@ def test_sidecar_atomic_valid_json_and_keyed(tmp_path):
     store = AIReviewStore(path)
     store.put(result)
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["schema_version"] == 1 and len(data["results"]) == 1
+    assert data["schema_version"] == 2 and len(data["results"]) == 1
     # no tmp litter from the atomic write
     assert not list(tmp_path.glob("*.tmp"))
     # a second run with another model is a SEPARATE entry, no overwrite
@@ -420,7 +442,8 @@ def test_api_success_and_get_roundtrip(tmp_path, monkeypatch):
                                         "model": "qwen"})
     assert r.status_code == 200
     body = r.json()
-    assert body["assessment"] == "confirmed" and body["stale"] is False
+    assert body["defect_assessment"] == "confirmed" \
+        and body["contract_version"] == 2 and body["stale"] is False
     g = c.get(f"/api/ai/reviews/{_rid()}")
     assert g.status_code == 200
     results = g.json()["results"]
@@ -655,7 +678,7 @@ def test_redaction_notice_present_exactly_when_redaction_applied(tmp_path):
     red = [p for p in pack["pieces"] if p["context_id"] == "redaction"]
     assert len(red) == 1 and red[0]["applied"] is True
     assert "not the original value" in red[0]["notice"]
-    assert "not evidence that the value was empty" in red[0]["notice"]
+    assert "literal_credential_proven" in red[0]["notice"]
     # a clean finding (nothing redacted) has NO redaction piece
     clean = {
         "summary": {"counts": {}},
@@ -674,20 +697,22 @@ def test_redaction_notice_present_exactly_when_redaction_applied(tmp_path):
     assert not [p for p in p2["pieces"] if p["context_id"] == "redaction"]
 
 
-def test_p002_credential_fact_is_mask_independent(tmp_path):
+def test_p002_proof_is_a_redaction_fact_from_the_sent_line_not_the_rule(tmp_path):
+    # W3-B2 closing: the old unconditional finding.credential_fact is GONE.
+    # Proof is a redaction_facts piece derived from the ACTUAL masked line.
     pack = build_context_pack(REPORT, _write_repo(tmp_path), _rid())
     finding = next(p for p in pack["pieces"] if p["context_id"] == "finding")
-    fact = finding["credential_fact"]
-    assert "NON-EMPTY literal credential" in fact
-    assert "***" not in fact and "Hunter2" not in fact
-    # a different secret VALUE produces the identical fact — it derives from
-    # rule/precision only, never from the value or the mask
-    other = json.loads(json.dumps(REPORT).replace("Hunter2SuperSecret999",
-                                                  "TotallyOtherSecret42"))
-    f2 = other["projects"][0]["findings"][0]
-    p2 = build_context_pack(other, None, finding_review_id(".", f2))
-    finding2 = next(p for p in p2["pieces"] if p["context_id"] == "finding")
-    assert finding2["credential_fact"] == fact
+    assert "credential_fact" not in finding
+    facts = next((p for p in pack["pieces"]
+                  if p["context_id"] == "redaction_facts"), None)
+    assert facts is not None
+    proven = [f for f in facts["facts"]
+              if f["kind"] == "literal_credential_proven"]
+    assert proven and proven[0]["line_start"] == 3   # the real conn-string line
+    assert "Hunter2" not in pack["canonical"]         # value never sent
+    # a P002 finding with NO source available produces NO fact (not rule-derived)
+    p2 = build_context_pack(REPORT, None, _rid())
+    assert not any(p["context_id"] == "redaction_facts" for p in p2["pieces"])
 
 
 def test_evaluator_never_special_cases_the_mask():
