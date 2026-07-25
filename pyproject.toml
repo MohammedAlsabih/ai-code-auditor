@@ -47,6 +47,13 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
 ]
+# W3-E5: the EXPERIMENTAL local agent audit runtime (opt-in, never default).
+# Optional so the core scanner and the fixed-window audit stay dependency-
+# light; agent mode needs `pip install .[agent]` AND the server switch
+# AUDITOR_AI_AGENT_AUDIT=confirm. Local Ollama only — no remote path.
+agent = [
+    "pydantic-ai-slim[openai]>=2.18,<3",
+]
 # pinned so `pip install -e .[dev]` reproduces the CI toolchain exactly, incl.
 # the defusedxml stubs mypy needs (CP-8.12: bare `mypy src` was not reproducible)
 dev = [
@@ -58,6 +65,8 @@ dev = [
     "types-PyYAML>=6.0,<7",
     "types-requests>=2.32,<3",
     "httpx>=0.26",             # FastAPI TestClient transport for the web tests
+    # the agent-runtime tests exercise pydantic-ai's TestModel/FunctionModel
+    "pydantic-ai-slim[openai]>=2.18,<3",
 ]
 
 [tool.hatch.build.targets.wheel]
