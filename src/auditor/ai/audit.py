@@ -871,6 +871,23 @@ class AuditRunner:
     def _execute(self, audit, packs, provider, model, consented,
                  static_findings, run) -> None:
         by_unit = {p["unit_id"]: p for p in packs}
+
+        def run_one(unit: dict[str, Any]) -> tuple[dict, list]:
+            result = run_audit_unit(
+                by_unit[unit["audit_unit_id"]], provider, model,
+                self._transport_factory(), env=self._env, consented=consented)
+            return result, candidates_from_result(result, static_findings)
+
+        self._execute_units(audit, run_one, run)
+
+    def _execute_units(self, audit: dict[str, Any],
+                       run_one: Callable[[dict], tuple[dict, list]],
+                       run) -> None:
+        """The shared one-at-a-time status machinery: iterate the audit's unit
+        rows, run each via `run_one` (fixed-window OR agent), persist results,
+        and finalize state. `run_one(unit)` returns (result, candidates) or
+        raises; the unit's real audit_unit_id is taken from the result (the
+        agent's is digest-bound and only known once the unit completes)."""
         stop = {"reason": ""}
         try:
             for unit in audit["units"]:
@@ -879,12 +896,11 @@ class AuditRunner:
                     continue
                 unit["state"] = "running"
                 try:
-                    result = run_audit_unit(
-                        by_unit[unit["audit_unit_id"]], provider, model,
-                        self._transport_factory(), env=self._env,
-                        consented=consented)
-                    cands = candidates_from_result(result, static_findings)
+                    result, cands = run_one(unit)
                     self._store.put_result(result, cands)
+                    # keep the status row's id in lockstep with the stored
+                    # result (a no-op for fixed-window; fills it for the agent)
+                    unit["audit_unit_id"] = result["audit_unit_id"]
                     unit["state"] = "completed"
                     unit["outcome"] = result["outcome"]
                     unit["issues"] = len(cands)
@@ -916,6 +932,74 @@ class AuditRunner:
             with self._lock:
                 if self._active == audit["audit_id"]:
                     self._active = None
+
+    def start_agent(self, index: Any,
+                    specs: list[tuple[str, Any]], provider: Provider,
+                    model: str,
+                    static_findings: dict[tuple[str, int], list[str]],
+                    env: dict[str, str] | None = None,
+                    pydantic_model: Any = None) -> str:
+        """W3-E5 EXPERIMENTAL: async agent audit — the SAME one-at-a-time,
+        no-retry, safe-stop machinery as `start`, but each unit runs the LOCAL
+        agent runtime (which requests its own bounded, redacted context) rather
+        than a pre-built fixed window. `specs` is a list of (project_root,
+        AuditQuery). Local only; no consent token (dynamic reads cannot be
+        consent-pre-bound). OFF unless AUDITOR_AI_AGENT_AUDIT=confirm — the
+        caller gates before reaching here; run_agent_unit re-checks."""
+        if not specs:
+            raise ValueError("no audit units to run")
+        from auditor.ai.audit_agent import (
+            AUDIT_AGENT_PROMPT_VERSION,
+            run_agent_unit,
+        )
+        with self._lock:
+            if self._active is not None:
+                raise RuntimeError("another AI audit is already running")
+            import secrets
+            audit_id = "a" + secrets.token_hex(8)
+            self._active = audit_id
+        try:
+            # the agent's real unit_id is digest-bound (only known once it has
+            # read), so each row starts with a DETERMINISTIC placeholder over an
+            # empty digest and is overwritten with the true id on completion —
+            # keeping the stored schema (a hex64 id per unit) intact. Agent runs
+            # are told apart from fixed-window ones by prompt_version, not a
+            # mode key, so the audit row stays schema-clean.
+            audit = {
+                "audit_id": audit_id, "state": "running",
+                "created_at": datetime.now(timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "provider": provider.value, "model": model,
+                "prompt_version": AUDIT_AGENT_PROMPT_VERSION,
+                "units": [{"audit_unit_id": audit_unit_id(
+                               project, q.id, q.query_version, ""),
+                           "project": project,
+                           "query_id": q.id, "state": "pending",
+                           "outcome": "", "error": "", "issues": 0}
+                          for project, q in specs],
+            }
+            self._store.put_audit(audit)
+            by_key = {(project, q.id): (project, q) for project, q in specs}
+
+            def run_one(unit: dict[str, Any]) -> tuple[dict, list]:
+                project, q = by_key[(unit["project"], unit["query_id"])]
+                result = run_agent_unit(index, project, q, provider, model,
+                                        env=env, pydantic_model=pydantic_model)
+                return result, candidates_from_result(result, static_findings)
+
+            run = _RunState(cancel=threading.Event())
+            self._runs[audit_id] = run
+            run.thread = threading.Thread(
+                target=self._execute_units, args=(audit, run_one, run),
+                daemon=True)
+            run.thread.start()
+        except BaseException:
+            with self._lock:
+                if self._active == audit_id:
+                    self._active = None
+            self._runs.pop(audit_id, None)
+            raise
+        return audit_id
 
     def cancel(self, audit_id: str) -> bool:
         run = self._runs.get(audit_id)

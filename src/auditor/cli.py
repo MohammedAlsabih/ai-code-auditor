@@ -96,6 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
                                '"max_output_tokens": 16384, '
                                '"max_input_bytes": 300000}')
     ai_audit.add_argument("--confirm-remote", action="store_true")
+    # W3-E5: EXPERIMENTAL local agent runtime — the model requests its own
+    # context via read-only tools instead of a fixed window. OFF unless the
+    # SERVER env sets AUDITOR_AI_AGENT_AUDIT=confirm; local providers only; the
+    # fixed-window engine stays the default. Still NO free prompt.
+    ai_audit.add_argument("--agent", action="store_true",
+                          help="EXPERIMENTAL: use the local agent runtime "
+                               "(requires AUDITOR_AI_AGENT_AUDIT=confirm; "
+                               "local providers only)")
 
     srv = sub.add_parser("serve",
                          help="open a report.json in a local web explorer (127.0.0.1 only)")
@@ -453,6 +461,14 @@ def _ai_audit(args) -> int:
         local = is_local_review_provider(provider, cfg)
     except AIError:
         local = False
+
+    # W3-E5: EXPERIMENTAL agent runtime branch. Opt-in via the SERVER env
+    # switch only; local providers only; the fixed-window path below is the
+    # default and untouched. No free prompt — queries come from the profile.
+    if getattr(args, "agent", False):
+        return _ai_audit_agent(args, provider, report, report_path, repo,
+                               limits, local)
+
     consented = False
     if not local:
         if not getattr(args, "confirm_remote", False) \
@@ -540,6 +556,115 @@ def _ai_audit(args) -> int:
                        "provider": provider.value, "model": args.model,
                        "num_ctx": num_ctx, "results": summary},
                       ensure_ascii=True, indent=1))
+    return 0 if ok_units else 1
+
+
+def _ai_audit_agent(args, provider, report, report_path, repo, limits,
+                    local: bool) -> int:
+    """`auditor ai audit --agent` — the W3-E5 EXPERIMENTAL local agent runtime.
+
+    Same predefined queries, same store / candidate / verifier pipeline, same
+    redaction + PrivacyManifest — but the model REQUESTS its own context via
+    read-only tools instead of a fixed window. OFF unless the SERVER env sets
+    AUDITOR_AI_AGENT_AUDIT=confirm; LOCAL providers only (dynamic reads cannot
+    be consent-pre-bound, so there is no remote path). No free prompt.
+    Exit: 0 ok, 1 all-units error, 2 usage, 3 gate."""
+    import json as _json
+    import os as _os
+
+    from auditor.ai import AIError, Provider
+    from auditor.ai.audit import candidates_from_result
+    from auditor.ai.audit_agent import (
+        AgentAuditDisabledError,
+        agent_audit_enabled,
+        run_agent_unit,
+    )
+    from auditor.ai.audit_index import RepositoryAuditIndex
+    from auditor.ai.audit_queries import queries_for_profile
+    from auditor.ai.audit_store import AIAuditStore
+    from auditor.ai.review import (
+        OllamaNumCtxError,
+        PrivacyGateError,
+        ollama_num_ctx,
+    )
+
+    # gate 1: the server switch. Fixed, safe message; nothing is built yet.
+    if not agent_audit_enabled():
+        print("blocked [agent_audit_disabled]: the experimental agent audit "
+              "engine is off; set AUDITOR_AI_AGENT_AUDIT=confirm on the server",
+              file=sys.stderr)
+        return 3
+    # gate 2: local only. Refuse before any model construction or network I/O.
+    if not local:
+        print("blocked [agent_local_only]: the agent runtime runs against "
+              "local providers only (no remote path)", file=sys.stderr)
+        return 3
+
+    try:
+        num_ctx = ollama_num_ctx() if provider is Provider.OLLAMA else None
+    except OllamaNumCtxError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 2
+
+    project_roots = [(str(p.get("root", "")), str(p.get("language", "")))
+                     for p in report.get("projects", [])
+                     if isinstance(p, dict)]
+    index = RepositoryAuditIndex(repo, project_roots)
+    wanted = [args.project] if args.project \
+        else sorted({r for r, _ in project_roots})
+    # only run units that have a starting anchor (a seed candidate); mirrors the
+    # fixed-window "skip units with no retrievable context".
+    units = [(project, query)
+             for project in wanted
+             for query in queries_for_profile(args.profile)
+             if index.candidates_for(query, project)]
+    if not units:
+        print("error | خطأ: no agent audit units for this profile/project",
+              file=sys.stderr)
+        return 2
+    # coarse pre-flight bound: cap the number of UNITS by the request budget so
+    # a broad profile cannot fan out without limit (each unit is INTERNALLY
+    # bounded by the agent's own frozen usage limits and per-file/unit caps).
+    if len(units) > limits.max_requests:
+        print(f"error | خطأ: {len(units)} agent units exceed max_requests "
+              f"({limits.max_requests}); narrow --project/--profile or raise "
+              "max_requests", file=sys.stderr)
+        return 2
+
+    store = AIAuditStore(
+        report_path.parent / (report_path.stem + ".ai-audit.json"))
+    ok_units = 0
+    summary = []
+    for project, query in units:
+        try:
+            result = run_agent_unit(index, project, query, provider,
+                                    args.model, env=dict(_os.environ))
+            cands = candidates_from_result(result)
+            store.put_result(result, cands)
+            ok_units += 1
+            screened = sum(1 for c in cands
+                           if c["verification"] == "supported")
+            summary.append({"unit": result["audit_unit_id"][:12],
+                            "project": project, "query": query.id,
+                            "outcome": result["outcome"],
+                            "candidates": len(cands),
+                            # W3-E4C: screening-supported only (not proof)
+                            "screened_candidates": screened,
+                            "latency_ms": result["latency_ms"]})
+        except AgentAuditDisabledError:
+            print("blocked [agent_audit_disabled]: engine disabled mid-run",
+                  file=sys.stderr)
+            return 3
+        except PrivacyGateError as e:
+            print(f"blocked [privacy_gate_required]: {e}", file=sys.stderr)
+            return 3
+        except AIError as e:
+            summary.append({"project": project, "query": query.id,
+                            "error": e.code})
+    print(_json.dumps({"mode": "agent", "units": len(units),
+                       "completed": ok_units, "provider": provider.value,
+                       "model": args.model, "num_ctx": num_ctx,
+                       "results": summary}, ensure_ascii=True, indent=1))
     return 0 if ok_units else 1
 
 

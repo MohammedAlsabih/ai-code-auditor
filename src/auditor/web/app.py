@@ -266,13 +266,18 @@ class AIBatchIn(BaseModel):
 
 class AIAuditPreviewIn(BaseModel):
     """W3-E: the browser picks a PROFILE, projects, provider and model —
-    never a prompt, query text, api_key, or base_url (extra='forbid')."""
+    never a prompt, query text, api_key, or base_url (extra='forbid').
+
+    W3-E5: `mode` is a narrow enum ("fixed" default | "agent"); the agent
+    runtime is server-gated and local-only — the browser can only REQUEST it,
+    never enable it or pass a prompt."""
     model_config = {"extra": "forbid"}
 
     profile: str
     provider: str
     model: str
     projects: list[str] = []
+    mode: str = "fixed"
 
 
 class AIAuditIn(BaseModel):
@@ -284,6 +289,7 @@ class AIAuditIn(BaseModel):
     limits: AIBatchLimitsIn
     projects: list[str] = []
     consent_token: str = ""
+    mode: str = "fixed"
 
 
 class AICandidateReviewIn(BaseModel):
@@ -959,6 +965,10 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         audit_language,
         queries_for_profile,
     )
+    from auditor.ai.audit_agent import (
+        AUDIT_AGENT_PROMPT_VERSION,
+        agent_audit_enabled,
+    )
     from auditor.ai.audit_store import AIAuditStore, AIAuditStoreError
     from auditor.ai.review import (
         OllamaNumCtxError,
@@ -1021,6 +1031,26 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         return packs, {"skipped_units": skipped,
                        "index_skipped": index.skipped}
 
+    def _build_agent_specs(profile: str, projects: list[str]
+                           ) -> tuple[Any, list[tuple[str, Any]]]:
+        """W3-E5: the (index, [(project, query), ...]) for the agent runtime.
+        Same language gate as the fixed-window packs, but a unit is included
+        when the index has a seed ANCHOR (the agent traces from there) rather
+        than a pre-built window. No prompt, no free query."""
+        assert repo is not None            # _audit_gate 409s before this
+        index = RepositoryAuditIndex(repo, _report_projects)
+        wanted = projects or sorted({r for r, _ in _report_projects})
+        specs: list[tuple[str, Any]] = []
+        for project in sorted(wanted):
+            langs = {audit_language(lang)
+                     for r, lang in _report_projects if r == project}
+            for query in queries_for_profile(profile):
+                if langs and not (langs & set(query.languages)):
+                    continue
+                if index.candidates_for(query, project):
+                    specs.append((project, query))
+        return index, specs
+
     def _audit_gate(provider: Provider) -> JSONResponse | None:
         if repo is None:
             return _err(409, "AI audit needs the repository: start the "
@@ -1031,6 +1061,72 @@ def create_app(report_path: Path, repo_root: Path | None = None,
                  "status": "privacy_gate_required"}, status_code=403)
         return None
 
+    def _agent_gate(provider: Provider) -> JSONResponse | None:
+        """W3-E5: the two extra gates the agent runtime adds on top of the
+        repo check — the server env switch, and local-only. Fixed statuses; no
+        echo. Returns a response to short-circuit, or None to proceed."""
+        if not agent_audit_enabled():
+            return _AsciiJSON(
+                {"error": "the experimental agent audit engine is off",
+                 "status": "agent_audit_disabled"}, status_code=403)
+        if not _ai_local(provider):
+            return _AsciiJSON(
+                {"error": "the agent runtime is local-only (no remote path)",
+                 "status": "agent_local_only"}, status_code=403)
+        return None
+
+    def _agent_preview(provider: Provider,
+                       body: AIAuditPreviewIn) -> JSONResponse:
+        """W3-E5: read-only preview for the agent runtime — unit count from
+        seed-anchored (project, query) pairs, the server num_ctx, and no
+        consent token (local-only). No prompt, no cost estimate (dynamic)."""
+        bad = _agent_gate(provider)
+        if bad is not None:
+            return bad
+        known_roots = {r for r, _ in _report_projects}
+        unknown = [p for p in body.projects if p not in known_roots]
+        if unknown:
+            return _err(404, f"{len(unknown)} unknown project root(s)")
+        try:
+            effective_num_ctx = (ollama_num_ctx()
+                                  if provider is Provider.OLLAMA else None)
+        except OllamaNumCtxError as e:
+            return _AsciiJSON({"error": str(e), "status": e.code},
+                              status_code=400)
+        _index, specs = _build_agent_specs(body.profile, body.projects)
+        n = len(specs)
+        # a SUPERSET of the fixed-window preview shape so the browser's single
+        # preview/start flow is mode-agnostic. The byte / token / redaction /
+        # cost numbers are NOT pre-known for the agent (it reads on demand), so
+        # they are reported as 0 / unknown; the UI shows a distinct agent
+        # summary. max_output_tokens bounds each unit's structured reply and
+        # satisfies the shared limits parser on start.
+        return _AsciiJSON({
+            "mode": "agent",
+            "profile": body.profile,
+            "provider": provider.value,
+            "model": body.model.strip(),
+            "num_ctx": effective_num_ctx,
+            "units": n,
+            "request_count": n,
+            "files": 0,
+            "input_bytes": 0,
+            "estimated_input_tokens": 0,
+            "max_output_tokens": AUDIT_MAX_OUTPUT_TOKENS * max(n, 1),
+            "redaction_total": 0,
+            "cached": 0,
+            "fresh": n,
+            "projects": sorted({p for p, _ in specs}),
+            "queries": sorted({q.id for _, q in specs}),
+            "concurrency": 1,
+            "request_timeout_seconds": int(review_timeout()),
+            "cost_status": "unknown",
+            "retention": "unknown",
+            "agent_available": True,
+            "agent_eligible": True,
+            "consent_token": "",
+        })
+
     @app.post("/api/ai/audits/preview")
     def ai_audit_preview(body: AIAuditPreviewIn) -> JSONResponse:
         provider = _ai_provider(body.provider)
@@ -1040,9 +1136,13 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             return _err(400, "unknown audit profile")
         if not body.model.strip():
             return _err(400, "model is required")
+        if body.mode not in ("fixed", "agent"):
+            return _err(400, "unknown mode")
         bad = _audit_gate(provider)
         if bad is not None:
             return bad
+        if body.mode == "agent":
+            return _agent_preview(provider, body)
         known_roots = {r for r, _ in _report_projects}
         unknown = [p for p in body.projects if p not in known_roots]
         if unknown:
@@ -1083,6 +1183,12 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         preview["fresh"] = preview["units"] - preview["cached"]
         preview["concurrency"] = 1               # local AND remote
         preview["request_timeout_seconds"] = int(review_timeout())
+        # W3-E5: advisory flags so the UI can offer the EXPERIMENTAL agent
+        # toggle (never a prompt) — available iff the server switch is on and
+        # the selected provider is local. This fixed-window preview is default.
+        preview["mode"] = "fixed"
+        preview["agent_available"] = agent_audit_enabled()
+        preview["agent_eligible"] = _ai_local(provider)
         pricing = load_pricing()
         row = ((pricing or {}).get(provider.value) or {}) \
             .get(body.model.strip()) if pricing else None
@@ -1111,6 +1217,42 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             preview["consent_token"] = ""
         return _AsciiJSON(preview)
 
+    def _agent_start(provider: Provider, body: AIAuditIn) -> JSONResponse:
+        """W3-E5: start an async agent audit through the SAME runner/status/
+        poll machinery. Server-gated + local-only; no consent token. The unit
+        count is bounded by limits.max_requests (each unit is internally bounded
+        by the agent's own frozen usage limits and byte caps)."""
+        bad = _agent_gate(provider)
+        if bad is not None:
+            return bad
+        if provider is Provider.OLLAMA:
+            try:
+                ollama_num_ctx()
+            except OllamaNumCtxError as e:
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=400)
+        index, specs = _build_agent_specs(body.profile, body.projects)
+        if not specs:
+            return _err(400, "no audit units for this profile/projects")
+        try:
+            limits = BatchLimits.parse(body.limits.model_dump(),
+                                       load_pricing() is not None)
+        except BatchError as e:
+            return _err(400, str(e))
+        if len(specs) > limits.max_requests:
+            return _err(400, f"{len(specs)} agent units exceed max_requests "
+                             f"({limits.max_requests})")
+        try:
+            audit_id = audit_runner.start_agent(index, specs, provider,
+                                                body.model.strip(),
+                                                _static_by_line)
+        except RuntimeError as e:
+            return _err(409, str(e))
+        except (ValueError, AIAuditStoreError) as e:
+            return _err(400, str(e))
+        return _AsciiJSON({"audit_id": audit_id, "state": "running"},
+                          status_code=202)
+
     @app.post("/api/ai/audits")
     def ai_audit_start(body: AIAuditIn) -> JSONResponse:
         provider = _ai_provider(body.provider)
@@ -1120,9 +1262,13 @@ def create_app(report_path: Path, repo_root: Path | None = None,
             return _err(400, "unknown audit profile")
         if not body.model.strip():
             return _err(400, "model is required")
+        if body.mode not in ("fixed", "agent"):
+            return _err(400, "unknown mode")
         bad = _audit_gate(provider)
         if bad is not None:
             return bad
+        if body.mode == "agent":
+            return _agent_start(provider, body)
         # W3-E4D: reject an invalid server num_ctx up front (fixed 400, no
         # echo) so no unit ever reaches the wire with a malformed config.
         if provider is Provider.OLLAMA:
@@ -1202,6 +1348,11 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         row["counts"] = counts
         row["outcomes"] = outcomes
         row["remaining"] = counts["pending"] + counts["running"]
+        # W3-E5: derive the effective mode read-only from the stored identity
+        # (the audit row itself stays schema-clean — no mode key persisted).
+        row["mode"] = ("agent"
+                       if row.get("prompt_version") == AUDIT_AGENT_PROMPT_VERSION
+                       else "fixed")
         return _AsciiJSON(row)
 
     @app.post("/api/ai/audits/{audit_id}/cancel")
