@@ -53,6 +53,9 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
   const [provider, setProvider] = useState('ollama')
   const [model, setModel] = useState('')
   const [profile, setProfile] = useState<AuditProfile>('security')
+  // W3-E5: opt into the EXPERIMENTAL local agent runtime. The server is the
+  // authority — it refuses if the switch is off or the provider is remote.
+  const [agentMode, setAgentMode] = useState(false)
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const [state, setState] = useState<PanelState>('idle')
   const [msg, setMsg] = useState('')
@@ -88,6 +91,8 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
     const info = providers.find((p) => p.provider === provider)
     return info ? info.locality === 'remote' : provider !== 'ollama'
   })()
+  // the agent is local-only; a remote provider forces the fixed-window path
+  const effectiveMode: 'fixed' | 'agent' = agentMode && !isRemote ? 'agent' : 'fixed'
 
   const toggleProject = (p: string) => {
     setPicked((prev) => {
@@ -103,7 +108,7 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
     setState('previewing')
     setMsg('')
     try {
-      const raw = await postAIAuditPreview(profile, provider, model.trim(), [...picked])
+      const raw = await postAIAuditPreview(profile, provider, model.trim(), [...picked], effectiveMode)
       const parsed = parseAuditPreview(raw)
       if (!parsed) throw new Error('unexpected preview shape')
       setPreview(parsed)
@@ -152,6 +157,7 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
           max_input_bytes: Math.max(preview.input_bytes, 1),
         },
         preview.consent_token,
+        preview.mode,
       )) as { audit_id?: string }
       if (!res.audit_id) throw new Error('the server did not return an audit id')
       auditId.current = res.audit_id
@@ -232,6 +238,23 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
           aria-label="Audit model"
           disabled={state === 'running'}
         />
+        <label
+          className="audit-project"
+          title={
+            isRemote
+              ? 'The agent runtime is local-only; a remote provider uses the fixed window.'
+              : 'Experimental: the model requests its own context via read-only tools (local only). Server-gated — you never write a prompt.'
+          }
+        >
+          <input
+            type="checkbox"
+            checked={agentMode && !isRemote}
+            onChange={(e) => setAgentMode(e.target.checked)}
+            disabled={state === 'running' || state === 'previewing' || isRemote}
+            aria-label="Agent mode (experimental)"
+          />
+          <span className="ai-conf">Agent (experimental)</span>
+        </label>
         <button
           className="btn btn-primary"
           onClick={openPreview}
@@ -273,51 +296,79 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
         <div className="consent-overlay" role="dialog" aria-modal="true">
           <div className="consent-modal">
             <div className="ai-sub">
-              AI audit — {preview.units} unit(s){isRemote ? ' → REMOTE provider' : ' (local)'}
+              AI audit — {preview.units} unit(s)
+              {preview.mode === 'agent' ? ' · AGENT (local, experimental)' : ''}
+              {isRemote ? ' → REMOTE provider' : preview.mode === 'agent' ? '' : ' (local)'}
             </div>
-            <dl className="consent-facts">
-              <div>
-                <dt>Queries / projects</dt>
-                <dd>
-                  {preview.queries.join(', ') || '—'} · {preview.projects.length} project(s)
-                </dd>
-              </div>
-              <div>
-                <dt>Requests</dt>
-                <dd>{preview.request_count} (one per unit, no pooling)</dd>
-              </div>
-              <div>
-                <dt>Payload</dt>
-                <dd>
-                  {preview.files} file excerpt(s), {preview.input_bytes} bytes (~
-                  {preview.estimated_input_tokens} tokens in, ≤{preview.max_output_tokens} out)
-                </dd>
-              </div>
-              <div>
-                <dt>Runtime</dt>
-                <dd>
-                  concurrency {preview.concurrency} · timeout {preview.request_timeout_seconds}s ·{' '}
-                  {preview.num_ctx != null ? `context ${preview.num_ctx} · ` : ''}
-                  {preview.cached} cached / {preview.fresh} fresh
-                </dd>
-              </div>
-              <div>
-                <dt>Redactions</dt>
-                <dd>{preview.redaction_total} value(s) masked before sending</dd>
-              </div>
-              <div>
-                <dt>Retention / cost</dt>
-                <dd>
-                  {preview.retention} /{' '}
-                  {preview.cost_status === 'estimated'
-                    ? `~$${preview.estimated_cost_usd}`
-                    : 'unknown'}
-                </dd>
-              </div>
-            </dl>
+            {preview.mode === 'agent' ? (
+              <dl className="consent-facts">
+                <div>
+                  <dt>Queries / projects</dt>
+                  <dd>
+                    {preview.queries.join(', ') || '—'} · {preview.projects.length} project(s)
+                  </dd>
+                </div>
+                <div>
+                  <dt>How it reads</dt>
+                  <dd>
+                    the model requests its own context via read-only tools — each read is
+                    confined to the repo, redacted, and logged in the PrivacyManifest. Payload
+                    size is not known in advance.
+                  </dd>
+                </div>
+                <div>
+                  <dt>Runtime</dt>
+                  <dd>
+                    concurrency {preview.concurrency} · timeout {preview.request_timeout_seconds}s ·{' '}
+                    {preview.num_ctx != null ? `context ${preview.num_ctx}` : 'context —'}
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <dl className="consent-facts">
+                <div>
+                  <dt>Queries / projects</dt>
+                  <dd>
+                    {preview.queries.join(', ') || '—'} · {preview.projects.length} project(s)
+                  </dd>
+                </div>
+                <div>
+                  <dt>Requests</dt>
+                  <dd>{preview.request_count} (one per unit, no pooling)</dd>
+                </div>
+                <div>
+                  <dt>Payload</dt>
+                  <dd>
+                    {preview.files} file excerpt(s), {preview.input_bytes} bytes (~
+                    {preview.estimated_input_tokens} tokens in, ≤{preview.max_output_tokens} out)
+                  </dd>
+                </div>
+                <div>
+                  <dt>Runtime</dt>
+                  <dd>
+                    concurrency {preview.concurrency} · timeout {preview.request_timeout_seconds}s ·{' '}
+                    {preview.num_ctx != null ? `context ${preview.num_ctx} · ` : ''}
+                    {preview.cached} cached / {preview.fresh} fresh
+                  </dd>
+                </div>
+                <div>
+                  <dt>Redactions</dt>
+                  <dd>{preview.redaction_total} value(s) masked before sending</dd>
+                </div>
+                <div>
+                  <dt>Retention / cost</dt>
+                  <dd>
+                    {preview.retention} /{' '}
+                    {preview.cost_status === 'estimated'
+                      ? `~$${preview.estimated_cost_usd}`
+                      : 'unknown'}
+                  </dd>
+                </div>
+              </dl>
+            )}
             <div className="review-actions">
               <button className="btn btn-primary" onClick={startAudit}>
-                {isRemote ? 'Confirm send' : 'Start audit'}
+                {isRemote ? 'Confirm send' : preview.mode === 'agent' ? 'Start agent audit' : 'Start audit'}
               </button>
               <button className="btn" onClick={() => setState('idle')}>
                 Cancel — send nothing

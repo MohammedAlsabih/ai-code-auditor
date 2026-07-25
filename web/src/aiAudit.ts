@@ -44,6 +44,12 @@ export interface AIAuditPreview {
   queries: string[]
   projects: string[]
   consent_token: string
+  // W3-E5: "fixed" (default) or "agent" (experimental local runtime). The two
+  // availability flags are advisory — the server is the authority and refuses
+  // an agent request the switch/provider does not allow.
+  mode: 'fixed' | 'agent'
+  agent_available: boolean
+  agent_eligible: boolean
 }
 
 export function parseAuditPreview(raw: unknown): AIAuditPreview | null {
@@ -78,6 +84,9 @@ export function parseAuditPreview(raw: unknown): AIAuditPreview | null {
     queries: strArr(raw.queries),
     projects: strArr(raw.projects),
     consent_token: typeof raw.consent_token === 'string' ? raw.consent_token : '',
+    mode: raw.mode === 'agent' ? 'agent' : 'fixed',
+    agent_available: raw.agent_available === true,
+    agent_eligible: raw.agent_eligible === true,
   }
 }
 

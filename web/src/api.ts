@@ -382,12 +382,13 @@ export async function postAIAuditPreview(
   provider: string,
   model: string,
   projects: string[],
+  mode: 'fixed' | 'agent' = 'fixed',
 ): Promise<unknown> {
   return aiJson(
     await apiFetch('/api/ai/audits/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile, provider, model, projects }),
+      body: JSON.stringify({ profile, provider, model, projects, mode }),
     }),
   )
 }
@@ -399,6 +400,7 @@ export async function postAIAudit(
   projects: string[],
   limits: AIBatchLimits,
   consentToken = '',
+  mode: 'fixed' | 'agent' = 'fixed',
 ): Promise<unknown> {
   return aiJson(
     await apiFetch('/api/ai/audits', {
@@ -411,6 +413,7 @@ export async function postAIAudit(
         projects,
         limits,
         consent_token: consentToken,
+        mode,
       }),
     }),
   )
