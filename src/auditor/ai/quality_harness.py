@@ -56,13 +56,15 @@ def _plan_for(case: CorpusCase) -> CasePlan:
         case.target.file, case.target.line_start, case.target.line_end]
     if pack is None:
         return CasePlan(case.case_id, case.query_id, case.category, case.kind,
-                        case.reason, case.project, "", "", 0, [], {}, tgt)
+                        case.reason, case.project, "", "", 0, [], {}, tgt,
+                        case.split)
     spans = {m["file"]: [list(s) for s in m["spans"]]
              for m in pack["piece_map"].values()}
     return CasePlan(
         case.case_id, case.query_id, case.category, case.kind, case.reason,
         case.project, pack["unit_id"], pack["digest"],
-        len(pack["canonical"].encode("utf-8")), sorted(spans), spans, tgt)
+        len(pack["canonical"].encode("utf-8")), sorted(spans), spans, tgt,
+        case.split)
 
 
 def build_plan(corpus: tuple[CorpusCase, ...] | None = None) -> dict[str, Any]:
@@ -114,7 +116,7 @@ def run_case(case: CorpusCase, provider: Provider, model: str,
 
 _PLAN_KEYS = {"case_id", "query_id", "category", "kind", "reason", "project",
               "unit_id", "context_digest", "input_bytes", "sent_files",
-              "sent_spans", "target"}
+              "sent_spans", "target", "split"}
 _RESULT_MIN = {"case_id", "query_id", "category", "expected", "state",
                "unit_id", "context_digest"}
 

@@ -19,7 +19,8 @@ from auditor.ai.audit_index import RepositoryAuditIndex
 from auditor.ai.audit_queries import query_by_id
 from auditor.ai.contract import ERROR_CODES, HttpResponse, Provider
 from auditor.ai.quality_corpus import (
-    EXPECT_NEGATIVE, CorpusCase, CorpusFile, cases, corpus_digest)
+    EXPECT_NEGATIVE, SPLIT_DEVELOPMENT, SPLIT_HOLDOUT, CorpusCase, CorpusFile,
+    cases, corpus_digest, holdout_cases)
 from auditor.ai.quality_harness import (
     HarnessError, anonymized_summary, build_plan, classify, run_case,
     run_corpus, verify_one_to_one)
@@ -326,7 +327,7 @@ def test_no_answer_leaking_in_source_or_paths():
     banned = ("no authorization", "no transaction", "no schema validation",
               "no ownership", "swallowed", "fully implemented",
               "nothing to fix", "safe", "no issue")
-    for c in CORPUS:
+    for c in cases(None):                    # BOTH splits
         blob = " ".join([f.text for f in c.files]
                         + [f.rel for f in c.files]).lower()
         for leak in banned:
@@ -343,7 +344,7 @@ def test_ai008_negative_carries_a_real_marker_without_a_verdict_comment():
 # ---- per-query file cap (hard cap) ---------------------------------------------------
 
 def test_files_sent_never_exceeds_max_context_files():
-    for c in CORPUS:
+    for c in cases(None):                    # BOTH splits
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             for cf in c.files:
@@ -356,6 +357,62 @@ def test_files_sent_never_exceeds_max_context_files():
                 continue
             cap = query_by_id(c.query_id).max_context_files
             assert pack["privacy_manifest"]["files_sent"] <= cap, c.case_id
+
+
+# ---- W3-E4B1: pre-registered development + holdout splits ----------------------------
+
+def test_holdout_covers_every_query_with_all_three_kinds():
+    hold = holdout_cases()
+    assert len(hold) >= 24
+    assert all(c.split == SPLIT_HOLDOUT for c in hold)
+    assert all(c.split == SPLIT_DEVELOPMENT for c in CORPUS)
+    by_query: dict[str, set] = {}
+    for c in hold:
+        by_query.setdefault(c.query_id, set()).add(c.kind)
+    for qid in ("AI001", "AI002", "AI003", "AI004", "AI005", "AI006",
+                "AI007", "AI008"):
+        assert by_query.get(qid) == {"positive", "negative", "abstain"}, qid
+    for c in hold:
+        if c.kind == "positive":
+            assert c.target is not None, c.case_id
+
+
+def test_holdout_never_repeats_a_development_snippet():
+    dev_texts = {f.text for c in CORPUS for f in c.files}
+    for c in holdout_cases():
+        for f in c.files:
+            assert f.text not in dev_texts, c.case_id
+
+
+def test_every_holdout_case_builds_a_real_unit_with_target_in_spans():
+    for c in holdout_cases():
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for cf in c.files:
+                p = base / cf.rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(cf.text, encoding="utf-8")
+            idx = RepositoryAuditIndex(base, c.project_roots)
+            pack = build_audit_pack(idx, c.project, query_by_id(c.query_id))
+            assert pack is not None, c.case_id           # every case retrieves
+            if c.kind == "positive":
+                spans = {m["file"]: m["spans"]
+                         for m in pack["piece_map"].values()}
+                s = spans.get(c.target.file)
+                assert s and any(a <= c.target.line_start
+                                 and c.target.line_end <= b
+                                 for a, b in s), c.case_id
+
+
+def test_split_digests_are_fixed_and_distinct():
+    d_dev = corpus_digest(CORPUS)
+    d_hold = corpus_digest(holdout_cases())
+    d_all = corpus_digest(cases(None))
+    assert len({d_dev, d_hold, d_all}) == 3
+    # the plan records each case's split, and holdout plans carry it through
+    plan = build_plan(holdout_cases())
+    assert all(pc["split"] == SPLIT_HOLDOUT for pc in plan["cases"])
+    assert plan["corpus_digest"] == d_hold
 
 
 # ---- confined output -----------------------------------------------------------------

@@ -1,10 +1,17 @@
-"""W3-E4A2 (closing): a fixed, deterministic multi-file quality corpus for
-AI001-AI008. Every case is human-labelled BEFORE any model runs with a
-written `reason` and, for positives, an exact `target` (file + line span the
-detection must cite). Sources carry NO answer-leaking comments, NO real
-repository names, and NO valid secrets. Negative controls (safe parameterized
-SQL, DOMPurify, an authorized route across files, an out-of-scope dependency
-case) exist AS SOURCE, independent of any report's static findings.
+"""W3-E4B1: a fixed, deterministic multi-file quality corpus for AI001-AI008
+in TWO pre-registered splits. `development` is the W3-E4A set the earlier
+measurements ran on; `holdout` is a NEW, never-measured set (one positive, one
+negative, one abstention per query) whose snippets and wording deliberately do
+not repeat the development set — so a prompt/contract change tuned on
+development can be judged on cases it has never seen.
+
+Every case is human-labelled BEFORE any model runs with a written `reason`
+and, for positives, an exact `target` (file + line span the detection must
+cite). Sources carry NO answer-leaking comments or file names, NO real
+repository names, and NO valid secrets. Negative controls (parameterized SQL,
+DOMPurify, an authorized route across files, an explicit transaction, wrap-
+and-rethrow, schema validation, a declared dependency, a marker-as-data lint
+tool) exist AS SOURCE, independent of any report's static findings.
 """
 from __future__ import annotations
 
@@ -14,11 +21,14 @@ from dataclasses import dataclass, field
 
 from auditor.ai.audit_queries import query_by_id
 
-CORPUS_VERSION = 2
+CORPUS_VERSION = 3
 
 EXPECT_POSITIVE = "positive"
 EXPECT_NEGATIVE = "negative"
 EXPECT_ABSTAIN = "abstain"
+
+SPLIT_DEVELOPMENT = "development"
+SPLIT_HOLDOUT = "holdout"
 
 
 @dataclass(frozen=True)
@@ -52,6 +62,8 @@ class CorpusCase:
     files: tuple[CorpusFile, ...]
     reason: str
     target: Target | None = None    # required iff positive
+    split: str = SPLIT_DEVELOPMENT  # development|holdout — fixed at
+    #                                 registration, part of the corpus digest
 
     @property
     def category(self) -> str:
@@ -356,16 +368,312 @@ _CASES: tuple[CorpusCase, ...] = (
 )
 
 
-def cases() -> tuple[CorpusCase, ...]:
+# ---- W3-E4B1: the pre-registered HOLDOUT split -------------------------------------
+# One positive, one negative, one abstention per query. Snippets, file names,
+# and phrasing are deliberately DIFFERENT from the development split above, so
+# behaviour changes tuned on development are judged on unseen material.
+def _hold(case_id, query_id, kind, project, files, reason, target=None):
+    return CorpusCase(case_id, query_id, kind, project, files, reason,
+                      target=target, split=SPLIT_HOLDOUT)
+
+
+_HOLDOUT: tuple[CorpusCase, ...] = (
+    # ---- AI001 authorization -------------------------------------------------
+    _hold(
+        "AI001-hold-pos", "AI001", EXPECT_POSITIVE, "web2",
+        (_src("web2/app/api/records/route.ts",
+              "import { store } from '@/lib/store';\n"
+              "export async function DELETE(req: Request) {\n"
+              "  const id = new URL(req.url).searchParams.get('id');\n"
+              "  await store.remove('records', id);\n"
+              "  return new Response(null, { status: 204 });\n"
+              "}\n", "typescript"),
+         _src("web2/lib/store.ts",
+              "export const store = {\n"
+              "  async remove(table: string, id: string | null) {\n"
+              "    return db.exec('delete', table, id);\n"
+              "  },\n"
+              "};\n", "typescript"),
+         _src("web2/middleware.ts",
+              "export function middleware(req) {\n"
+              "  const { pathname } = new URL(req.url);\n"
+              "  if (pathname.startsWith('/admin')) {\n"
+              "    const t = req.cookies.get('opsession');\n"
+              "    if (!t) return redirectToLogin();\n"
+              "  }\n"
+              "  return next();\n"
+              "}\n", "typescript")),
+        "a destructive DELETE route removes a record by a request id; the "
+        "project middleware only gates /admin paths, so /api/records is "
+        "reachable with no session or ownership check — all the context "
+        "needed to see the gap is in the payload.",
+        target=Target("web2/app/api/records/route.ts", 2, 5)),
+    _hold(
+        "AI001-hold-neg", "AI001", EXPECT_NEGATIVE, "billing",
+        (_src("billing/InvoiceEndpoints.cs",
+              "app.MapGet(\"/api/invoices/{id}\", async (int id, "
+              "ClaimsPrincipal user, Db db) => {\n"
+              "    var uid = user.FindFirst(\"sub\")!.Value;\n"
+              "    return await db.Invoices\n"
+              "        .Where(i => i.Id == id && i.OwnerId == uid)\n"
+              "        .FirstAsync();\n"
+              "}).RequireAuthorization();\n", "csharp"),),
+        "the endpoint requires authorization and additionally scopes the "
+        "query to the caller's own OwnerId claim — both the gate and the "
+        "ownership filter are visible."),
+    _hold(
+        "AI001-hold-abstain", "AI001", EXPECT_ABSTAIN, "portal",
+        (_src("portal/app/api/export/route.ts",
+              "import { assertAccess } from '@/lib/access';\n"
+              "export async function POST(req: Request) {\n"
+              "  await assertAccess(req);\n"
+              "  return runExport(req);\n"
+              "}\n", "typescript"),),
+        "the route delegates its gate to assertAccess, whose module is not "
+        "in the index (unresolved import) — whether it actually enforces "
+        "anything cannot be judged from this payload."),
+    # ---- AI002 input_handling ------------------------------------------------
+    _hold(
+        "AI002-hold-pos", "AI002", EXPECT_POSITIVE, "svc2",
+        (_src("svc2/handlers/export.py",
+              "import os\n"
+              "def export(request):\n"
+              "    name = request.args['file']\n"
+              "    os.system('zip archive.zip ' + name)\n"
+              "    return 'queued'\n", "python"),),
+        "a request-supplied file name is concatenated into a shell command "
+        "with no quoting or validation on this path.",
+        target=Target("svc2/handlers/export.py", 3, 4)),
+    _hold(
+        "AI002-hold-neg", "AI002", EXPECT_NEGATIVE, "svc2",
+        (_src("svc2/repo/lookup.py",
+              "def lookup(session, request):\n"
+              "    term = request.args['q']\n"
+              "    return session.query(Item)"
+              ".filter(Item.name == term).all()\n", "python"),),
+        "the request value is bound through an ORM equality filter; it never "
+        "becomes query text."),
+    _hold(
+        "AI002-hold-abstain", "AI002", EXPECT_ABSTAIN, "svc2",
+        (_src("svc2/api/find.py",
+              "def find(request):\n"
+              "    term = request.args['q']\n"
+              "    return _repo.match(term)\n", "python"),),
+        "the sink is inside _repo.match, which is not in context — whether "
+        "the term is parameterized there cannot be judged."),
+    # ---- AI003 credentials ---------------------------------------------------
+    _hold(
+        "AI003-hold-pos", "AI003", EXPECT_POSITIVE, "cfg",
+        (_src("cfg/settings.py",
+              "DB_HOST = 'db.internal'\n"
+              "DB_USER = 'svc'\n"
+              "DB_PASSWORD = 'pl4ceholder-not-real'\n"
+              "def dsn():\n"
+              "    return f'host={DB_HOST} user={DB_USER} "
+              "password={DB_PASSWORD}'\n", "python"),),
+        "a literal database password is committed in a settings module and "
+        "fed into the DSN.",
+        target=Target("cfg/settings.py", 3, 3)),
+    _hold(
+        "AI003-hold-neg", "AI003", EXPECT_NEGATIVE, "app2",
+        (_src("app2/config/db.ts",
+              "export const dbToken = process.env.DB_TOKEN;\n"
+              "export function connect() {\n"
+              "  return open({ auth: dbToken });\n"
+              "}\n", "typescript"),),
+        "the credential is read from the environment at runtime; no literal "
+        "value is committed."),
+    _hold(
+        "AI003-hold-abstain", "AI003", EXPECT_ABSTAIN, "api2",
+        (_src("api2/Startup/DbSetup.cs",
+              "class DbSetup {\n"
+              "  string Resolve() => Registry.Get(\"ConnectionString\");\n"
+              "}\n", "csharp"),),
+        "whether Registry.Get returns an env-backed value or a committed "
+        "literal is decided elsewhere, outside this payload."),
+    # ---- AI004 concurrency ---------------------------------------------------
+    _hold(
+        "AI004-hold-pos", "AI004", EXPECT_POSITIVE, "orders",
+        (_src("orders/Dispatcher.cs",
+              "public class Dispatcher {\n"
+              "  public void Send(Order o) {\n"
+              "    Task.Run(() => _mail.Notify(o));\n"
+              "    o.Status = \"sent\";\n"
+              "    _db.SaveChanges();\n"
+              "  }\n}\n", "csharp"),),
+        "the notification is fire-and-forget (an unobserved Task.Run whose "
+        "failure is lost) while the order is committed as sent — the state "
+        "and the side effect can diverge.",
+        target=Target("orders/Dispatcher.cs", 3, 5)),
+    _hold(
+        "AI004-hold-neg", "AI004", EXPECT_NEGATIVE, "jobs",
+        (_src("jobs/counter.py",
+              "import threading\n"
+              "class Counter:\n"
+              "    def __init__(self):\n"
+              "        self._lock = threading.Lock()\n"
+              "        self.value = 0\n"
+              "    def bump(self):\n"
+              "        with self._lock:\n"
+              "            self.value += 1\n", "python"),),
+        "the shared mutable counter is only touched under an explicit lock."),
+    _hold(
+        "AI004-hold-abstain", "AI004", EXPECT_ABSTAIN, "billing2",
+        (_src("billing2/Poster.cs",
+              "public class Poster {\n"
+              "  public async Task Post(Entry e) {\n"
+              "    await _ledger.ApplyAsync(e);\n"
+              "  }\n}\n", "csharp"),),
+        "atomicity lives inside _ledger.ApplyAsync, which is not in context."),
+    # ---- AI005 error_handling ------------------------------------------------
+    _hold(
+        "AI005-hold-pos", "AI005", EXPECT_POSITIVE, "client",
+        (_src("client/sync.ts",
+              "export async function sync(item: Item) {\n"
+              "  try {\n"
+              "    await push(item);\n"
+              "  } catch (err) {\n"
+              "    console.error(err);\n"
+              "  }\n"
+              "  return { ok: true };\n"
+              "}\n", "typescript"),),
+        "the catch only logs and the function still returns ok:true, so the "
+        "caller can never observe the failed push.",
+        target=Target("client/sync.ts", 4, 7)),
+    _hold(
+        "AI005-hold-neg", "AI005", EXPECT_NEGATIVE, "svc3",
+        (_src("svc3/Store.cs",
+              "public class Store {\n"
+              "  public void Save(Doc d) {\n"
+              "    try { _io.Write(d); }\n"
+              "    catch (IOException e) {\n"
+              "      throw new StorageException(\"write failed\", e);\n"
+              "    }\n"
+              "  }\n}\n", "csharp"),),
+        "the handler wraps the failure with context and rethrows a typed "
+        "exception; the caller still sees it."),
+    _hold(
+        "AI005-hold-abstain", "AI005", EXPECT_ABSTAIN, "worker2",
+        (_src("worker2/run.py",
+              "def run(job):\n"
+              "    try:\n"
+              "        return process(job)\n"
+              "    except TransferError:\n"
+              "        return _pipeline.reroute(job)\n", "python"),),
+        "whether _pipeline.reroute preserves or hides the failure is not "
+        "visible in this payload."),
+    # ---- AI006 api_contract --------------------------------------------------
+    _hold(
+        "AI006-hold-pos", "AI006", EXPECT_POSITIVE, "shop",
+        (_src("shop/routes/orders.ts",
+              "app.post('/orders', (req, res) => {\n"
+              "  const b = req.body;\n"
+              "  res.json(save(b.sku, b.qty * b.price));\n"
+              "});\n", "typescript"),),
+        "body fields (sku, qty, price) are read and multiplied straight off "
+        "req.body with no presence or type validation in this handler.",
+        target=Target("shop/routes/orders.ts", 2, 3)),
+    _hold(
+        "AI006-hold-neg", "AI006", EXPECT_NEGATIVE, "shop",
+        (_src("shop/routes/checkout.ts",
+              "import { z } from 'zod';\n"
+              "const Body = z.object({ sku: z.string(), "
+              "qty: z.number().int().positive() });\n"
+              "export async function handle(req: Request) {\n"
+              "  const b = Body.parse(await req.json());\n"
+              "  return charge(b.sku, b.qty);\n"
+              "}\n", "typescript"),),
+        "the body is parsed against an explicit zod schema before any use."),
+    _hold(
+        "AI006-hold-abstain", "AI006", EXPECT_ABSTAIN, "intake",
+        (_src("intake/app.py",
+              "def create(request):\n"
+              "    payload = request.get_json()\n"
+              "    return _svc.submit(payload)\n", "python"),),
+        "validation, if any, would live in _svc.submit, which is not in "
+        "context."),
+    # ---- AI007 dependency_integration ----------------------------------------
+    _hold(
+        "AI007-hold-pos", "AI007", EXPECT_POSITIVE, "tool",
+        (_src("tool/report.py",
+              "import flask\n"
+              "import quickchart_gen\n"
+              "def render(data):\n"
+              "    return quickchart_gen.make(data)\n", "python"),
+         _man("tool/requirements.txt",
+              "flask==3.0.0\nrequests==2.32.0\n")),
+        "the code imports quickchart_gen but the requirements manifest "
+        "declares only flask and requests — the dependency is undeclared and "
+        "the manifest in the payload proves it.",
+        target=Target("tool/report.py", 2, 2)),
+    _hold(
+        "AI007-hold-neg", "AI007", EXPECT_NEGATIVE, "tool",
+        (_src("tool/fetch.py",
+              "import requests\n"
+              "def get(url):\n"
+              "    return requests.get(url, timeout=5)\n", "python"),
+         _man("tool/requirements.txt",
+              "flask==3.0.0\nrequests==2.32.0\n")),
+        "the imported package is declared in the manifest and used through a "
+        "real, existing member."),
+    _hold(
+        "AI007-hold-abstain", "AI007", EXPECT_ABSTAIN, "metrics",
+        (_src("metrics/push.py",
+              "from vendorkit.metrics import push_gauge\n"
+              "def emit(name, value):\n"
+              "    push_gauge(name, value)\n", "python"),),
+        "there is no manifest in this project's payload, so whether "
+        "vendorkit is declared cannot be checked."),
+    # ---- AI008 incomplete_code -----------------------------------------------
+    _hold(
+        "AI008-hold-pos", "AI008", EXPECT_POSITIVE, "pay",
+        (_src("pay/refunds.py",
+              "def refund(order):\n"
+              "    raise NotImplementedError('refund flow')\n", "python"),),
+        "a live refund path is an explicit NotImplementedError stub.",
+        target=Target("pay/refunds.py", 2, 2)),
+    _hold(
+        "AI008-hold-neg", "AI008", EXPECT_NEGATIVE, "lint",
+        (_src("lint/test_scan.py",
+              "def test_scan_reports_markers():\n"
+              "    found = scan_line('total = 1  # TODO recheck rounding')\n"
+              "    assert found == ['TODO']\n", "python"),),
+        "the TODO token appears only as string DATA inside a test asserting "
+        "what a scanner reports — it is tool input, not an unfinished path."),
+    _hold(
+        "AI008-hold-abstain", "AI008", EXPECT_ABSTAIN, "ui",
+        (_src("ui/uploader.ts",
+              "export function flushQueue(q: Item[]) {\n"
+              "  // TODO: confirm client.flush batches correctly under retry\n"
+              "  return client.flush(q);\n"
+              "}\n", "typescript"),),
+        "completeness depends on client.flush, which is not in context; the "
+        "TODO questions an external call, it does not mark a visible stub."),
+)
+
+
+def cases(split: str | None = SPLIT_DEVELOPMENT) -> tuple[CorpusCase, ...]:
+    """The pre-registered corpus. Default is the DEVELOPMENT split (the set
+    every earlier measurement ran on); pass SPLIT_HOLDOUT for the holdout set
+    or None for both."""
+    if split is None:
+        return _CASES + _HOLDOUT
+    if split == SPLIT_HOLDOUT:
+        return _HOLDOUT
     return _CASES
 
 
+def holdout_cases() -> tuple[CorpusCase, ...]:
+    return _HOLDOUT
+
+
 def corpus_digest(corpus: tuple[CorpusCase, ...] | None = None) -> str:
-    """A stable digest over the ACTUAL corpus passed (defaults to the global
-    set). Two different corpora never share a digest."""
+    """A stable digest over the ACTUAL corpus passed (defaults to the
+    development split). Two different corpora never share a digest; the split
+    label is part of each case's identity."""
     corpus = corpus if corpus is not None else _CASES
     blob = json.dumps(
-        [[c.case_id, c.query_id, c.kind, c.project,
+        [[c.case_id, c.query_id, c.kind, c.project, c.split,
           [[f.rel, f.text, f.language, f.role] for f in c.files],
           c.reason,
           None if c.target is None else
@@ -389,3 +697,4 @@ class CasePlan:
     sent_files: list[str] = field(default_factory=list)
     sent_spans: dict[str, list[list[int]]] = field(default_factory=dict)
     target: list | None = None       # [file, line_start, line_end] or None
+    split: str = SPLIT_DEVELOPMENT   # which pre-registered split the case is in
