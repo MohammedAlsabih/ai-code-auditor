@@ -40,13 +40,14 @@ from auditor.ai.review import (
     _review_body,
     check_privacy_gate,
     redact_counted,
+    redaction_events,
     review_timeout,
 )
 
-AUDIT_PROMPT_VERSION = "w3e-v4"   # W3-E4C1: the pack may carry a
-#                                   redaction_facts piece (server-side proof a
-#                                   real literal was masked at exact lines);
-#                                   the prompt explains it. Query piece still
+AUDIT_PROMPT_VERSION = "w3e-v5"   # W3-E4C-FINAL: redaction_facts now carry a
+#                                   `kind` (literal_credential_proven vs
+#                                   redaction_applied); the prompt distinguishes
+#                                   PROOF from privacy masking. Query piece still
 #                                   carries required_category + contract.
 AUDIT_OUTCOMES = ("issues_found", "no_issue_observed", "insufficient_context")
 AUDIT_CATEGORIES = ("authorization", "input_handling", "credentials",
@@ -180,21 +181,22 @@ def _merge_windows(match_lines: list[int], total: int) -> list[tuple[int, int]]:
 def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
                          budget: int, red) -> tuple[str, list[list[int]],
                                                     dict[str, int], int,
-                                                    list[tuple[int, str]]]:
+                                                    list[tuple[int, str, bool]]]:
     """Assemble numbered, redacted lines WHOLE-LINE by WHOLE-LINE inside a
     UTF-8 byte budget. Nothing is ever cut mid-line and the JSON is never
     truncated. Returns (text, EXACT sent spans, redaction counts,
     bytes_before, line_facts) — the spans record exactly which line numbers
     went on the wire, so a citation can be validated against what was
-    actually sent. line_facts records (line_no, redaction_class) ONLY for
-    SENT lines the redactor actually CHANGED: a value that was already ***
-    in the source redacts to itself and produces NO fact, so a fact is
-    server-side proof that a real, non-empty literal matched at that line.
-    The original value is never recorded in any form."""
+    actually sent. line_facts records (line_no, redaction_class, proven) ONLY
+    for SENT lines the redactor actually CHANGED: a value already *** in the
+    source redacts to itself and produces NO fact. `proven` is True only when
+    a redacted value on that line was a committed literal credential (W3-E4C-
+    FINAL): an env/config/secret-manager REFERENCE masks the same way but does
+    NOT prove a hardcoded literal. The original value is never recorded."""
     parts: list[str] = []
     sent: list[list[int]] = []
     counts: dict[str, int] = {}
-    line_facts: list[tuple[int, str]] = []
+    line_facts: list[tuple[int, str, bool]] = []
     bytes_before = 0
     used = 0
     for start, end in spans:
@@ -202,7 +204,10 @@ def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
         for n in range(start, end + 1):
             raw_line = lines[n - 1]
             bytes_before += len(raw_line.encode("utf-8"))
-            red_line, c = red(raw_line)
+            red_line, events = red(raw_line)
+            c: dict[str, int] = {}
+            for cls, _pl in events:
+                c[cls] = c.get(cls, 0) + 1
             rendered = f"{n}: {red_line}"
             cost = len(rendered.encode("utf-8")) + 1
             if used + cost > budget:
@@ -211,8 +216,10 @@ def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
             for cat, k in c.items():
                 counts[cat] = counts.get(cat, 0) + k
             if red_line != raw_line:            # the redactor CHANGED it
-                for cat in sorted(c):
-                    line_facts.append((n, cat))
+                proven = any(pl for _c, pl in events)
+                cls = (next(c0 for c0, pl in events if pl) if proven
+                       else events[0][0])
+                line_facts.append((n, cls, proven))
             if not opened:
                 parts.append(rendered)
                 sent.append([n, n])
@@ -224,13 +231,26 @@ def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
     return "\n...\n".join(parts), sent, counts, bytes_before, line_facts
 
 
-# W3-E4C1: the ONE fixed sentence a redaction fact carries — it names the
-# event, never the value. Classes come from the redactor's own rule names.
-REDACTION_FACT_TEXT = ("a non-empty literal value matched here and was "
-                       "replaced with *** before sending; the original "
-                       "value was NOT sent")
+# W3-E4C-FINAL: a redaction fact separates PRIVACY masking from PROOF. Both
+# kinds mask the value identically; only `literal_credential_proven` asserts a
+# committed literal credential was present before masking. `redaction_applied`
+# is the conservative default — the value may be an env/config/secret-manager
+# REFERENCE that masks the same way. The sentence and `kind` are the ONLY
+# things that vary; no value or derivative is ever stored. Classes come from
+# the redactor's own rule names.
+REDACTION_FACT_TEXT = {
+    "literal_credential_proven": (
+        "a committed literal credential value was present here and was "
+        "replaced with *** before sending; the original value was NOT sent"),
+    "redaction_applied": (
+        "a sensitive-looking value here was replaced with *** before sending "
+        "for privacy; this is NOT proof of a hardcoded credential (it may be "
+        "an environment/config/secret-manager reference); the original value "
+        "was NOT sent"),
+}
+REDACTION_FACT_KINDS = tuple(REDACTION_FACT_TEXT)      # fixed allowlist
 REDACTION_FACT_KEYS = ("context_id", "file", "line_start", "line_end",
-                       "redaction_class", "fact")
+                       "redaction_class", "kind", "fact")
 
 
 def _cid_sort_key(cid: str) -> tuple[str, int]:
@@ -248,19 +268,22 @@ def redaction_facts(piece_meta: dict[str, dict[str, Any]]
     for cid in sorted(piece_meta, key=_cid_sort_key):
         meta = piece_meta[cid]
         rows = sorted(set(meta.get("line_facts") or ()))
-        for line, cls in rows:
+        for line, cls, proven in rows:
             if cls not in REDACTION_CATEGORIES:
                 raise AuditContextError()
+            kind = ("literal_credential_proven" if proven
+                    else "redaction_applied")
             prev = out[-1] if out else None
             if (prev is not None and prev["context_id"] == cid
                     and prev["redaction_class"] == cls
+                    and prev["kind"] == kind
                     and prev["line_end"] == line - 1):
-                prev["line_end"] = line          # merge contiguous same-class
+                prev["line_end"] = line          # merge contiguous same class+kind
                 continue
             out.append({"context_id": cid, "file": meta["file"],
                         "line_start": line, "line_end": line,
-                        "redaction_class": cls,
-                        "fact": REDACTION_FACT_TEXT})
+                        "redaction_class": cls, "kind": kind,
+                        "fact": REDACTION_FACT_TEXT[kind]})
     return out
 
 
@@ -289,8 +312,8 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
                       if query.needs_manifest else [])
     source_cap = query.max_context_files - len(manifest_files)
 
-    def red(text: str) -> tuple[str, dict[str, int]]:
-        return redact_counted(text)
+    def red(text: str) -> tuple[str, list[tuple[str, bool]]]:
+        return redaction_events(text)
 
     pieces: list[dict[str, Any]] = [{
         "context_id": "query",
@@ -422,9 +445,11 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
                 "notice": ("One or more matched sensitive values were "
                            "replaced before AI review. The *** marker is a "
                            "placeholder, not the original value and not "
-                           "evidence that the value was empty or fake. Lines "
-                           "listed in the redaction_facts piece carried a "
-                           "REAL matched literal that was masked."),
+                           "evidence that the value was empty or fake. See "
+                           "the redaction_facts piece: only a "
+                           "`literal_credential_proven` entry proves a "
+                           "committed literal; a `redaction_applied` entry "
+                           "may be an environment/config reference."),
             })
         return f, kept
 
@@ -497,11 +522,14 @@ DISPROVES the candidate — the protection already present, the binding \
 already parameterized, the value already environment-backed, the failure \
 already propagated. Report only candidates that survive that search.
 
-A `redaction_facts` piece, when present, is SERVER-GENERATED proof: each \
-entry means a real, non-empty literal value matched at exactly those lines \
-and was replaced with *** before you saw the text. A line covered by such \
-a fact DID carry a committed literal. A *** with NO covering fact was \
-already *** in the source and proves nothing.
+A `redaction_facts` piece, when present, records server-generated masking \
+events with a `kind`. `kind: literal_credential_proven` is PROOF: a \
+committed literal credential value matched at exactly those lines and was \
+replaced with *** before you saw the text — that line DID carry a hardcoded \
+credential. `kind: redaction_applied` is NOT proof: a sensitive-looking \
+value was masked for privacy, but it may be an environment/config/secret-\
+manager REFERENCE, so it does not establish a committed credential. A *** \
+with NO covering fact was already *** in the source and proves nothing.
 
 Rules:
 - Honest abstention is valid and expected: if any context the \

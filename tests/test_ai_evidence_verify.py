@@ -381,3 +381,87 @@ def test_premasked_source_star_without_a_fact_proves_nothing():
                            "line_start": 1, "line_end": 1, "statement": "x"}]}
     v, _ = verify_issue(issue, pack, _lines_by_cid(pack), _fact_lines(pack))
     assert v != VERIFY_SUPPORTED
+
+
+# ---- W3-E4C-FINAL: only a literal_credential_proven fact proves AI003 --------------
+
+def _cred_pack(kind: str):
+    # a cited line masked to *** with a covering fact of the given kind; the
+    # cited TEXT carries no visible literal or reference, so ONLY the fact kind
+    # decides the outcome
+    return {"pieces": [
+        {"context_id": "src:1", "file": "cfg.cs",
+         "text": "5:   var conn = Build(\"Host=db;Password=***\");"},
+        {"context_id": "redaction_facts", "facts": [
+            {"context_id": "src:1", "file": "cfg.cs", "line_start": 5,
+             "line_end": 5, "redaction_class": "token_kv", "kind": kind,
+             "fact": "x"}]}],
+        "piece_map": {"src:1": {"file": "cfg.cs", "spans": [[5, 5]]}},
+        "canonical": ""}
+
+
+def _verify_cred(pack):
+    from auditor.ai.evidence_verify import (
+        _fact_lines, _lines_by_cid, verify_issue)
+    issue = {"category": "credentials", "confidence": "high",
+             "evidence": [{"context_id": "src:1", "file": "cfg.cs",
+                           "line_start": 5, "line_end": 5, "statement": "x"}]}
+    return verify_issue(issue, pack, _lines_by_cid(pack), _fact_lines(pack))
+
+
+def test_literal_credential_proven_fact_supports_the_claim():
+    v, reason = _verify_cred(_cred_pack("literal_credential_proven"))
+    assert v == VERIFY_SUPPORTED
+    assert reason == "cited_lines_carry_category_evidence"
+
+
+def test_redaction_applied_fact_alone_does_not_support_the_claim():
+    # a privacy-masking fact (possible env/config reference) at the cited line
+    # is NOT proof — the claim must not be promoted
+    v, reason = _verify_cred(_cred_pack("redaction_applied"))
+    assert v != VERIFY_SUPPORTED
+    assert reason == "deciding_context_not_in_payload"
+
+
+def test_fact_without_a_kind_defaults_closed_to_not_proving():
+    from auditor.ai.evidence_verify import (
+        _fact_lines, _lines_by_cid, verify_issue)
+    pack = {"pieces": [
+        {"context_id": "src:1", "file": "cfg.cs",
+         "text": "5:   var conn = Build(\"Host=db;Password=***\");"},
+        {"context_id": "redaction_facts", "facts": [
+            {"context_id": "src:1", "file": "cfg.cs", "line_start": 5,
+             "line_end": 5, "redaction_class": "token_kv",
+             "fact": "x"}]}],       # legacy fact: NO kind
+        "piece_map": {"src:1": {"file": "cfg.cs", "spans": [[5, 5]]}},
+        "canonical": ""}
+    issue = {"category": "credentials", "confidence": "high",
+             "evidence": [{"context_id": "src:1", "file": "cfg.cs",
+                           "line_start": 5, "line_end": 5, "statement": "x"}]}
+    v, _ = verify_issue(issue, pack, _lines_by_cid(pack), _fact_lines(pack))
+    assert v != VERIFY_SUPPORTED       # missing kind => treated as not-proving
+
+
+def test_ai003_hold_neg_reference_is_not_promoted_end_to_end():
+    # the reference case (auth: dbToken via process.env) must not produce a
+    # promoted candidate — through the real verify_result + promotion path
+    pack = _pack("AI003-hold-neg")
+    cid = _first_cid(pack)
+    sp = pack["piece_map"][cid]["spans"][0]
+    result = {"outcome": "issues_found", "project": pack["project"],
+              "query_id": "AI003", "audit_unit_id": "a" * 64,
+              "context_digest": "b" * 64, "provider": "ollama", "model": "m",
+              "prompt_version": "w3e-v5", "created_at": "2026-07-25T00:00:00Z",
+              "issues": [{
+                  "title": "hardcoded token", "category": "credentials",
+                  "confidence": "high", "summary": "s",
+                  "evidence": [{"context_id": cid,
+                                "file": pack["piece_map"][cid]["file"],
+                                "line_start": sp[0], "line_end": sp[1],
+                                "statement": "x"}],
+                  "missing_context": [], "suggested_action": "inspect"}]}
+    result = verify_result(result, pack)
+    assert result["issues"][0]["verification"] != VERIFY_SUPPORTED
+    promoted = [c for c in candidates_from_result(result)
+                if c["verification"] == VERIFY_SUPPORTED]
+    assert promoted == []

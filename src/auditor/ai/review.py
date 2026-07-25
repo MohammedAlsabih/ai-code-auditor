@@ -272,6 +272,96 @@ def redact_counted(text: str) -> tuple[str, dict[str, int]]:
     return text, counts
 
 
+# W3-E4C-FINAL: classify a redacted VALUE as a committed LITERAL credential vs
+# a REFERENCE (env/config/secret-manager/interpolation/member/call). The value
+# is inspected ONLY to decide the boolean; it is never stored or returned. A
+# REFERENCE is any of: process.env / os.getenv / Environment.GetEnvironment-
+# Variable / Configuration[...] / a .Value or secret-manager/vault member or
+# call / a ${VAR} or $(VAR) interpolation.
+_REF_VALUE = re.compile(
+    r"process\.env|os\.environ|getenv|Environment\.GetEnvironmentVariable"
+    r"|Configuration\s*\[|\.Value\b|SecretClient|GetSecret|key[_-]?vault"
+    r"|\bvault\b|Registry\.Get|Secrets?Manager|\$\{|\$\(", re.I)
+
+
+def _in_quoted_string(text: str, pos: int) -> bool:
+    """Is `pos` inside a "..."/'...' string literal on this line? (odd number
+    of unescaped quotes before it)."""
+    q = 0
+    i = 0
+    while i < pos and i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "\"'":
+            q += 1
+        i += 1
+    return q % 2 == 1
+
+
+def _proves_literal(rule: str, value: str, quoted: bool) -> bool:
+    """True ONLY for a committed literal credential; False for a reference or
+    an already-masked value. Conservative — when in doubt, False:
+      credential_url / auth_header / quoted_kv -> a literal in a URL, an inline
+        header credential, or a quoted key/value literal (once references and
+        ${..}/$(..) interpolations are excluded);
+      token_kv -> a BARE key=value is a literal ONLY when it sits inside a
+        quoted string (a connection string like Password=postgres); a bare
+        identifier/member/call OUTSIDE a string (auth: dbToken, x = cfg.Value)
+        is a variable reference, never a literal.
+    known_token is proven by shape at the call site and never reaches here."""
+    v = value.strip()
+    if not v or set(v) <= {"*"}:      # already-redacted / empty: proves nothing
+        return False
+    if _REF_VALUE.search(v):          # env/config/secret-manager/interpolation
+        return False
+    if rule == "token_kv":            # bare key=value
+        return quoted                 # literal ONLY inside a quoted string
+    return True                       # url / auth-header / quoted-kv literal
+
+
+def redaction_events(text: str) -> tuple[str, list[tuple[str, bool]]]:
+    """Redact one line (byte-identical to redact_counted) AND return, per
+    match, (redaction_class, proves_literal). No value is stored. Rule order
+    matches _redact: URL, header, quoted-kv, bare-kv, known-token."""
+    events: list[tuple[str, bool]] = []
+
+    def _url(m: "re.Match[str]") -> str:
+        events.append(("credential_url",
+                       _proves_literal("credential_url", m.group(2), True)))
+        return m.group(1) + "***@"
+
+    def _hdr(m: "re.Match[str]") -> str:
+        events.append(("auth_header",
+                       _proves_literal("auth_header", m.group(3), False)))
+        return m.group(1) + m.group(2) + "***"
+
+    def _qkv(m: "re.Match[str]") -> str:
+        events.append(("quoted_kv",
+                       _proves_literal("quoted_kv", m.group(3), True)))
+        return m.group(1) + m.group(2) + "***" + m.group(2)
+
+    def _tkv(m: "re.Match[str]") -> str:
+        # count quotes in the string THIS match indexes into (m.string), not
+        # the pristine line — earlier rules may already have substituted.
+        quoted = _in_quoted_string(m.string, m.start(3))
+        events.append(("token_kv",
+                       _proves_literal("token_kv", m.group(3), quoted)))
+        return m.group(1) + m.group(2) + "***"
+
+    def _tok(m: "re.Match[str]") -> str:
+        events.append(("known_token", True))
+        return "***"
+
+    out = _CRED_URL.sub(_url, text)
+    out = _AUTH_HEADER.sub(_hdr, out)
+    out = _QUOTED_KV.sub(_qkv, out)
+    out = _TOKEN_KV.sub(_tkv, out)
+    out = _KNOWN_TOKENS.sub(_tok, out)
+    return out, events
+
+
 def _utf8_truncate(text: str, max_bytes: int) -> str:
     """Byte-accurate truncation at a UTF-8 boundary (limits count bytes,
     never characters)."""

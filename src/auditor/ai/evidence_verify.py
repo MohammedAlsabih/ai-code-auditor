@@ -110,18 +110,35 @@ def _lines_by_cid(pack: dict[str, Any]) -> dict[str, dict[int, str]]:
 # any OTHER class can never prove a credential citation)
 CREDENTIAL_FACT_CLASSES = frozenset(
     {"credential_url", "auth_header", "quoted_kv", "token_kv", "known_token"})
+# W3-E4C-FINAL: the ONE fact kind that proves a committed literal credential.
+LITERAL_CREDENTIAL_KIND = "literal_credential_proven"
 
 
-def _fact_lines(pack: dict[str, Any]) -> dict[tuple[str, int], str]:
-    """{(file, line): redaction_class} for every fact line — class-aware, so a
-    citation is proven only by a fact of a credential class AT that line."""
+def _proves_credential(cls_kind: tuple[str, str] | None) -> bool:
+    """A cited fact proves a masked literal credential ONLY when it is a
+    credential-class fact AND its kind is literal_credential_proven — a
+    redaction_applied fact (a possible env/config reference masked for
+    privacy) proves nothing, and a fact of any other class never proves it."""
+    if cls_kind is None:
+        return False
+    cls, kind = cls_kind
+    return cls in CREDENTIAL_FACT_CLASSES and kind == LITERAL_CREDENTIAL_KIND
+
+
+def _fact_lines(pack: dict[str, Any]) -> dict[tuple[str, int], tuple[str, str]]:
+    """{(file, line): (redaction_class, kind)} for every fact line. W3-E4C-
+    FINAL: a credential citation is proven ONLY by a fact whose kind is
+    `literal_credential_proven` AT that line; a `redaction_applied` fact
+    (privacy masking of a possible env/config reference) never proves it."""
     facts = next((p for p in pack.get("pieces", [])
                   if p.get("context_id") == "redaction_facts"), None)
-    out: dict[tuple[str, int], str] = {}
+    out: dict[tuple[str, int], tuple[str, str]] = {}
     if facts:
         for f in facts["facts"]:
+            cls_kind = (f["redaction_class"],
+                        f.get("kind", "redaction_applied"))
             for n in range(f["line_start"], f["line_end"] + 1):
-                out[(f["file"], n)] = f["redaction_class"]
+                out[(f["file"], n)] = cls_kind
     return out
 
 
@@ -223,7 +240,8 @@ _PERSIST = re.compile(r"savechanges|\.commit\(|\.persist\(|\.save\(", re.I)
 
 def verify_issue(issue: dict[str, Any], pack: dict[str, Any],
                  by_cid: dict[str, dict[int, str]],
-                 fact_lines: dict[tuple[str, int], str]) -> tuple[str, str]:
+                 fact_lines: dict[tuple[str, int], tuple[str, str]]
+                 ) -> tuple[str, str]:
     text = _cited_text(issue, by_cid)
     if text == "\x00":
         return VERIFY_UNSUPPORTED, "citation_not_in_sent_pieces"
@@ -239,11 +257,13 @@ def verify_issue(issue: dict[str, Any], pack: dict[str, Any],
         #    alone proves nothing), and it beats a fact elsewhere in the range
         if _CRED_REF.search(text):
             return VERIFY_UNSUPPORTED, "counter_evidence_present"
-        # 3) a credential-CLASS redaction fact AT a cited line proves a masked
-        #    literal without exposing it
+        # 3) a redaction fact AT a cited line proves a masked literal WITHOUT
+        #    exposing it — but ONLY when its kind is literal_credential_proven.
+        #    A redaction_applied fact (privacy masking of a possible env/config
+        #    reference) never proves a committed credential.
         cited_fact = any(
-            fact_lines.get((_ev_file(issue, pack, ev), n))
-            in CREDENTIAL_FACT_CLASSES
+            _proves_credential(
+                fact_lines.get((_ev_file(issue, pack, ev), n)))
             for ev in issue["evidence"]
             for n in range(ev["line_start"], ev["line_end"] + 1))
         if cited_fact:

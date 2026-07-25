@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-CATALOG_VERSION = 4
+CATALOG_VERSION = 5
 PROFILES = ("security", "correctness", "ai_code_risks", "all")
 
 # languages the index recognizes (project languages of real reports)
@@ -152,22 +152,25 @@ AUDIT_QUERIES: tuple[AuditQuery, ...] = (
                       "NEXT_PUBLIC", "usenpgsql", "usesqlserver", "usemysql",
                       "usesqlite", "adddbcontext", "data source", "server=",
                       "host=", "pwd="),
-        needs_manifest=True, query_version=4,
+        needs_manifest=True, query_version=5,
         max_context_files=3, max_context_bytes=12 * 1024,
         decision_contract=(
             "Positive evidence required: a LITERAL credential value "
             "committed in the sent source — a password/token/key assigned "
             "as a constant or embedded in a connection string. A line "
-            "covered by a redaction_facts entry IS that evidence: the fact "
-            "is server-generated proof that a real, non-empty literal "
-            "matched at those lines and was masked to *** before sending. "
-            "Counter-evidence to check FIRST: values read from environment "
-            "variables, secret managers, or configuration REFERENCES — a "
-            "reference is not a committed secret. A *** with NO covering "
-            "redaction fact was already *** in the source and is NOT "
-            "evidence of a committed literal. If the provenance of a "
-            "referenced setting is outside the sent pieces, answer "
-            "insufficient_context.")),
+            "covered by a redaction_facts entry whose `kind` is "
+            "`literal_credential_proven` IS that evidence: it is server-"
+            "generated proof that a committed literal value matched at those "
+            "lines and was masked to *** before sending. A redaction_facts "
+            "entry whose `kind` is `redaction_applied` is NOT proof — the "
+            "value was masked for privacy but may be an environment/config/"
+            "secret-manager REFERENCE, so it does not establish a hardcoded "
+            "credential. Counter-evidence to check FIRST: values read from "
+            "environment variables, secret managers, or configuration "
+            "REFERENCES — a reference is not a committed secret. A *** with "
+            "NO covering redaction fact was already *** in the source and is "
+            "NOT evidence. If the provenance of a referenced setting is "
+            "outside the sent pieces, answer insufficient_context.")),
     AuditQuery(
         id="AI004", title="Transaction, concurrency, idempotency, and race mistakes",
         objective=(

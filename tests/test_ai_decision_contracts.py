@@ -59,7 +59,7 @@ def test_system_prompt_is_falsification_first():
     # the cross-file high-confidence rule: a missing-control claim needs the
     # protection context present, else insufficient_context
     assert "MISSING across files" in s
-    assert AUDIT_PROMPT_VERSION == "w3e-v4"
+    assert AUDIT_PROMPT_VERSION == "w3e-v5"
 
 
 # ---- per-rule: the counter-evidence is IN the payload, the contract names it --------
