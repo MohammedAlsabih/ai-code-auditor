@@ -175,9 +175,12 @@ def test_pack_carries_required_category_in_query_piece(tmp_path):
 # ---- C: versioning --------------------------------------------------------------------
 
 def test_versions_bumped_for_the_contract_change():
-    assert CATALOG_VERSION == 2
-    assert all(q.query_version == 2 for q in AUDIT_QUERIES)
-    assert AUDIT_PROMPT_VERSION == "w3e-v2"
+    # W3-E4B2: the decision_contract entered the query piece (context +
+    # digest + consent change), so every version moved again.
+    assert CATALOG_VERSION == 3
+    assert all(q.query_version == 3 for q in AUDIT_QUERIES)
+    assert AUDIT_PROMPT_VERSION == "w3e-v3"
+    assert all(q.decision_contract for q in AUDIT_QUERIES)
 
 
 def test_digest_changes_deterministically_with_category(tmp_path):
