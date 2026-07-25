@@ -105,7 +105,14 @@ def run_case(case: CorpusCase, provider: Provider, model: str,
                           "statement": e["statement"]}
                          for e in i["evidence"]],
             "missing_context": i["missing_context"],
-            "suggested_action": i["suggested_action"]} for i in res["issues"]],
+            "suggested_action": i["suggested_action"],
+            # W3-E4C2: carry the deterministic verification verdict so the
+            # harness can compute verified-effective metrics (the model's
+            # words are still not changed — this is a copy of what
+            # run_audit_unit already attached).
+            "verification": i.get("verification"),
+            "verification_reason": i.get("verification_reason")}
+            for i in res["issues"]],
         "provider": res["provider"], "model": res["model"],
         "prompt_version": res["prompt_version"],
         "query_version": res["query_version"], "latency_ms": res["latency_ms"],

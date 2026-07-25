@@ -30,6 +30,7 @@ from auditor.ai.audit_index import RepositoryAuditIndex
 from auditor.ai.audit_queries import AuditQuery
 from auditor.ai.consent import TOKEN_ESTIMATE_BYTES_PER_TOKEN, ConsentError
 from auditor.ai.contract import AIError, Provider, TransportFailure
+from auditor.ai.evidence_verify import fail_closed, verify_result
 from auditor.ai.providers import ANTHROPIC_VERSION, PROVIDER_SPECS, resolve_config
 from auditor.ai.review import (
     PACK_MAX_BYTES,
@@ -696,6 +697,9 @@ def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
         raise AIError("invalid_response") from None
     core = parse_audit_reply(spec.parse_probe_text(data), pack["piece_map"],
                              required_category=pack.get("required_category"))
+    # W3-E4C2: deterministic evidence-content verification on the SENT pack —
+    # each issue gains a verification status; the model's words are unchanged.
+    core = verify_result(core, pack)
     return {
         **core,
         "audit_unit_id": pack["unit_id"],
@@ -726,6 +730,8 @@ def candidates_from_result(result: dict[str, Any],
                            issue["title"], result["context_digest"])
         if cid in out:
             continue                                  # exact-identity dedupe only
+        _vf = fail_closed(issue.get("verification"),
+                          issue.get("verification_reason"))
         related: list[str] = []
         if static_findings:
             for ev in issue["evidence"]:
@@ -742,6 +748,12 @@ def candidates_from_result(result: dict[str, Any],
             "evidence": issue["evidence"],
             "missing_context": issue["missing_context"],
             "suggested_action": issue["suggested_action"],
+            # W3-E4C2/closing: the deterministic screening verdict rides on
+            # the candidate. Only `supported` is a promoted (actionable) AI
+            # candidate; unsupported/insufficient stay for transparency and
+            # render as UNVERIFIED. An issue that was NEVER screened FAILS
+            # CLOSED to insufficient_evidence — it is never defaulted to a pass.
+            "verification": _vf[0], "verification_reason": _vf[1],
             "related_static_findings": sorted(set(related)),
             "provider": result["provider"], "model": result["model"],
             "prompt_version": result["prompt_version"],

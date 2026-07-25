@@ -26,8 +26,13 @@ from auditor.ai.audit import (
     CONFIDENCES,
     SUGGESTED_ACTIONS,
 )
+from auditor.ai.evidence_verify import (
+    REASON_CODES, VERIFY_STATES, fail_closed)
 
-SCHEMA_VERSION = 1
+# W3-E4C2: candidates now carry a verification verdict (schema 1 -> 2). An old
+# schema-1 sidecar is simply reported as an unsupported shape, never migrated
+# in place.
+SCHEMA_VERSION = 2
 SIDECAR_MAX_BYTES = 15 * 1024 * 1024
 CANDIDATE_DECISIONS = ("confirmed", "false_positive", "uncertain")
 NOTE_MAX_CHARS = 2000
@@ -97,9 +102,13 @@ def _valid_candidate(c: Any) -> bool:
     needed = {"candidate_id", "audit_unit_id", "project", "query_id", "file",
               "line", "title", "category", "confidence", "summary",
               "evidence", "missing_context", "suggested_action",
+              "verification", "verification_reason",
               "related_static_findings", "provider", "model",
               "prompt_version", "context_digest", "created_at"}
     if set(c) != needed:
+        return False
+    if c["verification"] not in VERIFY_STATES \
+            or c["verification_reason"] not in REASON_CODES:
         return False
     if not _hex64(c["candidate_id"]) or not _hex64(c["audit_unit_id"]) \
             or not _hex64(c["context_digest"]):
@@ -190,6 +199,8 @@ class AIAuditStore:
             "candidate_reviews": {}}
         self.available = True
         self.error = ""
+        self.legacy = False           # W3-E4C: a schema-1 (pre-screening)
+        #                               sidecar loaded as legacy/unverified
         self._load()
 
     def _load(self) -> None:
@@ -204,13 +215,25 @@ class AIAuditStore:
         if not isinstance(data, dict) \
                 or set(data) != {"schema_version", "audits", "results",
                                  "candidates", "candidate_reviews"} \
-                or data.get("schema_version") != SCHEMA_VERSION \
+                or data.get("schema_version") not in (1, SCHEMA_VERSION) \
                 or not all(isinstance(data.get(k), dict) for k in
                            ("audits", "results", "candidates",
                             "candidate_reviews")):
             self.available, self.error = False, \
                 "sidecar has an unsupported shape or schema_version"
             return
+        # W3-E4C closing: a LEGACY schema-1 sidecar (candidates written before
+        # evidence screening existed) stays VIEWABLE, but every candidate FAILS
+        # CLOSED to an unverified verdict — it is never shown as screened. The
+        # migration is in-memory only; it is persisted (as schema 2) the next
+        # time anything writes.
+        self.legacy = data.get("schema_version") != SCHEMA_VERSION
+        if self.legacy:
+            for c in data["candidates"].values():
+                if isinstance(c, dict):
+                    c["verification"], c["verification_reason"] = fail_closed(
+                        c.get("verification"), c.get("verification_reason"))
+            data["schema_version"] = SCHEMA_VERSION
         # FULL validation of every collection — one malformed row makes the
         # store unavailable; nothing is repaired, dropped, or echoed
         for c in data["candidates"].values():

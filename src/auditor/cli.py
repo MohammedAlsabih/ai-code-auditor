@@ -503,11 +503,16 @@ def _ai_audit(args) -> int:
             cands = candidates_from_result(result)
             store.put_result(result, cands)
             ok_units += 1
+            screened = sum(1 for c in cands
+                           if c["verification"] == "supported")
             summary.append({"unit": pack["unit_id"][:12],
                             "project": pack["project"],
                             "query": pack["query_id"],
                             "outcome": result["outcome"],
                             "candidates": len(cands),
+                            # W3-E4C: only screening-supported candidates are
+                            # promoted (screening is not proof of correctness)
+                            "screened_candidates": screened,
                             "latency_ms": result["latency_ms"]})
         except PrivacyGateError as e:
             print(f"blocked [privacy_gate_required]: {e}", file=sys.stderr)

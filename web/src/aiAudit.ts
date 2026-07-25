@@ -7,6 +7,19 @@
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
+// W3-E4C: the ONE place a screening default is chosen, and it is fail-closed.
+// A missing/unknown verdict resolves to insufficient_evidence, never a pass.
+export const VERIFY_STATES = ['supported', 'unsupported', 'insufficient_evidence'] as const
+export function failClosed(
+  v: unknown, r: unknown,
+): { verification: string; verification_reason: string } {
+  if (typeof v === 'string' && (VERIFY_STATES as readonly string[]).includes(v)
+      && typeof r === 'string' && r.length > 0) {
+    return { verification: v, verification_reason: r }
+  }
+  return { verification: 'insufficient_evidence', verification_reason: 'verification_missing' }
+}
+
 export const AUDIT_PROFILES = ['security', 'correctness', 'ai_code_risks', 'all'] as const
 export type AuditProfile = (typeof AUDIT_PROFILES)[number]
 
@@ -137,6 +150,10 @@ export interface AIAuditCandidate {
   evidence: AIAuditEvidence[]
   missing_context: string[]
   suggested_action: string
+  // W3-E4C2: deterministic evidence-content verification. Only `supported`
+  // is a promoted (actionable) candidate; the rest are shown as UNVERIFIED.
+  verification: string
+  verification_reason: string
   related_static_findings: string[]
   review: { decision: string; note: string; updated_at: string } | null
 }
@@ -182,6 +199,9 @@ export function parseAuditCandidates(raw: unknown): AIAuditCandidate[] {
         ? c.missing_context.filter((m): m is string => typeof m === 'string')
         : [],
       suggested_action: typeof c.suggested_action === 'string' ? c.suggested_action : '',
+      // W3-E4C: FAIL-CLOSED. A missing/unknown screening verdict is NEVER
+      // treated as a pass — it becomes insufficient_evidence / verification_missing.
+      ...failClosed(c.verification, c.verification_reason),
       related_static_findings: Array.isArray(c.related_static_findings)
         ? c.related_static_findings.filter((r): r is string => typeof r === 'string')
         : [],

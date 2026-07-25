@@ -28,6 +28,22 @@ import {
 
 type PanelState = 'idle' | 'previewing' | 'confirm' | 'running' | 'done' | 'error'
 
+// W3-E4C2/closing: a deterministic evidence SCREENING verdict rides on every
+// candidate. Only `supported` is promoted; the rest are shown for transparency
+// and never change the report. The visible language is deliberately weaker than
+// "verified" — screening is not proof the finding is correct.
+const SCREEN_TOOLTIP =
+  'Deterministic evidence screening, not proof that the finding is correct.'
+
+function verificationBadge(v: string) {
+  if (v === 'supported')
+    return <span className="ai-badge ai-ok" title={SCREEN_TOOLTIP}>evidence screened</span>
+  const label = v === 'insufficient_evidence' ? 'needs context' : 'not promoted'
+  return (
+    <span className="ai-badge ai-warn" title={SCREEN_TOOLTIP}>{label}</span>
+  )
+}
+
 // W3-E2: the Independent AI Audit tab. No prompt box exists anywhere: the
 // user picks a profile, projects, provider/model and limits; the versioned
 // query catalog and the deterministic index do the rest. Every result is an
@@ -347,6 +363,7 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
                 <th>File:Line</th>
                 <th>Title</th>
                 <th>Conf.</th>
+                <th>Screening</th>
                 <th>Review</th>
               </tr>
             </thead>
@@ -367,6 +384,7 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
                   </td>
                   <td className="ellip">{c.title}</td>
                   <td>{c.confidence}</td>
+                  <td>{verificationBadge(c.verification)}</td>
                   <td>{c.review?.decision ?? '—'}</td>
                 </tr>
               ))}
@@ -376,12 +394,26 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
             <div className="audit-detail">
               <div className="ai-verdict">
                 <span className="ai-badge ai-warn">{AUDIT_ADVISORY_BADGE}</span>
+                {verificationBadge(selected.verification)}
               </div>
               <h3 className="detail-title">{selected.title}</h3>
               <div className="ai-conf">
                 {selected.query_id} · {selected.category} · confidence {selected.confidence} ·
                 action {selected.suggested_action}
               </div>
+              {selected.verification !== 'supported' && (
+                <div className="src-note">
+                  Not promoted — evidence screening was
+                  {selected.verification === 'insufficient_evidence'
+                    ? ' inconclusive' : ' negative'}
+                  {selected.verification_reason
+                    ? ` (${selected.verification_reason.replace(/_/g, ' ')})`
+                    : ''}. Screening is deterministic and is NOT proof the
+                  finding is correct or incorrect. This candidate is shown for
+                  transparency; your review and the original report are
+                  unchanged.
+                </div>
+              )}
               <p className="detail-body">{selected.summary}</p>
               <div className="detail-label">Evidence</div>
               <ul className="ai-evidence">

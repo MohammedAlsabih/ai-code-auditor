@@ -29,8 +29,11 @@ def evaluate_sidecar(path: Path) -> dict:
     except (OSError, json.JSONDecodeError) as e:
         raise AuditEvalError(
             f"sidecar unreadable: {e.__class__.__name__}") from e
-    if not isinstance(data, dict) or data.get("schema_version") != 1:
-        raise AuditEvalError("not an ai-audit sidecar (schema_version 1)")
+    # W3-E4C2: the sidecar schema moved to 2 when candidates gained a
+    # verification verdict; accept both — the evaluator reads only the fields
+    # that are stable across versions.
+    if not isinstance(data, dict) or data.get("schema_version") not in (1, 2):
+        raise AuditEvalError("not an ai-audit sidecar (schema_version 1 or 2)")
     candidates = data.get("candidates", {})
     reviews = data.get("candidate_reviews", {})
     results = data.get("results", {})

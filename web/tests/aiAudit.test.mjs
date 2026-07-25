@@ -7,10 +7,34 @@ import {
   AUDIT_ABSENCE_NOTE,
   AUDIT_ADVISORY_BADGE,
   AUDIT_PROFILES,
+  failClosed,
   parseAuditCandidates,
   parseAuditPreview,
   parseAuditStatus,
 } from '../src/aiAudit.ts'
+
+test('failClosed never defaults an unscreened candidate to supported', () => {
+  for (const [v, r] of [[undefined, undefined], ['supported', undefined],
+    ['supported', ''], ['bananas', 'x'], [null, null]]) {
+    assert.deepEqual(failClosed(v, r),
+      { verification: 'insufficient_evidence', verification_reason: 'verification_missing' })
+  }
+  assert.deepEqual(failClosed('supported', 'cited_lines_carry_category_evidence'),
+    { verification: 'supported', verification_reason: 'cited_lines_carry_category_evidence' })
+})
+
+test('parseAuditCandidates fails a verification-less candidate closed', () => {
+  const rows = parseAuditCandidates({
+    candidates: [{
+      candidate_id: 'x', file: 'a.cs', title: 't',
+      evidence: [{ statement: 's' }],
+      // NO verification field
+    }],
+  })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].verification, 'insufficient_evidence')
+  assert.equal(rows[0].verification_reason, 'verification_missing')
+})
 
 const preview = () => ({
   units: 3,
