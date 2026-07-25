@@ -534,6 +534,7 @@ def test_api_preview_start_status_results_flow(tmp_path, monkeypatch):
     body = pv.json()
     assert body["units"] >= 1 and body["request_count"] == body["units"]
     assert body["concurrency"] == 1
+    assert body["num_ctx"] == 4096               # W3-E4D: default, server-set
     assert body["cost_status"] == "unknown" and body["retention"] == "unknown"
     assert body["consent_token"] == ""           # local
     r = c.post("/api/ai/audits", json={
@@ -553,6 +554,33 @@ def test_api_preview_start_status_results_flow(tmp_path, monkeypatch):
     assert "advisory" in res["note"] and "NOT" in res["note"]
     for cand in res["candidates"]:
         assert cand["file"].startswith("svc/")
+
+
+def test_api_preview_shows_server_num_ctx_8192(tmp_path, monkeypatch):
+    # W3-E4D: the API surfaces the effective server context window; the browser
+    # cannot set it (the request model has no num_ctx field).
+    monkeypatch.setenv("AUDITOR_OLLAMA_NUM_CTX", "8192")
+    c = _client(tmp_path, monkeypatch, FakeTransport())
+    pv = c.post("/api/ai/audits/preview",
+                json={"profile": "security", "provider": "ollama",
+                      "model": "m"})
+    assert pv.status_code == 200
+    assert pv.json()["num_ctx"] == 8192
+
+
+def test_api_preview_rejects_invalid_num_ctx_before_network(tmp_path,
+                                                            monkeypatch):
+    class MustNotCall:
+        def request(self, *a, **k):
+            raise AssertionError("network on an invalid num_ctx")
+    monkeypatch.setenv("AUDITOR_OLLAMA_NUM_CTX", "banana")
+    c = _client(tmp_path, monkeypatch, MustNotCall())
+    pv = c.post("/api/ai/audits/preview",
+                json={"profile": "security", "provider": "ollama",
+                      "model": "m"})
+    assert pv.status_code == 400
+    assert pv.json()["status"] == "invalid_ollama_num_ctx"
+    assert "banana" not in pv.text                       # no echo
 
 
 def test_api_audit_requires_repo(tmp_path, monkeypatch):

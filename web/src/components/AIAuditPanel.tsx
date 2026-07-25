@@ -297,6 +297,7 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
                 <dt>Runtime</dt>
                 <dd>
                   concurrency {preview.concurrency} · timeout {preview.request_timeout_seconds}s ·{' '}
+                  {preview.num_ctx != null ? `context ${preview.num_ctx} · ` : ''}
                   {preview.cached} cached / {preview.fresh} fresh
                 </dd>
               </div>

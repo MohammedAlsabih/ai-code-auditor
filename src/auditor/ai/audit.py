@@ -35,10 +35,12 @@ from auditor.ai.providers import ANTHROPIC_VERSION, PROVIDER_SPECS, resolve_conf
 from auditor.ai.review import (
     PACK_MAX_BYTES,
     REDACTION_CATEGORIES,
+    OllamaNumCtxError,
     PrivacyGateError,
     _canonical,
     _review_body,
     check_privacy_gate,
+    ollama_num_ctx,
     redact_counted,
     redaction_events,
     review_timeout,
@@ -148,6 +150,18 @@ class AuditContextError(Exception):
 def audit_unit_id(project: str, query_id: str, query_version: int,
                   digest: str) -> str:
     blob = json.dumps([project, query_id, query_version, digest],
+                      ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def audit_execution_id(unit_id: str, provider: str, model: str,
+                       prompt_version: str, num_ctx: int | None) -> str:
+    """W3-E4D: the EXECUTION identity — distinct from the sent-DATA identity
+    (audit_unit_id / context_digest, which never move with num_ctx). It binds
+    the inference parameters (provider, model, prompt_version, num_ctx) to the
+    unit so a 4096 run and an 8192 run of the SAME sent data are SEPARATE
+    records that never dedupe or stale-collide in the store or the batch."""
+    blob = json.dumps([unit_id, provider, model, prompt_version, num_ctx],
                       ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -693,6 +707,11 @@ def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
     check_privacy_gate(provider, config, env, consented)
     if spec.key_required and not config.api_key:
         raise AIError("not_configured")
+    # W3-E4D: the Ollama context window is resolved from the SERVER env BEFORE
+    # any network I/O (an invalid value raises OllamaNumCtxError here, so a
+    # malformed config never reaches the wire). It applies to Ollama alone;
+    # every other provider keeps num_ctx None and never carries it.
+    num_ctx = ollama_num_ctx(env) if provider is Provider.OLLAMA else None
     system, user = build_audit_messages(pack)
     headers = {"content-type": "application/json"}
     if spec.auth_style == "anthropic":
@@ -706,7 +725,8 @@ def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
             "POST", config.base_url + spec.probe_path, headers,
             _review_body(provider, model, system, user,
                          schema=audit_schema_for(pack.get("required_category")),
-                         max_tokens=AUDIT_MAX_OUTPUT_TOKENS),
+                         max_tokens=AUDIT_MAX_OUTPUT_TOKENS,
+                         num_ctx=num_ctx),
             review_timeout(env))
     except TransportFailure as e:
         raise AIError(e.code) from None
@@ -737,6 +757,13 @@ def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
         "prompt_version": AUDIT_PROMPT_VERSION,
         "latency_ms": latency_ms,
         "context_digest": pack["digest"],
+        # W3-E4D: the effective Ollama context window (None for non-Ollama) and
+        # the execution identity that distinguishes a 4096 run from an 8192 run
+        # of the SAME sent data — the sent-data digest above is unchanged.
+        "num_ctx": num_ctx,
+        "execution_id": audit_execution_id(
+            pack["unit_id"], provider.value, model, AUDIT_PROMPT_VERSION,
+            num_ctx),
         "created_at": datetime.now(timezone.utc)
         .strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -875,7 +902,11 @@ class AuditRunner:
                     unit["state"] = "completed"
                     unit["outcome"] = result["outcome"]
                     unit["issues"] = len(cands)
-                except (AIError, PrivacyGateError, ConsentError) as e:
+                except (AIError, PrivacyGateError, ConsentError,
+                        OllamaNumCtxError) as e:
+                    # OllamaNumCtxError is raised BEFORE the wire — an invalid
+                    # server num_ctx fails the unit with its fixed code and
+                    # never sends a request.
                     unit["state"] = "failed"
                     unit["error"] = getattr(e, "code", "error")
                 except Exception:                    # noqa: BLE001

@@ -49,6 +49,7 @@ const preview = () => ({
   fresh: 3,
   concurrency: 1,
   request_timeout_seconds: 120,
+  num_ctx: 8192,
   cost_status: 'unknown',
   retention: 'unknown',
   queries: ['AI001', 'AI002'],
@@ -62,6 +63,15 @@ test('parseAuditPreview accepts a legal preview', () => {
   assert.equal(p.units, 3)
   assert.equal(p.concurrency, 1)
   assert.equal(p.cost_status, 'unknown')
+  assert.equal(p.num_ctx, 8192)            // W3-E4D: server-set Ollama context
+})
+
+test('parseAuditPreview defaults num_ctx to null when absent', () => {
+  const { num_ctx, ...rest } = preview()   // a non-Ollama preview omits it
+  void num_ctx
+  const p = parseAuditPreview(rest)
+  assert.ok(p)
+  assert.equal(p.num_ctx, null)
 })
 
 test('parseAuditPreview rejects malformed payloads', () => {

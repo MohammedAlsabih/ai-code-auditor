@@ -37,6 +37,7 @@ export interface AIAuditPreview {
   fresh: number
   concurrency: number
   request_timeout_seconds: number
+  num_ctx: number | null
   cost_status: string
   estimated_cost_usd?: number
   retention: string
@@ -67,6 +68,9 @@ export function parseAuditPreview(raw: unknown): AIAuditPreview | null {
     fresh: raw.fresh as number,
     concurrency: raw.concurrency as number,
     request_timeout_seconds: raw.request_timeout_seconds as number,
+    // W3-E4D: the server's effective Ollama context window (null otherwise).
+    // Server-set only — the browser never sends or overrides it.
+    num_ctx: typeof raw.num_ctx === 'number' ? raw.num_ctx : null,
     cost_status: raw.cost_status,
     estimated_cost_usd:
       typeof raw.estimated_cost_usd === 'number' ? raw.estimated_cost_usd : undefined,

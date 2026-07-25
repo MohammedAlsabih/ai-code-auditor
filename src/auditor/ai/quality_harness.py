@@ -21,6 +21,7 @@ from auditor.ai.audit_queries import CATALOG_VERSION, query_by_id
 from auditor.ai.contract import ERROR_CODES, AIError, Provider
 from auditor.ai.quality_corpus import (
     CORPUS_VERSION, CasePlan, CorpusCase, cases, corpus_digest)
+from auditor.ai.review import OllamaNumCtxError
 
 HARNESS_VERSION = 2
 _MAX_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -90,7 +91,9 @@ def run_case(case: CorpusCase, provider: Provider, model: str,
                 "context_digest": ""}
     try:
         res = run_audit_unit(pack, provider, model, transport, env=env)
-    except AIError as e:
+    except (AIError, OllamaNumCtxError) as e:
+        # OllamaNumCtxError is raised BEFORE the wire — a bad server num_ctx
+        # fails the case with its fixed code and never sends a request.
         return {**base, "state": e.code, "unit_id": pack["unit_id"],
                 "context_digest": pack["digest"]}
     return {
@@ -116,6 +119,11 @@ def run_case(case: CorpusCase, provider: Provider, model: str,
         "provider": res["provider"], "model": res["model"],
         "prompt_version": res["prompt_version"],
         "query_version": res["query_version"], "latency_ms": res["latency_ms"],
+        # W3-E4D: carry the effective Ollama context window + execution
+        # identity so a 4096 measurement run and an 8192 one are auditable and
+        # never conflated in the recorded outputs.
+        "num_ctx": res.get("num_ctx"),
+        "execution_id": res.get("execution_id"),
     }
 
 

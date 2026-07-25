@@ -122,6 +122,51 @@ def review_timeout(env: dict[str, str] | None = None) -> float:
     return min(max(value, REVIEW_TIMEOUT_MIN), REVIEW_TIMEOUT_MAX)
 
 
+# W3-E4D: the LOCAL Ollama context window (num_ctx). SERVER-ENV ONLY — never a
+# request/browser/prompt field. Unset => 4096; a bounded ASCII whole number
+# (incl. 4096 and 8192) is honoured; anything else — a sign, a dot, letters, a
+# bool word, NaN, zero, or an out-of-range value — is a FIXED config error
+# raised BEFORE any network I/O, and the offending value is NEVER echoed. It
+# applies to Ollama ALONE (inside options.num_ctx) and never reaches an
+# OpenAI-compatible or remote provider.
+OLLAMA_NUM_CTX_ENV = "AUDITOR_OLLAMA_NUM_CTX"
+OLLAMA_NUM_CTX_DEFAULT = 4096
+OLLAMA_NUM_CTX_MIN = 2048
+OLLAMA_NUM_CTX_MAX = 32768
+_NUM_CTX_RE = re.compile(r"[0-9]+")
+
+
+class OllamaNumCtxError(Exception):
+    """AUDITOR_OLLAMA_NUM_CTX is not a safe bounded integer. Raised BEFORE any
+    network I/O; the fixed message NEVER echoes the offending value."""
+
+    code = "invalid_ollama_num_ctx"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "AUDITOR_OLLAMA_NUM_CTX must be a whole number within the "
+            f"supported range [{OLLAMA_NUM_CTX_MIN}, {OLLAMA_NUM_CTX_MAX}]")
+
+
+def ollama_num_ctx(env: dict[str, str] | None = None) -> int:
+    """The effective Ollama context window. Unset => 4096. A bounded ASCII
+    whole number is accepted; a bool/float/NaN/negative/zero/malformed/out-of-
+    range value raises OllamaNumCtxError with NO echo of the value. The number
+    is never taken from a request body, the browser, or the prompt."""
+    e = os.environ if env is None else env
+    raw = (e.get(OLLAMA_NUM_CTX_ENV) or "").strip()
+    if not raw:
+        return OLLAMA_NUM_CTX_DEFAULT
+    # ASCII digits only: rejects '+'/'-', '.', 'e', '0x..', '8_192', unicode
+    # digits, bool words ('true'), and 'nan'/'inf' outright.
+    if not raw.isascii() or not _NUM_CTX_RE.fullmatch(raw):
+        raise OllamaNumCtxError()
+    value = int(raw)
+    if value < OLLAMA_NUM_CTX_MIN or value > OLLAMA_NUM_CTX_MAX:
+        raise OllamaNumCtxError()
+    return value
+
+
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
@@ -766,12 +811,18 @@ AI_REVIEW_RESPONSE_SCHEMA_V1: dict[str, Any] = {
 
 def _review_body(provider: Provider, model: str, system: str,
                  user: str, *, schema: dict[str, Any],
-                 max_tokens: int) -> dict[str, Any]:
+                 max_tokens: int, num_ctx: int | None = None) -> dict[str, Any]:
     """Build the ONE request body for a fixed-contract call. `schema` is the
     contract's JSON Schema and `max_tokens` is the contract's own output cap
     (so the wire number always matches the preview/limits budget). Only
     Ollama carries the full schema in `format` and disables thinking; the
-    remote providers keep their documented json_object shape unchanged."""
+    remote providers keep their documented json_object shape unchanged.
+
+    W3-E4D: `num_ctx` is threaded ONLY into the Ollama `options.num_ctx`. It is
+    the ONE helper shared by the single-finding review and the audit; the
+    review path never passes it (num_ctx stays None => the review wire is
+    byte-for-byte unchanged), and it can never reach an OpenAI-compatible or
+    remote body."""
     if provider in (Provider.OPENAI, Provider.XAI):
         return {"model": model, "instructions": system, "input": user,
                 "max_output_tokens": max_tokens, "temperature": 0,
@@ -786,12 +837,14 @@ def _review_body(provider: Provider, model: str, system: str,
         # think:false so a reasoning model spends the budget on the answer,
         # not on a thinking channel that leaves content empty; format carries
         # the full schema so the reply is the contract, not prose.
+        options: dict[str, Any] = {"temperature": 0, "num_predict": max_tokens}
+        if num_ctx is not None:                  # W3-E4D: server-set context
+            options["num_ctx"] = num_ctx
         return {"model": model,
                 "messages": [{"role": "system", "content": system},
                              {"role": "user", "content": user}],
                 "stream": False, "think": False, "format": schema,
-                "options": {"temperature": 0,
-                            "num_predict": max_tokens}}
+                "options": options}
     # openai_compatible: required Chat Completions fields only — no
     # response_format, which compatible servers may not implement
     return {"model": model,

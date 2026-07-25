@@ -414,7 +414,12 @@ def _ai_audit(args) -> int:
     from auditor.ai.batch import BatchError, BatchLimits, load_pricing
     from auditor.ai.consent import remote_reviews_enabled
     from auditor.ai.providers import resolve_config as _resolve
-    from auditor.ai.review import PrivacyGateError, is_local_review_provider
+    from auditor.ai.review import (
+        OllamaNumCtxError,
+        PrivacyGateError,
+        is_local_review_provider,
+        ollama_num_ctx,
+    )
     from auditor.ai.transport import RequestsTransport
     from auditor.web.app import ReportError, load_report
 
@@ -457,6 +462,15 @@ def _ai_audit(args) -> int:
                   file=sys.stderr)
             return 3
         consented = True
+
+    # W3-E4D: resolve the effective Ollama context window from the SERVER env
+    # up front (fixed error, no echo, no network) so it can be shown and an
+    # invalid value stops the run before any request.
+    try:
+        num_ctx = ollama_num_ctx() if provider is Provider.OLLAMA else None
+    except OllamaNumCtxError as e:
+        print(f"error | خطأ: {e}", file=sys.stderr)
+        return 2
 
     project_roots = [(str(p.get("root", "")), str(p.get("language", "")))
                      for p in report.get("projects", [])
@@ -523,7 +537,9 @@ def _ai_audit(args) -> int:
                             "query": pack["query_id"],
                             "error": e.code})
     print(_json.dumps({"units": len(packs), "completed": ok_units,
-                       "results": summary}, ensure_ascii=True, indent=1))
+                       "provider": provider.value, "model": args.model,
+                       "num_ctx": num_ctx, "results": summary},
+                      ensure_ascii=True, indent=1))
     return 0 if ok_units else 1
 
 

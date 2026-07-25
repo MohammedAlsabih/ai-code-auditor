@@ -28,11 +28,15 @@ from auditor.ai.audit import (
 )
 from auditor.ai.evidence_verify import (
     REASON_CODES, VERIFY_STATES, fail_closed)
+from auditor.ai.review import OLLAMA_NUM_CTX_MAX, OLLAMA_NUM_CTX_MIN
 
-# W3-E4C2: candidates now carry a verification verdict (schema 1 -> 2). An old
-# schema-1 sidecar is simply reported as an unsupported shape, never migrated
-# in place.
-SCHEMA_VERSION = 2
+# W3-E4C2: candidates carry a verification verdict (schema 1 -> 2). W3-E4D:
+# result rows carry the execution identity + effective num_ctx (schema 2 -> 3)
+# so a 4096 run and an 8192 run of the SAME sent data are distinct records. A
+# pre-3 sidecar stays VIEWABLE (legacy): its result rows are back-filled in
+# memory (num_ctx None, execution_id = the existing unit-keyed id) and its
+# candidates fail closed — nothing is a fresh answer.
+SCHEMA_VERSION = 3
 SIDECAR_MAX_BYTES = 15 * 1024 * 1024
 CANDIDATE_DECISIONS = ("confirmed", "false_positive", "uncertain")
 NOTE_MAX_CHARS = 2000
@@ -74,9 +78,10 @@ def _pos_int(v: Any) -> bool:
 
 
 # explicit allowlists — nothing is ever stored or loaded by open copy
-RESULT_KEYS = ("audit_unit_id", "project", "query_id", "query_version",
-               "provider", "model", "prompt_version", "latency_ms",
-               "context_digest", "created_at", "outcome", "issue_count")
+RESULT_KEYS = ("audit_unit_id", "execution_id", "project", "query_id",
+               "query_version", "provider", "model", "prompt_version",
+               "num_ctx", "latency_ms", "context_digest", "created_at",
+               "outcome", "issue_count")
 _UNIT_KEYS = {"audit_unit_id", "project", "query_id", "state", "outcome",
               "error", "issues"}
 _AUDIT_KEYS = {"audit_id", "state", "created_at", "provider", "model",
@@ -139,14 +144,23 @@ def _valid_candidate(c: Any) -> bool:
         and all(_hex64(r) for r in c["related_static_findings"])
 
 
+def _valid_num_ctx(v: Any) -> bool:
+    """None (non-Ollama) or a bounded whole number — never a bool/float."""
+    if v is None:
+        return True
+    return (isinstance(v, int) and not isinstance(v, bool)
+            and OLLAMA_NUM_CTX_MIN <= v <= OLLAMA_NUM_CTX_MAX)
+
+
 def _valid_result_row(r: Any) -> bool:
     if not isinstance(r, dict) or set(r) != set(RESULT_KEYS):
         return False
     if r["outcome"] not in AUDIT_OUTCOMES or not _hex64(r["audit_unit_id"]) \
-            or not _hex64(r["context_digest"]):
+            or not _hex64(r["execution_id"]) or not _hex64(r["context_digest"]):
         return False
     if not _pos_int(r["latency_ms"]) or not _pos_int(r["issue_count"]) \
-            or not _pos_int(r["query_version"]):
+            or not _pos_int(r["query_version"]) or not _valid_num_ctx(
+                r["num_ctx"]):
         return False
     for f in ("project", "query_id", "provider", "model", "prompt_version",
               "created_at"):
@@ -215,24 +229,30 @@ class AIAuditStore:
         if not isinstance(data, dict) \
                 or set(data) != {"schema_version", "audits", "results",
                                  "candidates", "candidate_reviews"} \
-                or data.get("schema_version") not in (1, SCHEMA_VERSION) \
+                or data.get("schema_version") not in (1, 2, SCHEMA_VERSION) \
                 or not all(isinstance(data.get(k), dict) for k in
                            ("audits", "results", "candidates",
                             "candidate_reviews")):
             self.available, self.error = False, \
                 "sidecar has an unsupported shape or schema_version"
             return
-        # W3-E4C closing: a LEGACY schema-1 sidecar (candidates written before
-        # evidence screening existed) stays VIEWABLE, but every candidate FAILS
-        # CLOSED to an unverified verdict — it is never shown as screened. The
-        # migration is in-memory only; it is persisted (as schema 2) the next
-        # time anything writes.
+        # A LEGACY pre-3 sidecar stays VIEWABLE, but is never a fresh answer.
+        # W3-E4C: every candidate FAILS CLOSED to an unverified verdict (never
+        # shown as screened). W3-E4D: every result row is back-filled with a
+        # None num_ctx and an execution_id equal to its existing unit-keyed id
+        # — a legacy row can never be mistaken for a fresh 4096/8192 run (its
+        # execution_id will not match any newly computed one). The migration is
+        # in-memory only; it is persisted (as schema 3) the next write.
         self.legacy = data.get("schema_version") != SCHEMA_VERSION
         if self.legacy:
             for c in data["candidates"].values():
                 if isinstance(c, dict):
                     c["verification"], c["verification_reason"] = fail_closed(
                         c.get("verification"), c.get("verification_reason"))
+            for rid, r in data["results"].items():
+                if isinstance(r, dict):
+                    r.setdefault("num_ctx", None)
+                    r.setdefault("execution_id", rid)
             data["schema_version"] = SCHEMA_VERSION
         # FULL validation of every collection — one malformed row makes the
         # store unavailable; nothing is repaired, dropped, or echoed
@@ -337,7 +357,10 @@ class AIAuditStore:
                     "refusing to store a malformed candidate")
 
         def mutate(d):
-            d["results"][result["audit_unit_id"]] = stored
+            # W3-E4D: keyed by the EXECUTION identity, not the unit id — a 4096
+            # run and an 8192 run of the same sent data are distinct rows and
+            # never overwrite one another.
+            d["results"][result["execution_id"]] = stored
             for c in candidates:
                 d["candidates"][c["candidate_id"]] = c
         self._commit(mutate)
@@ -362,8 +385,10 @@ class AIAuditStore:
         row = self._data["audits"].get(audit_id)
         return json.loads(json.dumps(row)) if row is not None else None
 
-    def result_for_unit(self, unit_id: str) -> dict[str, Any] | None:
-        row = self._data["results"].get(unit_id)
+    def result_for_execution(self, execution_id: str) -> dict[str, Any] | None:
+        """W3-E4D: look up a result by its EXECUTION identity, so a cached 4096
+        row never satisfies an 8192 lookup (and vice-versa)."""
+        row = self._data["results"].get(execution_id)
         return json.loads(json.dumps(row)) if row is not None else None
 
     def all_candidates(self) -> list[dict[str, Any]]:

@@ -938,8 +938,10 @@ def create_app(report_path: Path, repo_root: Path | None = None,
     # deterministic index retrieves bounded context. No prompt anywhere.
     from auditor.ai.audit import (
         AUDIT_MAX_OUTPUT_TOKENS,
+        AUDIT_PROMPT_VERSION,
         AuditContextError,
         AuditRunner,
+        audit_execution_id,
         build_audit_pack,
         estimate_units,
     )
@@ -950,7 +952,11 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         queries_for_profile,
     )
     from auditor.ai.audit_store import AIAuditStore, AIAuditStoreError
-    from auditor.ai.review import review_timeout
+    from auditor.ai.review import (
+        OllamaNumCtxError,
+        ollama_num_ctx,
+        review_timeout,
+    )
 
     ai_audit_store = AIAuditStore(
         report_path.parent / (report_path.stem + ".ai-audit.json"))
@@ -1039,16 +1045,33 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         except AuditContextError as e:
             return _AsciiJSON({"error": str(e), "status": e.code},
                               status_code=413)
+        # W3-E4D: the effective Ollama context window is resolved SERVER-side
+        # (never from this request); an invalid value is a fixed 400 with no
+        # echo. It is None for every non-Ollama provider.
+        try:
+            effective_num_ctx = (ollama_num_ctx()
+                                  if provider is Provider.OLLAMA else None)
+        except OllamaNumCtxError as e:
+            return _AsciiJSON({"error": str(e), "status": e.code},
+                              status_code=400)
+        model_s = body.model.strip()
         preview = estimate_units(packs)
         preview.update(skip_info)
         preview["profile"] = body.profile
         preview["provider"] = provider.value
-        preview["model"] = body.model.strip()
+        preview["model"] = model_s
+        preview["num_ctx"] = effective_num_ctx
         preview["queries"] = sorted({p["query_id"] for p in packs})
         preview["projects"] = sorted({p["project"] for p in packs})
+        # cached counts a prior result for THIS execution identity (provider +
+        # model + prompt + num_ctx), so switching 4096 -> 8192 shows the units
+        # as fresh, never a stale 4096 hit.
         preview["cached"] = sum(
             1 for p in packs
-            if ai_audit_store.result_for_unit(p["unit_id"]) is not None)
+            if ai_audit_store.result_for_execution(
+                audit_execution_id(p["unit_id"], provider.value, model_s,
+                                   AUDIT_PROMPT_VERSION, effective_num_ctx))
+            is not None)
         preview["fresh"] = preview["units"] - preview["cached"]
         preview["concurrency"] = 1               # local AND remote
         preview["request_timeout_seconds"] = int(review_timeout())
@@ -1092,6 +1115,14 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         bad = _audit_gate(provider)
         if bad is not None:
             return bad
+        # W3-E4D: reject an invalid server num_ctx up front (fixed 400, no
+        # echo) so no unit ever reaches the wire with a malformed config.
+        if provider is Provider.OLLAMA:
+            try:
+                ollama_num_ctx()
+            except OllamaNumCtxError as e:
+                return _AsciiJSON({"error": str(e), "status": e.code},
+                                  status_code=400)
         # packs are built ONCE; the same objects feed consent, budgets, and
         # the requests — no rebuild after redeem (no TOCTOU window)
         try:
