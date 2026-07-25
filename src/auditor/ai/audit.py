@@ -33,6 +33,7 @@ from auditor.ai.contract import AIError, Provider, TransportFailure
 from auditor.ai.providers import ANTHROPIC_VERSION, PROVIDER_SPECS, resolve_config
 from auditor.ai.review import (
     PACK_MAX_BYTES,
+    REDACTION_CATEGORIES,
     PrivacyGateError,
     _canonical,
     _review_body,
@@ -41,9 +42,11 @@ from auditor.ai.review import (
     review_timeout,
 )
 
-AUDIT_PROMPT_VERSION = "w3e-v3"   # W3-E4B2: falsification-first instructions;
-#                                   the query piece carries a required_category
-#                                   AND a fixed per-query decision_contract
+AUDIT_PROMPT_VERSION = "w3e-v4"   # W3-E4C1: the pack may carry a
+#                                   redaction_facts piece (server-side proof a
+#                                   real literal was masked at exact lines);
+#                                   the prompt explains it. Query piece still
+#                                   carries required_category + contract.
 AUDIT_OUTCOMES = ("issues_found", "no_issue_observed", "insufficient_context")
 AUDIT_CATEGORIES = ("authorization", "input_handling", "credentials",
                     "concurrency", "error_handling", "api_contract",
@@ -175,15 +178,22 @@ def _merge_windows(match_lines: list[int], total: int) -> list[tuple[int, int]]:
 
 def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
                          budget: int, red) -> tuple[str, list[list[int]],
-                                                    dict[str, int], int]:
+                                                    dict[str, int], int,
+                                                    list[tuple[int, str]]]:
     """Assemble numbered, redacted lines WHOLE-LINE by WHOLE-LINE inside a
     UTF-8 byte budget. Nothing is ever cut mid-line and the JSON is never
     truncated. Returns (text, EXACT sent spans, redaction counts,
-    bytes_before) — the spans record exactly which line numbers went on the
-    wire, so a citation can be validated against what was actually sent."""
+    bytes_before, line_facts) — the spans record exactly which line numbers
+    went on the wire, so a citation can be validated against what was
+    actually sent. line_facts records (line_no, redaction_class) ONLY for
+    SENT lines the redactor actually CHANGED: a value that was already ***
+    in the source redacts to itself and produces NO fact, so a fact is
+    server-side proof that a real, non-empty literal matched at that line.
+    The original value is never recorded in any form."""
     parts: list[str] = []
     sent: list[list[int]] = []
     counts: dict[str, int] = {}
+    line_facts: list[tuple[int, str]] = []
     bytes_before = 0
     used = 0
     for start, end in spans:
@@ -195,9 +205,13 @@ def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
             rendered = f"{n}: {red_line}"
             cost = len(rendered.encode("utf-8")) + 1
             if used + cost > budget:
-                return "\n...\n".join(parts), sent, counts, bytes_before
+                return ("\n...\n".join(parts), sent, counts, bytes_before,
+                        line_facts)
             for cat, k in c.items():
                 counts[cat] = counts.get(cat, 0) + k
+            if red_line != raw_line:            # the redactor CHANGED it
+                for cat in sorted(c):
+                    line_facts.append((n, cat))
             if not opened:
                 parts.append(rendered)
                 sent.append([n, n])
@@ -206,7 +220,47 @@ def _lines_within_budget(lines: list[str], spans: list[tuple[int, int]],
                 parts[-1] += "\n" + rendered
                 sent[-1][1] = n
             used += cost
-    return "\n...\n".join(parts), sent, counts, bytes_before
+    return "\n...\n".join(parts), sent, counts, bytes_before, line_facts
+
+
+# W3-E4C1: the ONE fixed sentence a redaction fact carries — it names the
+# event, never the value. Classes come from the redactor's own rule names.
+REDACTION_FACT_TEXT = ("a non-empty literal value matched here and was "
+                       "replaced with *** before sending; the original "
+                       "value was NOT sent")
+REDACTION_FACT_KEYS = ("context_id", "file", "line_start", "line_end",
+                       "redaction_class", "fact")
+
+
+def _cid_sort_key(cid: str) -> tuple[str, int]:
+    kind, _, num = cid.partition(":")
+    return (kind, int(num) if num.isdigit() else 0)
+
+
+def redaction_facts(piece_meta: dict[str, dict[str, Any]]
+                    ) -> list[dict[str, Any]]:
+    """Structured facts for lines where the redactor ACTUALLY changed a sent
+    value. Server-derived fields only; contiguous lines of the same class
+    merge into one range; deterministic order (piece, line, class); classes
+    outside the redactor's own category allowlist are refused outright."""
+    out: list[dict[str, Any]] = []
+    for cid in sorted(piece_meta, key=_cid_sort_key):
+        meta = piece_meta[cid]
+        rows = sorted(set(meta.get("line_facts") or ()))
+        for line, cls in rows:
+            if cls not in REDACTION_CATEGORIES:
+                raise AuditContextError()
+            prev = out[-1] if out else None
+            if (prev is not None and prev["context_id"] == cid
+                    and prev["redaction_class"] == cls
+                    and prev["line_end"] == line - 1):
+                prev["line_end"] = line          # merge contiguous same-class
+                continue
+            out.append({"context_id": cid, "file": meta["file"],
+                        "line_start": line, "line_end": line,
+                        "redaction_class": cls,
+                        "fact": REDACTION_FACT_TEXT})
+    return out
 
 
 def build_audit_pack(index: RepositoryAuditIndex, project: str,
@@ -271,7 +325,7 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
             return False
         remaining = min(PER_FILE_BYTES,
                         query.max_context_bytes - total_src_bytes)
-        text, sent_spans, counts, b_before = _lines_within_budget(
+        text, sent_spans, counts, b_before, line_facts = _lines_within_budget(
             f.text.splitlines(), spans, remaining, red)
         if not sent_spans:
             return False
@@ -282,7 +336,8 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
             piece["provenance"] = provenance
         pieces.append(piece)
         piece_meta[cid] = {"file": f.rel, "spans": sent_spans,
-                           "redactions": counts, "bytes_before": b_before}
+                           "redactions": counts, "bytes_before": b_before,
+                           "line_facts": line_facts}
         seen_files.add(f.rel)
         files_used += 1
         total_src_bytes += len(text.encode("utf-8"))
@@ -326,8 +381,9 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
     if query.needs_manifest:
         for n_m, mf in enumerate(manifest_files, start=1):
             mlines = mf.text.splitlines() or [""]
-            text, sent_spans, counts, b_before = _lines_within_budget(
-                mlines, [(1, len(mlines))], MANIFEST_BYTES, red)
+            text, sent_spans, counts, b_before, line_facts = \
+                _lines_within_budget(mlines, [(1, len(mlines))],
+                                     MANIFEST_BYTES, red)
             if not sent_spans:
                 continue
             cid = f"manifest:{n_m}"
@@ -336,12 +392,47 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
                            "text": text})
             piece_meta[cid] = {"file": mf.rel, "spans": sent_spans,
                                "redactions": counts,
-                               "bytes_before": b_before}
+                               "bytes_before": b_before,
+                               "line_facts": line_facts}
 
-    # deterministic reduction: drop the LOWEST-ranked source piece last-first,
-    # then refuse — the serialized JSON itself is never truncated
+    def _rebuild_aux() -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """The redaction_facts + notice pieces depend on the KEPT source
+        pieces only. Rebuild them from the CURRENT piece_meta so that dropping
+        a source piece during reduction also drops its facts (W3-E4C1: no
+        orphan facts, ever). Returns (facts, kept_redaction_counts)."""
+        nonlocal pieces
+        pieces = [p for p in pieces
+                  if p["context_id"] not in ("redaction_facts", "redaction")]
+        kept: dict[str, int] = {}
+        for m in piece_meta.values():
+            for cat, k in m["redactions"].items():
+                kept[cat] = kept.get(cat, 0) + k
+        f = redaction_facts(piece_meta)
+        if f:
+            # structured, positional, server-derived proof that a REAL literal
+            # was masked at exact lines; a *** already in the source makes no
+            # fact. No original value or derivative is stored/sent. Part of the
+            # canonical bytes => digest, consent, PrivacyManifest. Evidence for
+            # the model + verifier — never an automatic finding.
+            pieces.append({"context_id": "redaction_facts", "facts": f})
+        if any(kept.values()):
+            pieces.append({
+                "context_id": "redaction", "applied": True,
+                "notice": ("One or more matched sensitive values were "
+                           "replaced before AI review. The *** marker is a "
+                           "placeholder, not the original value and not "
+                           "evidence that the value was empty or fake. Lines "
+                           "listed in the redaction_facts piece carried a "
+                           "REAL matched literal that was masked."),
+            })
+        return f, kept
+
+    # deterministic reduction: drop the LOWEST-ranked source piece last-first
+    # (its facts go with it), rebuild the aux pieces, then refuse — the
+    # serialized JSON itself is never truncated
     def size() -> int:
         return len(_canonical(pieces).encode("utf-8"))
+    facts, kept_redactions = _rebuild_aux()
     while size() > PACK_MAX_BYTES:
         src_ids = [p["context_id"] for p in pieces
                    if str(p["context_id"]).startswith("src:")]
@@ -350,24 +441,8 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
         drop = src_ids[-1]
         pieces = [p for p in pieces if p["context_id"] != drop]
         piece_meta.pop(drop, None)
-
-    # the redaction notice depends on the KEPT pieces only
-    kept_redactions: dict[str, int] = {}
-    kept_bytes_before = 0
-    for meta in piece_meta.values():
-        kept_bytes_before += meta["bytes_before"]
-        for cat, k in meta["redactions"].items():
-            kept_redactions[cat] = kept_redactions.get(cat, 0) + k
-    if any(kept_redactions.values()):
-        pieces.append({
-            "context_id": "redaction", "applied": True,
-            "notice": ("One or more matched sensitive values were replaced "
-                       "before AI review. The *** marker is a placeholder, "
-                       "not the original value and not evidence that the "
-                       "value was empty or fake."),
-        })
-        if size() > PACK_MAX_BYTES:
-            raise AuditContextError()
+        facts, kept_redactions = _rebuild_aux()
+    kept_bytes_before = sum(m["bytes_before"] for m in piece_meta.values())
 
     canonical = _canonical(pieces)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -389,6 +464,7 @@ def build_audit_pack(index: RepositoryAuditIndex, project: str,
             "bytes_after": len(canonical.encode("utf-8")),
             "redactions": dict(sorted(kept_redactions.items())),
             "redaction_total": sum(kept_redactions.values()),
+            "redaction_facts": len(facts),
             "pieces_sent": len(pieces),
             "files_sent": len(unique_files),
             "context_digest": digest,
@@ -419,6 +495,12 @@ registrations, manifests, and the `unresolved` facts) for evidence that \
 DISPROVES the candidate — the protection already present, the binding \
 already parameterized, the value already environment-backed, the failure \
 already propagated. Report only candidates that survive that search.
+
+A `redaction_facts` piece, when present, is SERVER-GENERATED proof: each \
+entry means a real, non-empty literal value matched at exactly those lines \
+and was replaced with *** before you saw the text. A line covered by such \
+a fact DID carry a committed literal. A *** with NO covering fact was \
+already *** in the source and proves nothing.
 
 Rules:
 - Honest abstention is valid and expected: if any context the \

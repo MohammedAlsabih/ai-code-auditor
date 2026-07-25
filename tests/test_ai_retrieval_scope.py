@@ -175,11 +175,14 @@ def test_pack_carries_required_category_in_query_piece(tmp_path):
 # ---- C: versioning --------------------------------------------------------------------
 
 def test_versions_bumped_for_the_contract_change():
-    # W3-E4B2: the decision_contract entered the query piece (context +
-    # digest + consent change), so every version moved again.
-    assert CATALOG_VERSION == 3
-    assert all(q.query_version == 3 for q in AUDIT_QUERIES)
-    assert AUDIT_PROMPT_VERSION == "w3e-v3"
+    # W3-E4C1: redaction_facts entered the pack (prompt + AI003 contract
+    # change) => CATALOG 4, AI003 query_version 4, prompt w3e-v4. The other
+    # queries' definitions did not change (their digests move anyway because
+    # every canonical can now carry the facts piece).
+    assert CATALOG_VERSION == 4
+    for q in AUDIT_QUERIES:
+        assert q.query_version == (4 if q.id == "AI003" else 3), q.id
+    assert AUDIT_PROMPT_VERSION == "w3e-v4"
     assert all(q.decision_contract for q in AUDIT_QUERIES)
 
 

@@ -59,7 +59,7 @@ def test_system_prompt_is_falsification_first():
     # the cross-file high-confidence rule: a missing-control claim needs the
     # protection context present, else insufficient_context
     assert "MISSING across files" in s
-    assert AUDIT_PROMPT_VERSION == "w3e-v3"
+    assert AUDIT_PROMPT_VERSION == "w3e-v4"
 
 
 # ---- per-rule: the counter-evidence is IN the payload, the contract names it --------
@@ -213,4 +213,5 @@ def test_holdout_still_builds_units_under_the_new_query_versions():
             idx = RepositoryAuditIndex(base, c.project_roots)
             pack = build_audit_pack(idx, c.project, query_by_id(c.query_id))
             assert pack is not None, c.case_id
-            assert pack["query_version"] == 3
+            assert pack["query_version"] == query_by_id(
+                c.query_id).query_version
