@@ -21,7 +21,8 @@ from auditor.ai.audit_index import RepositoryAuditIndex
 from auditor.ai.audit_queries import CATALOG_VERSION, query_by_id
 from auditor.ai.contract import ERROR_CODES, AIError, Provider
 from auditor.ai.quality_corpus import (
-    CORPUS_VERSION, CasePlan, CorpusCase, cases, corpus_digest)
+    CORPUS_VERSION, EXPECT_NEGATIVE, EXPECT_POSITIVE, CasePlan, CorpusCase,
+    cases, corpus_digest)
 from auditor.ai.review import OllamaNumCtxError
 
 HARNESS_VERSION = 3      # W3-E6: adds the `engine` dimension (window|agent)
@@ -114,6 +115,11 @@ def run_case(case: CorpusCase, provider: Provider, model: str,
     return {
         **base, "state": "completed", "unit_id": pack["unit_id"],
         "context_digest": pack["digest"], "outcome": res["outcome"],
+        # the fixed window has NO verdict guard: nothing stands between the
+        # model's word and the recorded one. Asserted, not left to inference.
+        "model_outcome": res["outcome"],
+        "effective_outcome": res["outcome"],
+        "guard_downgraded": "",
         "issues": [{
             "title": i["title"], "category": i["category"],
             "confidence": i["confidence"], "summary": i["summary"],
@@ -193,6 +199,12 @@ def run_pair(case: CorpusCase, provider: Provider, model: str,
                     "unit_id": pack["unit_id"],
                     "context_digest": pack["digest"],
                     "outcome": res["outcome"],
+                    # the fixed window has NO verdict guard: nothing between
+                    # the model's word and the recorded one. Stated as an
+                    # asserted fact rather than an absent field.
+                    "model_outcome": res["outcome"],
+                    "effective_outcome": res["outcome"],
+                    "guard_downgraded": "",
                     "issues": _issue_records(res["issues"]),
                     "provider": res["provider"], "model": res["model"],
                     "prompt_version": res["prompt_version"],
@@ -233,6 +245,19 @@ def run_pair(case: CorpusCase, provider: Provider, model: str,
                     "unit_id": res["audit_unit_id"],
                     "context_digest": res["context_digest"],
                     "outcome": res["outcome"],
+                    # W3-E7 instrumentation fix. The agent runtime may DOWNGRADE
+                    # a `no_issue_observed` verdict to `insufficient_context`
+                    # when the evidence was not closed. Recording only the final
+                    # word made the guard's intervention indistinguishable from
+                    # the model's own honest abstention — and the first W3-E7
+                    # run was voided for exactly that. The guard fires on, and
+                    # only on, `no_issue_observed`, so the model's original word
+                    # is EXACTLY recoverable here without touching the runtime.
+                    "model_outcome": ("no_issue_observed"
+                                      if trace.get("verdict_downgraded")
+                                      else res["outcome"]),
+                    "effective_outcome": res["outcome"],
+                    "guard_downgraded": trace.get("verdict_downgraded", ""),
                     "issues": _issue_records(res["issues"]),
                     "provider": res["provider"], "model": res["model"],
                     "prompt_version": res["prompt_version"],
@@ -284,6 +309,12 @@ def _spans_cover(spans: list[list[int]], ls: int, le: int) -> bool:
 
 _HEADER_KEYS = ("corpus_digest", "prompt_version", "catalog_version",
                 "corpus_version", "harness_version")
+# A completed result must carry one of these. Checked rather than defaulted:
+# scoring a truncated or hand-edited record as though it had concluded is the
+# silent mis-score this harness exists to prevent, and reading `outcome`
+# through .get() would quietly turn a missing verdict into `no_issue_observed`.
+_LEGAL_OUTCOMES = frozenset({"issues_found", "no_issue_observed",
+                             "insufficient_context"})
 # a unit was built and sent iff the result RAN; no_unit iff no pack was built.
 _RAN_STATES = frozenset({"completed", *ERROR_CODES})
 _LEGAL_STATES = frozenset({"no_unit", *_RAN_STATES})
@@ -292,11 +323,19 @@ _LEGAL_STATES = frozenset({"no_unit", *_RAN_STATES})
 _HARDENING_ERRORS = ("timeout", "invalid_response")
 
 
-def _verify_agent_result(r: dict[str, Any], tc: dict[str, Any]) -> None:
+def _verify_agent_result(r: dict[str, Any], tc: dict[str, Any],
+                         expect_prompt_version: str | None = None) -> None:
     """The agent half of the one-to-one contract. Independent of the runtime:
     it re-checks, from the recorded result alone, that nothing was cited that
-    the agent did not send."""
+    the agent did not send.
+
+    `expect_prompt_version` exists so a STORED run can be re-scored against the
+    version it was actually produced with — re-classifying an archived run with
+    corrected counting rules is a normal measurement act, and silently accepting
+    any version would not be. It must be named explicitly; the default stays the
+    current runtime's version, so a live run is still fail-closed on drift."""
     from auditor.ai.audit_agent import AUDIT_AGENT_PROMPT_VERSION
+    expected = expect_prompt_version or AUDIT_AGENT_PROMPT_VERSION
     if r["state"] == "no_unit":
         if r.get("unit_id", "") or r.get("context_digest", ""):
             raise HarnessError("no_unit result carries a unit identity")
@@ -305,8 +344,17 @@ def _verify_agent_result(r: dict[str, Any], tc: dict[str, Any]) -> None:
         return                                   # a legal error code
     if not {"provider", "model", "prompt_version", "query_version"} <= set(r):
         raise HarnessError("completed result missing run metadata")
-    if r["prompt_version"] != AUDIT_AGENT_PROMPT_VERSION:
+    if r.get("outcome") not in _LEGAL_OUTCOMES:
+        raise HarnessError("completed result has no legal outcome")
+    if r["prompt_version"] != expected:
         raise HarnessError("agent result prompt_version drift")
+    # P4: absence of the guard fact must not read as "the guard did not fire".
+    # A record claiming the CURRENT runtime version was produced by a runtime
+    # that has the verdict guard, so it must carry the guard's verdict. Only a
+    # run explicitly replayed at an OLDER named version may lack it.
+    if (expect_prompt_version is None
+            and "guard_downgraded" not in r):
+        raise HarnessError("agent result predates the guard instrumentation")
     if not r.get("unit_id") or not r.get("context_digest"):
         raise HarnessError("completed agent result has no observed identity")
     observed = r.get("observed_sent_spans")
@@ -323,7 +371,8 @@ def _verify_agent_result(r: dict[str, Any], tc: dict[str, Any]) -> None:
 
 def verify_one_to_one(plan: dict[str, Any],
                       results: list[dict[str, Any]],
-                      corpus: tuple[CorpusCase, ...]) -> None:
+                      corpus: tuple[CorpusCase, ...],
+                      agent_prompt_version: str | None = None) -> None:
     """Both plan AND results must match the truth RE-DERIVED from the corpus —
     never merely each other. `truth` is rebuilt from the passed corpus, so a
     fake identity forged identically into plan and results is rejected, and a
@@ -376,7 +425,7 @@ def verify_one_to_one(plan: dict[str, Any],
             # checked: a completed run must carry its own non-empty identity,
             # the agent's own prompt version, and every citation must lie
             # inside the spans it actually sent.
-            _verify_agent_result(r, tc)
+            _verify_agent_result(r, tc, agent_prompt_version)
             continue
         unit_built = bool(tc["unit_id"])
         if unit_built:
@@ -399,6 +448,8 @@ def verify_one_to_one(plan: dict[str, Any],
             if not {"provider", "model", "prompt_version",
                     "query_version"} <= set(r):
                 raise HarnessError("completed result missing run metadata")
+            if r.get("outcome") not in _LEGAL_OUTCOMES:
+                raise HarnessError("completed result has no legal outcome")
             if r["prompt_version"] != truth["prompt_version"]:
                 raise HarnessError("result prompt_version drift")
             for issue in r.get("issues", []):
@@ -430,20 +481,36 @@ def _cites_target(issues: list[dict[str, Any]],
 
 def classify(plan: dict[str, Any],
              results: list[dict[str, Any]],
-             corpus: tuple[CorpusCase, ...]) -> dict[str, Any]:
-    verify_one_to_one(plan, results, corpus)
+             corpus: tuple[CorpusCase, ...],
+             agent_prompt_version: str | None = None) -> dict[str, Any]:
+    verify_one_to_one(plan, results, corpus, agent_prompt_version)
     by_id = {r["case_id"]: r for r in results}
     per_query: dict[str, dict[str, Any]] = {}
     for pc in plan["cases"]:
         q = pc["query_id"]
         r = by_id[pc["case_id"]]
         qd = per_query.setdefault(q, {
-            "positive": {"assessed": 0, "detected": 0, "missed": 0},
-            "negative": {"assessed": 0, "clean": 0, "false_positive": 0},
+            # detected_verified is a SECOND, stricter reading of the same
+            # cases, recorded beside `detected` and never replacing it. The
+            # pre-registered rule is "an issue cites the target span"; the
+            # project also runs a deterministic verifier over every issue, and
+            # a citation it refuses to support is a weaker detection than one
+            # it backs. Both are reported so neither can be quietly assumed.
+            "positive": {"assessed": 0, "detected": 0, "missed": 0,
+                         "detected_verified": 0},
+            # negative_abstain: declined to conclude. NOT a clean negative
+            # (nothing was earned) and NOT a false positive (nothing was
+            # claimed) — it is its own outcome and must not hide in either.
+            "negative": {"assessed": 0, "clean": 0, "false_positive": 0,
+                         "negative_abstain": 0},
+            # guard_downgraded: the runtime refused the model's clean verdict.
+            # Counted apart from honest abstention, which is the MODEL's own.
             "abstain": {"assessed": 0, "honest_insufficient": 0,
-                        "no_issue_observed": 0, "overclaim": 0},
+                        "no_issue_observed": 0, "overclaim": 0,
+                        "guard_downgraded": 0},
             "retrieval_not_assessed": 0,
             "errors": {code: 0 for code in ERROR_CODES},
+            "guard_downgraded": 0,
             "unrelated_candidates": 0})
         state = r["state"]
         if state == "no_unit":
@@ -460,10 +527,21 @@ def classify(plan: dict[str, Any],
         # legal-state allowlist), so outcome/issues are safe to read
         issues = r.get("issues", [])
         same_cat = [i for i in issues if i["category"] == pc["category"]]
+        # W3-E7: the model's OWN word, separated from the runtime guard's
+        # intervention. Absent on older records -> falls back to the effective
+        # outcome, which is correct for any engine/run without a guard.
+        guarded = bool(r.get("guard_downgraded"))
+        model_outcome = r.get("model_outcome", r.get("outcome"))
+        if guarded:
+            qd["guard_downgraded"] += 1
+        supported = [i for i in same_cat
+                     if i.get("verification") == "supported"]
         if pc["kind"] == "positive":
             qd["positive"]["assessed"] += 1
             if _cites_target(same_cat, pc["target"]):
                 qd["positive"]["detected"] += 1
+                if _cites_target(supported, pc["target"]):
+                    qd["positive"]["detected_verified"] += 1
             else:
                 qd["positive"]["missed"] += 1
                 # a same-category hit NOT on the target is unrelated, not a
@@ -472,12 +550,26 @@ def classify(plan: dict[str, Any],
                     qd["unrelated_candidates"] += 1
         elif pc["kind"] == "negative":
             qd["negative"]["assessed"] += 1
-            qd["negative"]["false_positive" if issues else "clean"] += 1
+            if issues:
+                qd["negative"]["false_positive"] += 1
+            elif r.get("outcome") == "insufficient_context":
+                # a negative is `clean` only when the engine actually CONCLUDED
+                # there was nothing there. Declining to conclude is not a clean
+                # negative, whether the model abstained or the guard refused it.
+                qd["negative"]["negative_abstain"] += 1
+            else:
+                qd["negative"]["clean"] += 1
         else:  # abstain — the model DID run (state completed)
             qd["abstain"]["assessed"] += 1
             if issues:
                 qd["abstain"]["overclaim"] += 1
-            elif r["outcome"] == "insufficient_context":
+            elif guarded:
+                # the guard produced this abstention, not the model. Tested
+                # BEFORE the honest test on purpose: otherwise the mutated
+                # outcome wins and the runtime's intervention is credited to
+                # the model as honest abstention.
+                qd["abstain"]["guard_downgraded"] += 1
+            elif model_outcome == "insufficient_context":
                 qd["abstain"]["honest_insufficient"] += 1
             else:                                     # no_issue_observed
                 qd["abstain"]["no_issue_observed"] += 1
@@ -491,8 +583,18 @@ def classify(plan: dict[str, Any],
         # unassessed -> insufficient_evidence, unless a real quality fault also
         # occurred.
         hardening_error = any(qd["errors"][c] for c in _HARDENING_ERRORS)
-        all_assessed = (pos["assessed"] and neg["assessed"]
-                        and ab["assessed"])
+        # A query is only fully assessed when EVERY case of every kind reached
+        # a decision — not merely one of them. Counting per kind rather than
+        # per case let a query holding two negatives pass on the strength of
+        # the one that concluded while the other sat undecided; the corpus has
+        # two such queries, and one of them did exactly that.
+        neg_decided = neg["clean"] + neg["false_positive"]
+        ab_decided = (ab["honest_insufficient"] + ab["no_issue_observed"]
+                      + ab["overclaim"])
+        all_assessed = (pos["assessed"]
+                        and neg_decided == neg["assessed"]
+                        and ab_decided == ab["assessed"]
+                        and (neg["assessed"] or ab["assessed"]))
         quality_fault = (hardening_error or pos["missed"]
                          or neg["false_positive"] or ab["overclaim"])
         if all_assessed and not quality_fault:
@@ -507,8 +609,11 @@ def classify(plan: dict[str, Any],
 def anonymized_summary(classification: dict[str, Any]) -> dict[str, Any]:
     verdicts: dict[str, int] = {}
     totals: dict[str, Any] = {
-        "detected": 0, "missed": 0, "false_positive": 0, "clean": 0,
-        "honest_insufficient": 0, "abstain_no_issue": 0, "overclaim": 0,
+        "detected": 0, "detected_verified": 0,
+        "missed": 0, "false_positive": 0, "clean": 0,
+        "negative_abstain": 0, "honest_insufficient": 0,
+        "abstain_no_issue": 0, "overclaim": 0,
+        "abstain_guard_downgraded": 0, "guard_downgraded": 0,
         "unrelated_candidates": 0, "retrieval_not_assessed": 0,
         "errors": {code: 0 for code in ERROR_CODES}}
     for qd in classification["per_query"].values():
@@ -516,7 +621,11 @@ def anonymized_summary(classification: dict[str, Any]) -> dict[str, Any]:
         totals["detected"] += qd["positive"]["detected"]
         totals["missed"] += qd["positive"]["missed"]
         totals["false_positive"] += qd["negative"]["false_positive"]
+        totals["detected_verified"] += qd["positive"]["detected_verified"]
         totals["clean"] += qd["negative"]["clean"]
+        totals["negative_abstain"] += qd["negative"]["negative_abstain"]
+        totals["abstain_guard_downgraded"] += qd["abstain"]["guard_downgraded"]
+        totals["guard_downgraded"] += qd["guard_downgraded"]
         totals["honest_insufficient"] += qd["abstain"]["honest_insufficient"]
         totals["abstain_no_issue"] += qd["abstain"]["no_issue_observed"]
         totals["overclaim"] += qd["abstain"]["overclaim"]
@@ -526,6 +635,99 @@ def anonymized_summary(classification: dict[str, Any]) -> dict[str, Any]:
             totals["errors"][code] += qd["errors"][code]
     return {"verdicts": verdicts, "totals": totals,
             "queries": len(classification["per_query"])}
+
+
+# ---- observations + earned evidence --------------------------------------------------
+#
+# These sit BESIDE the scoring counters and are never folded into them. They
+# live here, not in the runner, so the live run and a replay of a stored run
+# compute the acceptance rule from ONE definition and cannot drift apart.
+
+
+def observations(results: list[dict[str, Any]],
+                 plan: dict[str, Any]) -> dict[str, Any]:
+    """The non-scoring axes: what each engine actually did."""
+    by_id = {c["case_id"]: c for c in plan["cases"]}
+    rows = []
+    for r in results:
+        pc = by_id.get(r["case_id"], {})
+        target = pc.get("target")
+        planned = pc.get("sent_spans") or {}
+        rows.append({
+            "case_id": r["case_id"],
+            "kind": r["expected"],
+            "state": r["state"],
+            "outcome": r.get("outcome"),
+            # could the FIXED-WINDOW pack contain the target at all? where this
+            # is false a window `missed` is a retrieval limit, not a model miss
+            "target_in_planned_pack": (
+                None if target is None else target[0] in planned),
+            "files_sent": r.get("files_sent"),
+            "bytes_after": r.get("bytes_after"),
+            "latency_ms": r.get("latency_ms"),
+            "tool_calls": r.get("tool_calls"),
+            "repeated_calls": r.get("repeated_calls"),
+            "stop_reason": r.get("stop_reason"),
+            "cross_project_reached": r.get("cross_project_reached"),
+            # W3-E7: the model's own word vs what the user was shown. The agent
+            # runtime downgrades an unclosed `no_issue_observed`; without these
+            # the guard's intervention is invisible here.
+            "model_outcome": r.get("model_outcome", r.get("outcome")),
+            "guard_downgraded": r.get("guard_downgraded", ""),
+            "target": target,
+            "cited_files": sorted({e["file"] for i in r.get("issues", [])
+                                   for e in i["evidence"]}),
+            "issues": r.get("issues", []),
+        })
+    return {"rows": rows}
+
+
+def earned_evidence(rows: list[dict[str, Any]], *,
+                    cross_project: bool) -> dict[str, Any]:
+    """Did the engine EARN its answer, or was it right for the wrong reason?
+
+    A cross-project case is decided by a file in a sibling project, so its
+    acceptance criterion carries a reading requirement the scoring classifier
+    cannot see: the classifier records the negative as `clean` whether or not
+    the protection was ever opened. W3-E7 states the rule per kind:
+
+      positive  — an issue citing the target AND the sibling actually read;
+      negative  — the MODEL concluded `no_issue_observed` (not abstained, not
+                  produced by the guard) AND the protection actually read;
+      abstain   — the MODEL said `insufficient_context`; a guard-produced
+                  abstention is the runtime's judgment, not the model's.
+
+    `cross_project=False` cases have no sibling to reach, so the reading
+    requirement does not apply to them and `meets_acceptance` is None — the
+    honest value for a criterion that is not defined, and never a False that
+    would read as a failure. Their detection is the classifier's job.
+    """
+    out = []
+    for r in rows:
+        reached = r.get("cross_project_reached") or []
+        guarded = bool(r.get("guard_downgraded"))
+        model_outcome = r.get("model_outcome", r.get("outcome"))
+        cites = _cites_target(r.get("issues", []), r.get("target"))
+        meets: bool | None
+        if not cross_project:
+            meets = None
+        elif r["kind"] == EXPECT_POSITIVE:
+            meets = bool(cites and reached)
+        elif r["kind"] == EXPECT_NEGATIVE:
+            meets = bool(model_outcome == "no_issue_observed"
+                         and not guarded and reached)
+        else:
+            meets = bool(model_outcome == "insufficient_context"
+                         and not guarded)
+        out.append({"case_id": r["case_id"], "kind": r["kind"],
+                    "outcome": r.get("outcome"),
+                    "model_outcome": model_outcome,
+                    "guard_downgraded": r.get("guard_downgraded", ""),
+                    "cites_target": cites,
+                    "sibling_reached": bool(reached),
+                    "evidence_earned": bool(reached),
+                    "meets_acceptance": meets})
+    return {"rows": out}
 
 
 # ---- confined local output -----------------------------------------------------------

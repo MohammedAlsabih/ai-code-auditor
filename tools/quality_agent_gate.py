@@ -46,6 +46,8 @@ from auditor.ai.quality_harness import (  # noqa: E402
     anonymized_summary,
     build_plan,
     classify,
+    earned_evidence,
+    observations,
     run_pair,
 )
 from auditor.ai.transport import RequestsTransport  # noqa: E402
@@ -118,52 +120,6 @@ def _observed_ctx(base: str) -> Any:
 
 def _split_by_engine(pairs: list[dict[str, Any]], engine: str) -> list[dict]:
     return [p[engine] for p in pairs if engine in p]
-
-
-def _observations(results: list[dict[str, Any]],
-                  plan: dict[str, Any]) -> dict[str, Any]:
-    """The non-scoring axes from plan section 4 — reported BESIDE the scoring
-    counters, never folded into them."""
-    by_id = {c["case_id"]: c for c in plan["cases"]}
-    rows = []
-    for r in results:
-        pc = by_id.get(r["case_id"], {})
-        target = pc.get("target")
-        planned = pc.get("sent_spans") or {}
-        rows.append({
-            "case_id": r["case_id"],
-            "kind": r["expected"],
-            "state": r["state"],
-            "outcome": r.get("outcome"),
-            # could the FIXED-WINDOW pack contain the target at all? where this
-            # is false a window `missed` is a retrieval limit, not a model miss
-            "target_in_planned_pack": (
-                None if target is None else target[0] in planned),
-            "files_sent": r.get("files_sent"),
-            "bytes_after": r.get("bytes_after"),
-            "latency_ms": r.get("latency_ms"),
-            "tool_calls": r.get("tool_calls"),
-            "repeated_calls": r.get("repeated_calls"),
-            "stop_reason": r.get("stop_reason"),
-            "cross_project_reached": r.get("cross_project_reached"),
-            "cited_files": sorted({e["file"] for i in r.get("issues", [])
-                                   for e in i["evidence"]}),
-        })
-    return {"rows": rows}
-
-
-def _earned(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """A cross-project negative that answers correctly WITHOUT reading the
-    sibling is right for the wrong reason. The scoring classifier records it as
-    `clean`; this records whether the evidence was actually earned."""
-    out = []
-    for r in rows:
-        reached = r.get("cross_project_reached") or []
-        out.append({"case_id": r["case_id"], "kind": r["kind"],
-                    "outcome": r.get("outcome"),
-                    "sibling_reached": bool(reached),
-                    "evidence_earned": bool(reached)})
-    return {"rows": out}
 
 
 def main() -> int:
@@ -239,13 +195,20 @@ def main() -> int:
                 cl = classify(plan, res, corpus)
                 entry["classification"] = cl
                 entry["summary"] = anonymized_summary(cl)
+                # INSIDE the guard on purpose: an acceptance row asserts an
+                # engine earned its answer, and nothing may assert that until
+                # verify_one_to_one has checked identity, prompt version and
+                # every citation. A partial run gets observations only.
+                obs = observations(res, plan)
+                entry["observations"] = obs
+                entry["evidence_earned"] = earned_evidence(
+                    obs["rows"], cross_project=split == SPLIT_CROSS_PROJECT)
             else:
                 entry["classification_skipped"] = (
                     "partial run: the one-to-one contract requires every "
-                    "planned case, so no verdict is computed")
-            obs = _observations(res, plan)
-            entry["observations"] = obs
-            entry["evidence_earned"] = _earned(obs["rows"])
+                    "planned case, so no verdict and no acceptance row is "
+                    "computed")
+                entry["observations"] = observations(res, plan)
             g["engines"][engine] = entry
         g["wire_sample"] = wire[:3]
         report["groups"][gname] = g

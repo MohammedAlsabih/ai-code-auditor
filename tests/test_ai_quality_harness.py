@@ -22,8 +22,8 @@ from auditor.ai.quality_corpus import (
     EXPECT_NEGATIVE, SPLIT_DEVELOPMENT, SPLIT_HOLDOUT, CorpusCase, CorpusFile,
     cases, corpus_digest, holdout_cases)
 from auditor.ai.quality_harness import (
-    HarnessError, anonymized_summary, build_plan, classify, run_case,
-    run_corpus, verify_one_to_one)
+    ENGINE_AGENT, HarnessError, anonymized_summary, build_plan, classify,
+    run_case, run_corpus, verify_one_to_one)
 
 LOCAL = {"OLLAMA_HOST": "http://127.0.0.1:11434"}
 CORPUS = cases()
@@ -485,7 +485,8 @@ def test_the_agent_engine_is_verified_against_what_it_actually_sent():
     good = {"state": "completed", "provider": "ollama", "model": "m",
             "prompt_version": _agent_prompt_version(), "query_version": 3,
             "unit_id": "u" * 64, "context_digest": "d" * 64,
-            "engine": ENGINE_AGENT,
+            "engine": ENGINE_AGENT, "outcome": "issues_found",
+            "guard_downgraded": "",
             "observed_sent_spans": {"a/b.cs": [[1, 9]]},
             "issues": [{"evidence": [{"file": "a/b.cs", "line_start": 2,
                                       "line_end": 4}]}]}
@@ -507,3 +508,326 @@ def test_the_agent_engine_is_verified_against_what_it_actually_sent():
 def _agent_prompt_version() -> str:
     from auditor.ai.audit_agent import AUDIT_AGENT_PROMPT_VERSION
     return AUDIT_AGENT_PROMPT_VERSION
+
+
+# ---- W3-E7 measurement fix: the guard is not the model -------------------------------
+#
+# The agent runtime DOWNGRADES a `no_issue_observed` verdict to
+# `insufficient_context` when relevant references were left unread. Recording
+# only the final word made the runtime's intervention indistinguishable from
+# the model's own honest abstention, and the first W3-E7 measurement run was
+# voided for exactly that. These regressions pin the separation.
+
+
+def _agent_result(pc, *, outcome, guarded="", issues=()):
+    """One synthetic agent result for a planned case. `guarded` is the guard's
+    reason; when set, the model's original word was `no_issue_observed` and the
+    effective one is what the user saw."""
+    return {"case_id": pc["case_id"], "query_id": pc["query_id"],
+            "category": pc["category"], "expected": pc["kind"],
+            "state": "completed", "engine": ENGINE_AGENT,
+            "unit_id": "u" * 64, "context_digest": "d" * 64,
+            "provider": "ollama", "model": "m",
+            "prompt_version": _agent_prompt_version(), "query_version": 3,
+            "outcome": outcome,
+            "model_outcome": "no_issue_observed" if guarded else outcome,
+            "effective_outcome": outcome,
+            "guard_downgraded": guarded,
+            "issues": list(issues), "observed_sent_spans": {}}
+
+
+def _all_guarded(plan):
+    """Every case downgraded by the guard: the model said `no_issue_observed`,
+    the runtime showed `insufficient_context`."""
+    return [_agent_result(pc, outcome="insufficient_context",
+                          guarded="evidence_not_closed")
+            for pc in plan["cases"] if pc["unit_id"]] + [
+        {"case_id": pc["case_id"], "query_id": pc["query_id"],
+         "category": pc["category"], "expected": pc["kind"],
+         "state": "no_unit", "unit_id": "", "context_digest": "",
+         "engine": ENGINE_AGENT}
+        for pc in plan["cases"] if not pc["unit_id"]]
+
+
+def test_a_guard_downgrade_is_never_counted_as_honest_abstention():
+    """The rule the voided run broke: honest abstention is read from
+    model_outcome, so a guard-produced `insufficient_context` lands in its own
+    counter and NEVER in honest_insufficient."""
+    plan = build_plan(CORPUS)
+    cls = classify(plan, _all_guarded(plan), CORPUS)
+    tot = anonymized_summary(cls)["totals"]
+    assert tot["abstain_guard_downgraded"] >= 1
+    assert tot["honest_insufficient"] == 0
+    assert tot["guard_downgraded"] >= tot["abstain_guard_downgraded"]
+
+
+def test_a_downgraded_negative_is_negative_abstain_not_clean():
+    """A negative is `clean` only when the engine CONCLUDED there was nothing
+    there. Declining to conclude earns nothing and must not read as success."""
+    plan = build_plan(CORPUS)
+    cls = classify(plan, _all_guarded(plan), CORPUS)
+    tot = anonymized_summary(cls)["totals"]
+    assert tot["negative_abstain"] >= 1
+    assert tot["clean"] == 0
+    assert tot["false_positive"] == 0            # nothing was claimed either
+
+
+def test_a_model_abstained_negative_is_also_not_clean():
+    """Same rule with NO guard involved: the discriminator is the outcome, not
+    who produced it."""
+    plan = build_plan(CORPUS)
+    results = [_agent_result(pc, outcome="insufficient_context")
+               for pc in plan["cases"] if pc["unit_id"]]
+    results += [r for r in _all_guarded(plan) if r["state"] == "no_unit"]
+    cls = classify(plan, results, CORPUS)
+    tot = anonymized_summary(cls)["totals"]
+    assert tot["clean"] == 0 and tot["negative_abstain"] >= 1
+    assert tot["guard_downgraded"] == 0          # the model's own word
+    assert tot["honest_insufficient"] >= 1       # and here it IS honest
+
+
+def test_a_positive_stays_missed_whether_or_not_the_guard_intervened():
+    """No supported issue means missed. The guard neither rescues a positive
+    nor excuses it."""
+    plan = build_plan(CORPUS)
+    guarded = classify(plan, _all_guarded(plan), CORPUS)
+    plain = [_agent_result(pc, outcome="no_issue_observed")
+             for pc in plan["cases"] if pc["unit_id"]]
+    plain += [r for r in _all_guarded(plan) if r["state"] == "no_unit"]
+    unguarded = classify(plan, plain, CORPUS)
+    for cls in (guarded, unguarded):
+        tot = anonymized_summary(cls)["totals"]
+        assert tot["detected"] == 0 and tot["missed"] >= 1
+
+
+def test_a_guard_rescued_query_is_not_a_pass():
+    """An undecided negative or abstain leaves the question open, so the query
+    may not launder into a pass on the strength of its positives."""
+    plan = build_plan(CORPUS)
+    cls = classify(plan, _all_guarded(plan), CORPUS)
+    for qd in cls["per_query"].values():
+        assert qd["verdict"] != "pass"
+
+
+def test_the_window_engine_asserts_it_has_no_guard():
+    """The fixed window has no verdict guard; its records say so explicitly
+    rather than leaving the reader to infer it from an absent field."""
+    _, results = _run("clean")
+    ran = [r for r in results if r["state"] == "completed"]
+    assert ran
+    for r in ran:
+        assert r["guard_downgraded"] == ""
+        assert r["model_outcome"] == r["outcome"] == r["effective_outcome"]
+
+
+def test_a_guard_intervention_reaches_the_measurement_record():
+    """End-to-end, through the REAL runtime and the REAL `run_pair`: when the
+    agent answers clean with a relevant reference unread, the runtime downgrades
+    the verdict — and the recorded result must keep BOTH words apart.
+
+    This is the exact link that was broken. It is asserted end-to-end rather
+    than on a hand-built dict, because a hand-built dict cannot fail the way the
+    voided run did: the defect was that the runtime's fact never arrived."""
+    from auditor.ai.quality_corpus import (
+        EXPECT_NEGATIVE, CorpusCase, CorpusFile)
+    from auditor.ai.quality_harness import ENGINE_AGENT, run_pair
+
+    endpoints = ('public class InvoiceEndpoints {\n'
+                 '  public void Register(WebApplication app) {\n'
+                 '    app.MapDelete("/invoices/{id}", Drop);\n'
+                 '  }\n'
+                 '  void Drop(HttpContext http, int id) {\n'
+                 '    if (!AccessPolicy.MayDelete(http)) { return; }\n'
+                 '    Ledger.Erase(id);\n'
+                 '  }\n'
+                 '}\n')
+    policy = ('public static class AccessPolicy {\n'
+              '  public static bool MayDelete(HttpContext http) {\n'
+              '    var scope = http.User.FindFirst("scope")?.Value;\n'
+              '    if (scope != "invoices:delete") { return false; }\n'
+              '    return true;\n'
+              '  }\n'
+              '}\n')
+    case = CorpusCase(
+        "guard-e2e", "AI001", EXPECT_NEGATIVE, "billing",
+        (CorpusFile("billing/InvoiceEndpoints.cs", endpoints, "csharp"),
+         CorpusFile("platform/AccessPolicy.cs", policy, "csharp")),
+        "the protection lives in a sibling project and is never opened")
+
+    class Dual:
+        """One transport for both engines: the agent leg carries `tools` on the
+        wire, the fixed window does not. The agent reads the endpoint — which
+        is what surfaces `AccessPolicy` as a reference — and then answers clean
+        without ever opening it."""
+
+        def __init__(self):
+            self.turns = 0
+
+        def request(self, method, url, headers, json_body, timeout):
+            if json_body.get("tools"):
+                self.turns += 1
+                call = ({"name": "read_lines",
+                         "arguments": {"file": "billing/InvoiceEndpoints.cs",
+                                       "start_line": 1, "end_line": 9}}
+                        if self.turns == 1 else
+                        {"name": "final_result",
+                         "arguments": {"outcome": "no_issue_observed",
+                                       "issues": []}})
+                return HttpResponse(200, json.dumps({
+                    "model": "m", "done_reason": "stop",
+                    "message": {"role": "assistant", "content": "",
+                                "tool_calls": [{"function": call}]},
+                    "prompt_eval_count": 1, "eval_count": 1}).encode())
+            return HttpResponse(200, json.dumps({"message": {
+                "role": "assistant",
+                "content": json.dumps({"outcome": "no_issue_observed",
+                                       "issues": []})}}).encode())
+
+    # the agent engine is experimental opt-in; the measurement declares it
+    # exactly as the runner does
+    out = run_pair(case, Provider.OLLAMA, "m", Dual,
+                   env={**LOCAL, "AUDITOR_AI_AGENT_AUDIT": "confirm"})
+    agent = out[ENGINE_AGENT]
+    assert agent["state"] == "completed"
+    # what the model said, what the user saw, and who changed it — all three
+    assert agent["model_outcome"] == "no_issue_observed"
+    assert agent["effective_outcome"] == "insufficient_context"
+    assert agent["outcome"] == agent["effective_outcome"]
+    assert agent["guard_downgraded"] == "evidence_not_closed"
+
+    # and the counting rules read it correctly: not honest, not clean
+    plan = build_plan((case,))
+    cls = classify(plan, [agent], (case,))
+    qd = cls["per_query"]["AI001"]
+    assert qd["guard_downgraded"] == 1
+    assert qd["negative"]["negative_abstain"] == 1
+    assert qd["negative"]["clean"] == 0
+    assert qd["abstain"]["honest_insufficient"] == 0
+
+
+def _decided(plan, *, guard_case_ids=()):
+    """Every case DECIDED and correct — positives cite their target, negatives
+    conclude clean, abstains abstain honestly — except the named cases, which
+    the guard downgraded. The discriminating shape for the pass rule: without
+    the guard cases this is a clean sweep, so nothing but the undecided case
+    can be what withholds the pass."""
+    out = []
+    for pc in plan["cases"]:
+        if not pc["unit_id"]:
+            out.append({"case_id": pc["case_id"], "query_id": pc["query_id"],
+                        "category": pc["category"], "expected": pc["kind"],
+                        "state": "no_unit", "unit_id": "", "context_digest": "",
+                        "engine": ENGINE_AGENT})
+            continue
+        if pc["case_id"] in guard_case_ids:
+            out.append(_agent_result(pc, outcome="insufficient_context",
+                                     guarded="evidence_not_closed"))
+        elif pc["kind"] == "positive":
+            f, ls, le = pc["target"]
+            hit = _agent_result(pc, outcome="issues_found", issues=[{
+                "title": "t", "category": pc["category"], "confidence": "high",
+                "summary": "s", "missing_context": [],
+                "suggested_action": "inspect",
+                "evidence": [{"context_id": "src:1", "file": f,
+                              "line_start": ls, "line_end": le,
+                              "statement": "e"}]}])
+            # the citation must lie inside what this record says it sent —
+            # the verifier is fail-closed and would refuse it otherwise
+            hit["observed_sent_spans"] = {f: [[ls, le]]}
+            out.append(hit)
+        elif pc["kind"] == "negative":
+            out.append(_agent_result(pc, outcome="no_issue_observed"))
+        else:
+            out.append(_agent_result(pc, outcome="insufficient_context"))
+    return out
+
+
+def test_one_undecided_case_withholds_the_pass_from_its_whole_query():
+    """The pass rule must count DECIDED CASES, not merely one decision per
+    kind. A query holding two negatives must not pass on the strength of the
+    one that concluded while the other sits undecided.
+
+    Asserted as a difference: the same corpus, scored twice, differing only in
+    whether ONE case was downgraded. Anything weaker passes even when the rule
+    is reverted — which is exactly how the first version of this test failed to
+    catch it."""
+    plan = build_plan(CORPUS)
+    swept = classify(plan, _decided(plan), CORPUS)
+    passes = {q for q, qd in swept["per_query"].items()
+              if qd["verdict"] == "pass"}
+    assert passes, "the all-correct sweep must produce passing queries"
+
+    # pick a query that passed and holds MORE THAN ONE negative, so a per-kind
+    # rule would still see a decided negative and wave it through
+    victim = next(
+        (pc for pc in plan["cases"]
+         if pc["query_id"] in passes and pc["kind"] == "negative"
+         and sum(1 for c in plan["cases"]
+                 if c["query_id"] == pc["query_id"]
+                 and c["kind"] == "negative") > 1), None)
+    assert victim is not None, "corpus has no multi-negative query to test"
+
+    guarded = classify(plan, _decided(plan, guard_case_ids={victim["case_id"]}),
+                       CORPUS)
+    qd = guarded["per_query"][victim["query_id"]]
+    assert qd["negative"]["assessed"] > 1                 # the sibling exists
+    assert qd["negative"]["clean"] >= 1                   # and it concluded
+    assert qd["negative"]["negative_abstain"] == 1        # this one did not
+    assert qd["verdict"] != "pass", (
+        "a query passed while one of its negatives was left undecided")
+
+
+def test_a_truncated_result_fails_loudly_instead_of_scoring_as_clean():
+    """A completed record with no outcome — truncated, hand-edited, or written
+    by an older harness — must be REFUSED, not read as `no_issue_observed`.
+    Defaulting here would score an absent verdict as a decided one and let it
+    feed a pass."""
+    plan = build_plan(CORPUS)
+    for missing in ("outcome", "guard_downgraded"):
+        results = _decided(plan)
+        for r in results:
+            r.pop(missing, None)
+        with pytest.raises(HarnessError):
+            classify(plan, results, CORPUS)
+
+
+def test_replaying_a_pre_guard_run_requires_naming_its_version():
+    """A stored run from before the guard existed may lack the guard fact —
+    but only when its version is named explicitly. Absence of the fact must
+    never be silently read as `the guard did not fire`."""
+    plan = build_plan(CORPUS)
+    old = [dict(r) for r in _decided(plan)]
+    for r in old:
+        r.pop("guard_downgraded", None)
+        if r["state"] == "completed":
+            r["prompt_version"] = "w3e5-agent-v2"
+
+    with pytest.raises(HarnessError):
+        classify(plan, old, CORPUS)              # unnamed -> refused
+    classify(plan, old, CORPUS, "w3e5-agent-v2")  # named -> replayed
+
+
+def test_a_detection_the_verifier_refuses_is_recorded_as_weaker():
+    """`detected` is the pre-registered rule — an issue cites the target span.
+    The project also runs a deterministic verifier over every issue, and a
+    citation it refuses to support is not the same evidence as one it backs.
+    Both counts are recorded, so a headline recall number can never quietly
+    include claims the project's own verifier rejected."""
+    plan = build_plan(CORPUS)
+
+    def _with(verdict):
+        out = []
+        for r in _decided(plan):
+            for i in r.get("issues", []):
+                i["verification"] = verdict
+            out.append(r)
+        return out
+
+    backed = anonymized_summary(classify(plan, _with("supported"),
+                                         CORPUS))["totals"]
+    refused = anonymized_summary(classify(plan, _with("unsupported"),
+                                          CORPUS))["totals"]
+
+    assert backed["detected"] == refused["detected"] > 0   # same citations
+    assert backed["detected_verified"] == backed["detected"]
+    assert refused["detected_verified"] == 0               # none of them held
