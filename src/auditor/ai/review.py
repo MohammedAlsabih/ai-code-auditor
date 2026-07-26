@@ -297,7 +297,7 @@ def _repo_relative(project_root: str, file: str) -> str:
 def _confined_read(repo_root: Path, rel: str, cap: int) -> str | None:
     """Bounded, confined, symlink-safe read of one repo file. None on any
     doubt — a missing context piece is honest; a wrong one is not."""
-    from auditor.web.app import bad_source_path, resolve_confined
+    from auditor.report.load import bad_source_path, resolve_confined
     if bad_source_path(rel) is not None:
         return None
     resolved = resolve_confined(repo_root, rel)
@@ -538,7 +538,7 @@ _MANIFESTS_BY_LANGUAGE = {
 
 def _manifest_candidates(repo_root: Path, project_root: str,
                          language: str) -> list[str]:
-    from auditor.web.app import bad_source_path, resolve_confined
+    from auditor.report.load import bad_source_path, resolve_confined
     names: list[str] = []
     if language in ("dotnet", "csharp"):
         # confined, NON-recursive listing of the project directory

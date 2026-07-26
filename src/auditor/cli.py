@@ -327,7 +327,7 @@ def _ai_review(args) -> int:
     )
     from auditor.ai.review_store import AIReviewStore, AIReviewStoreError
     from auditor.ai.transport import RequestsTransport
-    from auditor.web.app import ReportError, load_report
+    from auditor.report.load import ReportError, load_report
 
     try:
         provider = Provider(args.provider)
@@ -429,7 +429,7 @@ def _ai_audit(args) -> int:
         ollama_num_ctx,
     )
     from auditor.ai.transport import RequestsTransport
-    from auditor.web.app import ReportError, load_report
+    from auditor.report.load import ReportError, load_report
 
     try:
         provider = Provider(args.provider)
@@ -577,7 +577,12 @@ def _ai_audit_agent(args, provider, report, report_path, repo, limits,
     from auditor.ai.audit_agent import (
         AgentAuditDisabledError,
         agent_audit_enabled,
+        agent_runtime_installed,
         run_agent_unit,
+    )
+    from auditor.ai.agent_errors import (
+        AGENT_RUNTIME_HINT,
+        AgentRuntimeMissingError,
     )
     from auditor.ai.audit_index import RepositoryAuditIndex
     from auditor.ai.audit_queries import queries_for_profile
@@ -594,7 +599,13 @@ def _ai_audit_agent(args, provider, report, report_path, repo, limits,
               "engine is off; set AUDITOR_AI_AGENT_AUDIT=confirm on the server",
               file=sys.stderr)
         return 3
-    # gate 2: local only. Refuse before any model construction or network I/O.
+    # gate 2: the optional [agent] extra is actually installed. Mirrors the
+    # friendly _WEB_DEPS message for `serve` — an exit code and an install
+    # hint, never a raw ModuleNotFoundError traceback.
+    if not agent_runtime_installed():
+        print(f"error | خطأ: {AGENT_RUNTIME_HINT}", file=sys.stderr)
+        return 2
+    # gate 3: local only. Refuse before any model construction or network I/O.
     if not local:
         print("blocked [agent_local_only]: the agent runtime runs against "
               "local providers only (no remote path)", file=sys.stderr)
@@ -655,6 +666,9 @@ def _ai_audit_agent(args, provider, report, report_path, repo, limits,
             print("blocked [agent_audit_disabled]: engine disabled mid-run",
                   file=sys.stderr)
             return 3
+        except AgentRuntimeMissingError as e:
+            print(f"error | خطأ: {e}", file=sys.stderr)
+            return 2
         except PrivacyGateError as e:
             print(f"blocked [privacy_gate_required]: {e}", file=sys.stderr)
             return 3

@@ -274,7 +274,9 @@ def test_result_is_store_and_candidate_compatible():
                             "end_line": 5}),
             _verdict(_issue("src:1", 3, 3)),
         ]))
-    assert res["prompt_version"] == AUDIT_AGENT_PROMPT_VERSION == "w3e5-agent-v1"
+    # the identity must be the agent's OWN, and never the fixed-window one
+    assert res["prompt_version"] == AUDIT_AGENT_PROMPT_VERSION
+    assert AUDIT_AGENT_PROMPT_VERSION.startswith("w3e5-agent-v")
     cands = candidates_from_result(res)
     with tempfile.TemporaryDirectory() as t:
         st = store_mod.AIAuditStore(Path(t) / "r.ai-audit.json")

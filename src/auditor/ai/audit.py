@@ -28,6 +28,10 @@ from typing import Any, Callable
 from auditor.ai.audit_expand import expand as expand_context
 from auditor.ai.audit_index import RepositoryAuditIndex
 from auditor.ai.audit_queries import AuditQuery
+from auditor.ai.agent_errors import (
+    AgentAuditDisabledError,
+    AgentRuntimeMissingError,
+)
 from auditor.ai.consent import TOKEN_ESTIMATE_BYTES_PER_TOKEN, ConsentError
 from auditor.ai.contract import AIError, Provider, TransportFailure
 from auditor.ai.evidence_verify import fail_closed, verify_result
@@ -905,10 +909,12 @@ class AuditRunner:
                     unit["outcome"] = result["outcome"]
                     unit["issues"] = len(cands)
                 except (AIError, PrivacyGateError, ConsentError,
-                        OllamaNumCtxError) as e:
+                        OllamaNumCtxError, AgentRuntimeMissingError,
+                        AgentAuditDisabledError) as e:
                     # OllamaNumCtxError is raised BEFORE the wire — an invalid
                     # server num_ctx fails the unit with its fixed code and
-                    # never sends a request.
+                    # never sends a request. The agent types (missing extra /
+                    # engine off) are likewise pre-wire and carry their own code.
                     unit["state"] = "failed"
                     unit["error"] = getattr(e, "code", "error")
                 except Exception:                    # noqa: BLE001
