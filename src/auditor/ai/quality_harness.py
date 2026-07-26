@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,7 +24,11 @@ from auditor.ai.quality_corpus import (
     CORPUS_VERSION, CasePlan, CorpusCase, cases, corpus_digest)
 from auditor.ai.review import OllamaNumCtxError
 
-HARNESS_VERSION = 2
+HARNESS_VERSION = 3      # W3-E6: adds the `engine` dimension (window|agent)
+
+ENGINE_WINDOW = "window"
+ENGINE_AGENT = "agent"
+ENGINES = (ENGINE_WINDOW, ENGINE_AGENT)
 _MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 _CONFINED_BASE = ("quality-local", "ai-quality")   # .quality-local/ai-quality
 
@@ -35,17 +40,27 @@ class HarnessError(Exception):
 _LANG_EXT = {"csharp": ".cs", "python": ".py", "typescript": ".ts"}
 
 
-def _pack_for_case(case: CorpusCase):
-    """Build the real audit pack for one case via a throwaway temp repo (all
-    of the case's source + manifest files), so retrieval/expansion/redaction/
-    span/digest are identical to production. Returns None on no candidate."""
+@contextmanager
+def _materialised(case: CorpusCase):
+    """Materialise one case into a throwaway temp repo and yield the REAL
+    RepositoryAuditIndex over it, so retrieval/expansion/redaction/span/digest
+    are identical to production.
+
+    W3-E6: both engines are driven from this ONE index, which is what makes
+    "the same source snapshot" a fact rather than a hope — the index is an
+    in-memory, byte-capped copy, so it cannot drift between the two runs."""
     with tempfile.TemporaryDirectory(prefix="qcorpus-") as tmp:
         base = Path(tmp)
         for cf in case.files:
             p = base / cf.rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(cf.text, encoding="utf-8")
-        index = RepositoryAuditIndex(base, case.project_roots)
+        yield RepositoryAuditIndex(base, case.project_roots)
+
+
+def _pack_for_case(case: CorpusCase):
+    """The fixed-window pack for one case, or None when no candidate."""
+    with _materialised(case) as index:
         query = query_by_id(case.query_id)
         assert query is not None
         return build_audit_pack(index, case.project, query)
@@ -127,6 +142,133 @@ def run_case(case: CorpusCase, provider: Provider, model: str,
     }
 
 
+def _issue_records(issues) -> list[dict[str, Any]]:
+    return [{
+        "title": i["title"], "category": i["category"],
+        "confidence": i["confidence"], "summary": i["summary"],
+        "evidence": [{"context_id": e["context_id"], "file": e["file"],
+                      "line_start": e["line_start"],
+                      "line_end": e["line_end"],
+                      "statement": e["statement"]}
+                     for e in i["evidence"]],
+        "missing_context": i["missing_context"],
+        "suggested_action": i["suggested_action"],
+        "verification": i.get("verification"),
+        "verification_reason": i.get("verification_reason")} for i in issues]
+
+
+def run_pair(case: CorpusCase, provider: Provider, model: str,
+             transport_factory: Callable[[], Any],
+             env: dict[str, str] | None = None) -> dict[str, Any]:
+    """W3-E6: run BOTH engines over the SAME unit and the SAME source snapshot,
+    one run each, and return {"window": result, "agent": result}.
+
+    The two engines are NOT identity-comparable: the fixed window's unit_id and
+    digest come from a pack built BEFORE the model is called, while the agent
+    freezes its pack from what it actually read, so its identity is only known
+    afterwards and legitimately differs between runs. Results are therefore
+    paired on (case_id, query_id) and each carries its OWN observed identity."""
+    from auditor.ai.audit_agent import (
+        AUDIT_AGENT_PROMPT_VERSION, run_agent_unit)
+
+    base = {"case_id": case.case_id, "query_id": case.query_id,
+            "category": case.category, "expected": case.kind}
+    query = query_by_id(case.query_id)
+    assert query is not None
+    out: dict[str, Any] = {}
+
+    with _materialised(case) as index:
+        # ---- engine 1: the shipped fixed window --------------------------
+        pack = build_audit_pack(index, case.project, query)
+        if pack is None:
+            out[ENGINE_WINDOW] = {**base, "engine": ENGINE_WINDOW,
+                                  "state": "no_unit", "unit_id": "",
+                                  "context_digest": ""}
+        else:
+            try:
+                res = run_audit_unit(pack, provider, model,
+                                     transport_factory(), env=env)
+                out[ENGINE_WINDOW] = {
+                    **base, "engine": ENGINE_WINDOW, "state": "completed",
+                    "unit_id": pack["unit_id"],
+                    "context_digest": pack["digest"],
+                    "outcome": res["outcome"],
+                    "issues": _issue_records(res["issues"]),
+                    "provider": res["provider"], "model": res["model"],
+                    "prompt_version": res["prompt_version"],
+                    "query_version": res["query_version"],
+                    "latency_ms": res["latency_ms"],
+                    "num_ctx": res.get("num_ctx"),
+                    "execution_id": res.get("execution_id"),
+                    # observed == planned for this engine, by construction
+                    "observed_sent_spans": {
+                        m["file"]: [list(s) for s in m["spans"]]
+                        for m in pack["piece_map"].values()},
+                    "files_sent": pack["privacy_manifest"]["files_sent"],
+                    "bytes_after": pack["privacy_manifest"]["bytes_after"],
+                }
+            except (AIError, OllamaNumCtxError) as e:
+                out[ENGINE_WINDOW] = {
+                    **base, "engine": ENGINE_WINDOW, "state": e.code,
+                    "unit_id": pack["unit_id"],
+                    "context_digest": pack["digest"]}
+
+        # ---- engine 2: the experimental agent ----------------------------
+        # It builds its own context, so a case with no fixed-window pack can
+        # still be a real agent unit. It is given a unit iff the index offers
+        # a seed anchor, which is the runtime's own precondition.
+        trace: dict[str, Any] = {}
+        if not index.candidates_for(query, case.project):
+            out[ENGINE_AGENT] = {**base, "engine": ENGINE_AGENT,
+                                 "state": "no_unit", "unit_id": "",
+                                 "context_digest": ""}
+        else:
+            try:
+                res = run_agent_unit(index, case.project, query, provider,
+                                     model, env=env, trace=trace,
+                                     transport=transport_factory())
+                out[ENGINE_AGENT] = {
+                    **base, "engine": ENGINE_AGENT, "state": "completed",
+                    # the agent's identity is OBSERVED, never planned
+                    "unit_id": res["audit_unit_id"],
+                    "context_digest": res["context_digest"],
+                    "outcome": res["outcome"],
+                    "issues": _issue_records(res["issues"]),
+                    "provider": res["provider"], "model": res["model"],
+                    "prompt_version": res["prompt_version"],
+                    "query_version": res["query_version"],
+                    "latency_ms": res["latency_ms"],
+                    "num_ctx": res.get("num_ctx"),
+                    "execution_id": res.get("execution_id"),
+                    "observed_sent_spans": {
+                        p["file"]: [list(s) for s in p["spans"]]
+                        for p in trace.get("pieces_sent", [])},
+                    "files_sent": trace.get(
+                        "privacy_manifest", {}).get("files_sent", 0),
+                    "bytes_after": trace.get(
+                        "privacy_manifest", {}).get("bytes_after", 0),
+                    "tool_calls": trace.get("tool_calls"),
+                    "repeated_calls": trace.get("repeated_calls"),
+                    "stop_reason": trace.get("stop_reason", ""),
+                    "cross_project_reached": sorted(
+                        trace.get("cross_project", {})),
+                }
+            except (AIError, OllamaNumCtxError) as e:
+                out[ENGINE_AGENT] = {
+                    **base, "engine": ENGINE_AGENT, "state": e.code,
+                    "unit_id": "", "context_digest": "",
+                    "tool_calls": trace.get("tool_calls"),
+                    "repeated_calls": trace.get("repeated_calls"),
+                    "stop_reason": trace.get("stop_reason", ""),
+                    "cross_project_reached": sorted(
+                        trace.get("cross_project", {})),
+                    "files_sent": trace.get(
+                        "privacy_manifest", {}).get("files_sent", 0),
+                }
+    _ = AUDIT_AGENT_PROMPT_VERSION      # imported for the verifier's contract
+    return out
+
+
 # ---- identity + one-to-one contract --------------------------------------------------
 
 _PLAN_KEYS = {"case_id", "query_id", "category", "kind", "reason", "project",
@@ -148,6 +290,35 @@ _LEGAL_STATES = frozenset({"no_unit", *_RAN_STATES})
 # the model ran but broke its own contract -> a quality fault (needs_hardening);
 # every OTHER ERROR_CODE is an environment fault (insufficient_evidence).
 _HARDENING_ERRORS = ("timeout", "invalid_response")
+
+
+def _verify_agent_result(r: dict[str, Any], tc: dict[str, Any]) -> None:
+    """The agent half of the one-to-one contract. Independent of the runtime:
+    it re-checks, from the recorded result alone, that nothing was cited that
+    the agent did not send."""
+    from auditor.ai.audit_agent import AUDIT_AGENT_PROMPT_VERSION
+    if r["state"] == "no_unit":
+        if r.get("unit_id", "") or r.get("context_digest", ""):
+            raise HarnessError("no_unit result carries a unit identity")
+        return
+    if r["state"] != "completed":
+        return                                   # a legal error code
+    if not {"provider", "model", "prompt_version", "query_version"} <= set(r):
+        raise HarnessError("completed result missing run metadata")
+    if r["prompt_version"] != AUDIT_AGENT_PROMPT_VERSION:
+        raise HarnessError("agent result prompt_version drift")
+    if not r.get("unit_id") or not r.get("context_digest"):
+        raise HarnessError("completed agent result has no observed identity")
+    observed = r.get("observed_sent_spans")
+    if not isinstance(observed, dict):
+        raise HarnessError("agent result has no observed spans")
+    for issue in r.get("issues", []):
+        for ev in issue["evidence"]:
+            spans = observed.get(ev["file"])
+            if spans is None or not _spans_cover(
+                    spans, ev["line_start"], ev["line_end"]):
+                raise HarnessError("a citation is outside the sent spans")
+    _ = tc
 
 
 def verify_one_to_one(plan: dict[str, Any],
@@ -194,6 +365,19 @@ def verify_one_to_one(plan: dict[str, Any],
         if (r["query_id"], r["category"], r["expected"]) != (
                 tc["query_id"], tc["category"], tc["kind"]):
             raise HarnessError("result query/category/expected drift")
+        engine = r.get("engine", ENGINE_WINDOW)
+        if engine not in ENGINES:
+            raise HarnessError("a result has an unknown engine")
+        if engine == ENGINE_AGENT:
+            # The agent's identity is OBSERVED, not planned: it freezes its
+            # pack from what it actually read, so unit_id/digest/spans cannot
+            # be compared to the fixed-window plan and legitimately differ
+            # between runs. Verification stays FAIL-CLOSED on what can be
+            # checked: a completed run must carry its own non-empty identity,
+            # the agent's own prompt version, and every citation must lie
+            # inside the spans it actually sent.
+            _verify_agent_result(r, tc)
+            continue
         unit_built = bool(tc["unit_id"])
         if unit_built:
             # a real unit exists -> the result must have RUN against it, and

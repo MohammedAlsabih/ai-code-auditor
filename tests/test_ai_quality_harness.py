@@ -437,3 +437,73 @@ def test_summary_has_no_evidence_or_filenames(tmp_path):
     assert ".cs" not in blob and ".py" not in blob and ".ts" not in blob
     assert "statement" not in blob and "title" not in blob
     assert set(summary) == {"verdicts", "totals", "queries"}
+
+
+# ---- W3-E6: the cross_project group is additive and cannot move the frozen
+# ---- pre-registered digests -----------------------------------------------
+
+def test_the_preregistered_digests_are_unmoved_by_the_new_group():
+    """The dev/holdout digests are the anchor of every earlier measurement.
+    Registering the W3-E6 cross-project group must not touch them, and
+    `cases(None)` must keep meaning development+holdout."""
+    from auditor.ai.quality_corpus import (
+        SPLIT_CROSS_PROJECT, SPLIT_DEVELOPMENT, SPLIT_HOLDOUT, cases,
+        corpus_digest, cross_project_cases)
+
+    assert corpus_digest(cases(SPLIT_DEVELOPMENT)) == (
+        "104ff8bad0df2183e61612ac8026e29c18d63c820fc769e2cd37c44a0d50d885")
+    assert corpus_digest(cases(SPLIT_HOLDOUT)) == (
+        "6a8e44605d3689f34a7c238de06abcef448be9728f7b7835e8913aa1d29472b0")
+    assert len(cases(None)) == len(cases(SPLIT_DEVELOPMENT)) + len(
+        cases(SPLIT_HOLDOUT))
+    # the new group is its own tuple, not folded into either split
+    xp = cases(SPLIT_CROSS_PROJECT)
+    assert xp == cross_project_cases() and len(xp) == 3
+    assert not set(c.case_id for c in xp) & set(
+        c.case_id for c in cases(None))
+
+
+def test_the_cross_project_group_is_genuinely_cross_project():
+    """Its positive's target must live OUTSIDE the audited project — that is
+    the property the pre-registered corpus does not have anywhere."""
+    from auditor.ai.quality_corpus import (
+        EXPECT_ABSTAIN, EXPECT_NEGATIVE, EXPECT_POSITIVE, cross_project_cases)
+
+    kinds = {c.kind for c in cross_project_cases()}
+    assert kinds == {EXPECT_POSITIVE, EXPECT_NEGATIVE, EXPECT_ABSTAIN}
+    pos = next(c for c in cross_project_cases() if c.kind == EXPECT_POSITIVE)
+    assert pos.target is not None
+    assert not pos.target.file.startswith(pos.project + "/")
+    assert len(pos.project_roots) == 2          # two sibling projects
+
+
+def test_the_agent_engine_is_verified_against_what_it_actually_sent():
+    """An agent citation outside its OBSERVED spans must still be rejected —
+    the verifier stays fail-closed, it just uses the right span source."""
+    from auditor.ai.quality_harness import ENGINE_AGENT, _verify_agent_result
+
+    good = {"state": "completed", "provider": "ollama", "model": "m",
+            "prompt_version": _agent_prompt_version(), "query_version": 3,
+            "unit_id": "u" * 64, "context_digest": "d" * 64,
+            "engine": ENGINE_AGENT,
+            "observed_sent_spans": {"a/b.cs": [[1, 9]]},
+            "issues": [{"evidence": [{"file": "a/b.cs", "line_start": 2,
+                                      "line_end": 4}]}]}
+    _verify_agent_result(good, {})                      # inside -> accepted
+
+    bad = dict(good, issues=[{"evidence": [{"file": "a/b.cs",
+                                            "line_start": 2,
+                                            "line_end": 40}]}])
+    with pytest.raises(HarnessError):
+        _verify_agent_result(bad, {})
+
+    unread = dict(good, issues=[{"evidence": [{"file": "other/x.cs",
+                                               "line_start": 1,
+                                               "line_end": 1}]}])
+    with pytest.raises(HarnessError):
+        _verify_agent_result(unread, {})
+
+
+def _agent_prompt_version() -> str:
+    from auditor.ai.audit_agent import AUDIT_AGENT_PROMPT_VERSION
+    return AUDIT_AGENT_PROMPT_VERSION

@@ -29,6 +29,14 @@ EXPECT_ABSTAIN = "abstain"
 
 SPLIT_DEVELOPMENT = "development"
 SPLIT_HOLDOUT = "holdout"
+# W3-E6: a THIRD group, registered as its own tuple so the two frozen digests
+# cannot move (corpus_digest hashes only the tuple it is given). The committed
+# corpus has no cross-project POSITIVE at all — its one multi-project case is a
+# development negative — so nothing in it measures "the deciding evidence lives
+# in a SIBLING project". This group is the two W3-E5 acceptance cases, which did
+# NOT reach their expected verdict in the last live run, plus the abstain case a
+# group needs before the classifier can reach an all-assessed verdict.
+SPLIT_CROSS_PROJECT = "cross_project"
 
 
 @dataclass(frozen=True)
@@ -652,19 +660,99 @@ _HOLDOUT: tuple[CorpusCase, ...] = (
 )
 
 
+"""W3-E6 cross-project group.
+
+The audited project is always `api`; the deciding code always lives in the
+sibling project `shared`. Each case is human-labelled here, before any model
+ran in this round. Kept OUT of _CASES/_HOLDOUT so the pre-registered digests
+stay byte-identical.
+"""
+_XPROJ_ROUTE_STUB = (
+    'public class AdminRoutes {\n'
+    '  public void Map(WebApplication app) {\n'
+    '    app.MapPost("/admin/purge", Purge);\n'
+    '  }\n'
+    '  void Purge(HttpContext ctx) {\n'
+    '    if (!SharedAuth.IsAdmin(ctx)) { return; }\n'
+    '    Db.WipeAll();\n'
+    '  }\n'
+    '}\n')
+_XPROJ_ROUTE_REAL = (
+    'public class AdminRoutes {\n'
+    '  public void Map(WebApplication app) {\n'
+    '    app.MapPost("/admin/purge", Purge);\n'
+    '  }\n'
+    '  void Purge(HttpContext ctx) {\n'
+    '    SharedAuth.RequireAdmin(ctx);\n'
+    '    Db.WipeAll();\n'
+    '  }\n'
+    '}\n')
+
+_CROSS_PROJECT: tuple[CorpusCase, ...] = (
+    CorpusCase(
+        "AI001-xproj-pos", "AI001", EXPECT_POSITIVE, "api",
+        (_src("api/AdminRoutes.cs", _XPROJ_ROUTE_STUB, "csharp"),
+         _src("shared/SharedAuth.cs",
+              'public static class SharedAuth {\n'
+              '  public static bool IsAdmin(HttpContext ctx) {\n'
+              '    // not implemented yet\n'
+              '    return true;\n'
+              '  }\n'
+              '}\n', "csharp")),
+        "the destructive route calls a guard that lives in another project, "
+        "and that guard is a stub returning true for every caller, so the "
+        "route is effectively unprotected; the defect is only provable from "
+        "the sibling project's file.",
+        target=Target("shared/SharedAuth.cs", 2, 4),
+        split=SPLIT_CROSS_PROJECT),
+    CorpusCase(
+        "AI001-xproj-neg", "AI001", EXPECT_NEGATIVE, "api",
+        (_src("api/AdminRoutes.cs", _XPROJ_ROUTE_REAL, "csharp"),
+         _src("shared/SharedAuth.cs",
+              'public static class SharedAuth {\n'
+              '  public static void RequireAdmin(HttpContext ctx) {\n'
+              '    var role = ctx.User.FindFirst("role")?.Value;\n'
+              '    if (role != "admin") {\n'
+              '      throw new UnauthorizedAccessException("admin required");\n'
+              '    }\n'
+              '  }\n'
+              '}\n', "csharp")),
+        "the route looks unguarded when only its own project is read, but the "
+        "guard it calls lives in the sibling project and genuinely enforces by "
+        "throwing for any non-admin caller.",
+        split=SPLIT_CROSS_PROJECT),
+    CorpusCase(
+        "AI001-xproj-abstain", "AI001", EXPECT_ABSTAIN, "api",
+        (_src("api/AdminRoutes.cs", _XPROJ_ROUTE_REAL, "csharp"),),
+        "the route delegates its check to a symbol whose project is absent "
+        "from the repository, so whether the route is protected cannot be "
+        "decided from anything that was sent.",
+        split=SPLIT_CROSS_PROJECT),
+)
+
+
 def cases(split: str | None = SPLIT_DEVELOPMENT) -> tuple[CorpusCase, ...]:
     """The pre-registered corpus. Default is the DEVELOPMENT split (the set
-    every earlier measurement ran on); pass SPLIT_HOLDOUT for the holdout set
-    or None for both."""
+    every earlier measurement ran on); pass SPLIT_HOLDOUT for the holdout set,
+    SPLIT_CROSS_PROJECT for the W3-E6 group, or None for development+holdout.
+
+    None deliberately still means development+holdout: the frozen `cases(None)`
+    digest is asserted by test and must not move."""
     if split is None:
         return _CASES + _HOLDOUT
     if split == SPLIT_HOLDOUT:
         return _HOLDOUT
+    if split == SPLIT_CROSS_PROJECT:
+        return _CROSS_PROJECT
     return _CASES
 
 
 def holdout_cases() -> tuple[CorpusCase, ...]:
     return _HOLDOUT
+
+
+def cross_project_cases() -> tuple[CorpusCase, ...]:
+    return _CROSS_PROJECT
 
 
 def corpus_digest(corpus: tuple[CorpusCase, ...] | None = None) -> str:
