@@ -86,11 +86,13 @@ from auditor.ai.review import (
 # W3-E5: a distinct execution identity so agent runs never dedupe or stale-
 # collide with fixed-window runs in the store / preview cache. Bump on any
 # change to the agent system prompt, tool schemas, or loop policy.
-AUDIT_AGENT_PROMPT_VERSION = "w3e5-agent-v2"   # v2 (closing round): native
-#                                   Ollama endpoint with real wire limits, and
-#                                   bounded cross-project reference tracing —
-#                                   both change the tool contract and the
-#                                   instructions, so v1 results stay separate.
+AUDIT_AGENT_PROMPT_VERSION = "w3e7-agent-v3"
+# v1: first runtime. v2 (W3-E5 closing): native Ollama endpoint with real wire
+# limits + declaration-gated cross-project tracing. v3 (W3-E7): reads complete
+# the declaration they open, tool results advertise open evidence gaps, and a
+# clean verdict is refused while relevant references are unread. Each bump
+# changes the tool contract and the instructions, so older results stay
+# separate records rather than being compared as if they were the same engine.
 
 # opt-in master switch — SERVER ENV ONLY, never a request/browser/prompt field.
 # (defined in agent_errors so auditor.ai.audit can import it without a cycle)
@@ -139,6 +141,65 @@ _DECL_TEMPLATES = (
     r"\b(?:def|function|func|fn)\s+{sym}\b",
     r"\b{sym}\s*\(",          # method/function declaration or invocation site
 )
+
+
+def _block_end(lines: list[str], start: int, end: int, hard_end: int) -> int:
+    """Extend `end` forward until the structural block the span OPENS is
+    closed, capped at `hard_end`.
+
+    W3-E7 principle: a reference read must contain the whole declaration, not a
+    line window that can stop above the deciding line. A live run reached the
+    right sibling file, read the first two lines of a six-line class, and so
+    never saw the stub body that made the case a defect.
+
+    Language-agnostic and symbol-agnostic: it balances brace/bracket depth for
+    C-like syntax, and for a colon-and-indent declaration (Python) it runs to
+    the end of the indented suite. It never widens beyond the caller's hard cap
+    and it never opens a new file, so every existing bound still holds."""
+    n = len(lines)
+    end = min(end, n)
+    if end >= hard_end:
+        return end
+    depth = 0
+    in_str = ""
+    for i in range(start - 1, end):
+        for ch in lines[i]:
+            if in_str:
+                in_str = "" if ch == in_str else in_str
+            elif ch in "\"'":
+                in_str = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+    if depth > 0:                                    # brace-style: close it
+        i = end
+        while i < hard_end and depth > 0:
+            for ch in lines[i]:
+                if in_str:
+                    in_str = "" if ch == in_str else in_str
+                elif ch in "\"'":
+                    in_str = ch
+                elif ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    depth = max(0, depth - 1)
+            i += 1
+        return i
+    # colon-and-indent style: if the span's last non-blank line opens a suite,
+    # run to the end of that suite
+    last = next((lines[i] for i in range(end - 1, start - 2, -1)
+                 if lines[i].strip()), "")
+    if not last.rstrip().endswith(":"):
+        return end
+    base = len(last) - len(last.lstrip())
+    i = end
+    while i < hard_end:
+        cur = lines[i]
+        if cur.strip() and (len(cur) - len(cur.lstrip())) <= base:
+            break
+        i += 1
+    return i
 
 
 def _declares(text: str, sym: str) -> bool:
@@ -221,6 +282,66 @@ class _AgentContext:
                          "have, ask something different, or answer now."),
                 "calls_left": self.calls_left()}
 
+    def open_references(self, cap: int = 6) -> list[dict[str, str]]:
+        """Relevant references the agent has SEEN but not READ: a symbol that
+        appears in a line already sent AND is DECLARED in an indexed file that
+        is still unread.
+
+        Deliberately narrow — the predicate is the SAME declaration gate the
+        cross-project trace applies, so a framework type named everywhere
+        (declared nowhere in the repository) never appears here. That keeps it
+        a precise "you are missing THIS file" signal rather than noise, which
+        is what lets it also be enforced at verdict time.
+
+        Because the predicate is identical to the one `find_references` uses to
+        admit a sibling file, a match is ALSO recorded as reachable: the agent
+        could obtain exactly this file by tracing exactly this symbol, so
+        naming it grants nothing new — it only saves the wasted turn, and the
+        via-symbol provenance is recorded the same way. Reachability still
+        requires a symbol the agent genuinely read; nothing here opens a file
+        the tracing rule would have refused."""
+        seen = self.read_symbols()
+        if not seen:
+            return []
+        read = set(self.sources) | set(self.manifests)
+        declared_here: set[str] = set()
+        for rel in read:
+            f = self.by_rel.get(rel)
+            if f is not None:
+                declared_here.update(
+                    s for s in seen if _declares(f.text, s))
+        candidates = sorted(seen - declared_here)
+        out: list[dict[str, str]] = []
+        for f in self.index.files:
+            if f.rel in read or len(out) >= cap:
+                continue
+            for sym in candidates:
+                if not _declares(f.text, sym):
+                    continue
+                out.append({"symbol": sym, "file": f.rel})
+                if not self.in_project(f.rel) \
+                        and f.rel not in self.discovered:
+                    # same gate as find_references: a read symbol declared
+                    # there. Record it so the follow-up read is not refused.
+                    self.discovered[f.rel] = sym
+                    self._log("cross_project_reachable", path=f.rel, via=sym)
+                break
+        return out
+
+    def manifest_gap(self) -> list[str]:
+        """Manifests this QUERY structurally needs and the agent has not read.
+        Driven by the query catalog's own flag — no rule, symbol or path
+        knowledge."""
+        if not self.query.needs_manifest:
+            return []
+        return [f.rel for f in self.index.manifests_for(self.project)[:2]
+                if f.rel not in self.manifests]
+
+    def evidence_gaps(self) -> dict[str, Any]:
+        """Everything standing between the agent and a CLOSED body of evidence."""
+        return {"unread_references": self.open_references(),
+                "unread_manifests": self.manifest_gap()}
+
     def exhausted(self) -> dict[str, Any] | None:
         """The refusal served once the tool budget is spent. Graceful by
         design: the model is told to conclude rather than being killed by a
@@ -235,10 +356,21 @@ class _AgentContext:
                            "insufficient_context.")}
 
     def remember(self, key: str, result: dict[str, Any]) -> dict[str, Any]:
-        """Store the answer and stamp the remaining budget on every result, so
-        the model always knows how much exploration it has left."""
+        """Store the answer and stamp the remaining budget AND the open evidence
+        gaps on every result, so the model always knows how much exploration it
+        has left and exactly what is still missing. These are the SAME gaps the
+        verdict gate enforces, so the model is never surprised by it."""
         self.answered[key] = result
-        return {**result, "calls_left": self.calls_left()}
+        out = {**result, "calls_left": self.calls_left()}
+        gaps = self.evidence_gaps()
+        if gaps["unread_references"] or gaps["unread_manifests"]:
+            out["evidence_gaps"] = gaps
+            out["gap_note"] = (
+                "Your evidence is NOT closed: the items above are referenced "
+                "by code you have read but have not been read themselves. "
+                "Read them before concluding. If you cannot, answer "
+                "insufficient_context - do NOT answer no_issue_observed.")
+        return out
 
     # ---- cross-project reachability -------------------------------------------
     def in_project(self, rel: str) -> bool:
@@ -333,8 +465,12 @@ class _AgentContext:
         start = max(1, min(int(start), total))
         end = max(start, min(int(end), total))
         # window cap: never more than a bounded span per call
-        if end - start + 1 > 2 * WINDOW_LINES + 1:
-            end = start + 2 * WINDOW_LINES
+        hard_end = min(total, start + 2 * WINDOW_LINES)
+        if end > hard_end:
+            end = hard_end
+        # W3-E7: finish the declaration the span opens, INSIDE the same cap —
+        # a read that stops above the deciding line is worse than useless.
+        end = min(hard_end, max(end, _block_end(lines, start, end, hard_end)))
         existing = rel in self.sources
         if not existing and self._file_count() >= self.query.max_context_files:
             self._log("read_denied", path=rel, reason="file_cap")
@@ -722,6 +858,11 @@ validator, or callee lives elsewhere, find and read it BEFORE deciding.
 checked for the counter-evidence the contract names.
 3. If the deciding context is NOT among the pieces you read, answer \
 insufficient_context — do NOT guess or assume unread files.
+4. CLOSE THE EVIDENCE before answering. When a tool result reports \
+`evidence_gaps`, code you have already read refers to something you have not \
+read: read it. `no_issue_observed` means "I read what decides this and there \
+is nothing there" — it is NOT available while a listed gap remains. If you \
+cannot close a gap, the honest answer is insufficient_context.
 
 Answer with the required structured result: outcome, and 0-5 issues. Every \
 issue MUST use exactly the query's required_category. Every evidence item MUST \
@@ -769,6 +910,7 @@ def _fill_trace(trace: dict[str, Any] | None, ctx: _AgentContext,
     # range only, never the statement text) so a citation-contract refusal is
     # explainable without echoing content.
     trace["verdict_outcome"] = getattr(verdict, "outcome", None)
+    trace["evidence_gaps"] = ctx.evidence_gaps()
     trace["cited"] = [
         {"context_id": e.context_id, "line_start": e.line_start,
          "line_end": e.line_end, "category": i.category}
@@ -959,6 +1101,16 @@ def run_agent_unit(index: RepositoryAuditIndex, project: str, query: AuditQuery,
                      f"ONE call first — the deciding code is usually the body "
                      f"below the match, not the matched line — then trace the "
                      f"symbols you find in it.")
+    # W3-E7: some queries cannot be decided from source alone. The catalog says
+    # which (needs_manifest) — this is driven by that flag, never by a rule,
+    # symbol or path. Two live positives were honestly answered
+    # insufficient_context purely because the manifest was never fetched.
+    if query.needs_manifest:
+        mans = [f.rel for f in index.manifests_for(project)[:2]]
+        if mans:
+            seed_hint += (
+                "\nThis query cannot be decided from source alone: read "
+                f"{', '.join(mans)} with read_manifest.")
 
     # retries here is the OUTPUT self-correction budget only; the four tools are
     # each pinned at retries=0 via their decorators (that override wins), so a
@@ -1003,10 +1155,29 @@ def run_agent_unit(index: RepositoryAuditIndex, project: str, query: AuditQuery,
         raise AIError("invalid_response") from None
     latency_ms = int((time.perf_counter() - started) * 1000)
 
+    # W3-E7 principle: `no_issue_observed` is not an EARNED verdict while
+    # relevant references remain unread. The gaps are the same ones the tools
+    # advertised on every result, so this can never surprise the model. It is a
+    # fail-closed refusal to accept an unearned clean answer, not a rewrite of
+    # the model's words: the only substitution is to the honest outcome that
+    # says the evidence was not closed.
+    gaps = ctx.evidence_gaps()
+    downgraded = ""
+    if verdict.outcome == "no_issue_observed" and (
+            gaps["unread_references"] or gaps["unread_manifests"]):
+        downgraded = "evidence_not_closed"
+        ctx._log("verdict_downgraded", reason=downgraded,
+                 unread_references=len(gaps["unread_references"]),
+                 unread_manifests=len(gaps["unread_manifests"]))
+        verdict.outcome = "insufficient_context"
+        verdict.issues = []
+
     # FREEZE the pack from what was actually read, then validate the model's
     # verdict with the SAME authority as the fixed-window engine.
     pack = ctx.freeze_pack()
     _fill_trace(trace, ctx, verdict, "", pack)
+    if trace is not None:
+        trace["verdict_downgraded"] = downgraded
     reply = json.dumps({
         "outcome": verdict.outcome,
         "issues": [{

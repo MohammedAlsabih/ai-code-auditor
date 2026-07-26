@@ -15,6 +15,7 @@ import builtins
 import importlib
 import importlib.util
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -253,7 +254,8 @@ def test_audit_agent_module_imports_with_no_fastapi(monkeypatch):
     hide_packages(monkeypatch, "fastapi", "uvicorn", "starlette")
     forget(monkeypatch, "auditor.ai.audit_agent", "auditor.web")
     mod = importlib.import_module("auditor.ai.audit_agent")
-    assert mod.AUDIT_AGENT_PROMPT_VERSION.startswith("w3e5-agent-v")
+    assert re.fullmatch(r"w3e\d+-agent-v\d+",
+                        mod.AUDIT_AGENT_PROMPT_VERSION)
 
 
 def test_no_web_or_agent_module_is_pulled_in_by_the_runtime():

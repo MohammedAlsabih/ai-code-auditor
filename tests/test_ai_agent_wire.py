@@ -251,9 +251,16 @@ def test_a_traced_symbol_reaches_a_sibling_project():
     # the accepted citation lands in the SIBLING project — only possible if the
     # trace, the read, and the pack all crossed the project boundary
     assert res["issues"][0]["evidence"][0]["file"] == "shared/SharedAuth.cs"
-    assert any(e["event"] == "cross_project_reachable"
-               and e["path"] == "shared/SharedAuth.cs"
-               and e["via"] == "RequireAdmin" for e in trace["events"])
+    # W3-E7: the sibling may now be admitted as soon as a symbol the agent has
+    # READ is found DECLARED there — the same predicate find_references applies,
+    # just evaluated eagerly. What matters is that the opener is a genuinely
+    # declared symbol, never a passing mention.
+    opened = [e for e in trace["events"]
+              if e["event"] == "cross_project_reachable"
+              and e["path"] == "shared/SharedAuth.cs"]
+    assert opened, trace["events"]
+    assert trace["cross_project"]["shared/SharedAuth.cs"] in {
+        "SharedAuth", "RequireAdmin"}
     assert {p["file"] for p in trace["pieces_sent"]} == {
         "api/AdminRoutes.cs", "shared/SharedAuth.cs"}
 
@@ -293,27 +300,38 @@ def test_tracing_requires_a_symbol_the_agent_actually_read():
                for e in seen["events"])
 
 
-def test_a_merely_mentioned_framework_type_does_not_open_the_sibling():
-    """REPRODUCED LIVE before the fix: qwen3:14b traced `HttpContext` — a
-    framework type named in both files — and that alone unlocked the sibling
-    project. A symbol must be DECLARED there, not just mentioned, exactly as
-    the fixed-window engine requires a proven route registration."""
-    idx = _index(XPROJ, projects=(("api", "csharp"), ("shared", "csharp")))
+def test_a_sibling_that_declares_nothing_read_is_never_opened():
+    """REPRODUCED LIVE before W3-E5's fix: qwen3:14b traced `HttpContext` — a
+    framework type named in both files — and that alone unlocked the sibling.
+    The invariant is that a sibling opens ONLY on a symbol the agent has read
+    AND that the sibling actually DECLARES. Here a third project shares no
+    declared symbol with anything read, so it must stay closed no matter what
+    the model asks for."""
+    files = dict(XPROJ)
+    files["vendorlib/Telemetry.cs"] = (
+        'public static class Telemetry {\n'
+        '  public static void Emit(string name) { }\n'
+        '}\n')
+    idx = _index(files, projects=(("api", "csharp"), ("shared", "csharp"),
+                                  ("vendorlib", "csharp")))
     seen: dict = {}
     t = ScriptedOllama([
         ("read_lines", {"file": "api/AdminRoutes.cs", "start_line": 1,
-                        "end_line": 9}),               # reads HttpContext
-        ("find_references", {"symbol": "HttpContext"}),  # mentioned, not declared
-        ("read_lines", {"file": "shared/SharedAuth.cs", "start_line": 1,
-                        "end_line": 6}),
+                        "end_line": 9}),
+        ("find_references", {"symbol": "HttpContext"}),   # mentioned, undeclared
+        ("read_lines", {"file": "vendorlib/Telemetry.cs", "start_line": 1,
+                        "end_line": 3}),                  # must be refused
         ("final_result", {"outcome": "insufficient_context", "issues": []}),
     ])
     res = _run(idx, t, trace=seen)
     assert res["outcome"] == "insufficient_context"
-    assert seen["cross_project"] == {}          # nothing was unlocked
-    assert {p["file"] for p in seen["pieces_sent"]} == {"api/AdminRoutes.cs"}
+    assert "vendorlib/Telemetry.cs" not in seen["cross_project"]
+    assert "vendorlib/Telemetry.cs" not in {p["file"]
+                                            for p in seen["pieces_sent"]}
     assert any(e["event"] == "read_denied" and e["reason"] == "not_traced"
                for e in seen["events"])
+    assert all(e.get("via") != "HttpContext" for e in seen["events"]
+               if e["event"] == "cross_project_reachable")
 
 
 def test_a_refusal_still_explains_itself():

@@ -6,6 +6,7 @@ while the fixed-window engine is untouched."""
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -276,7 +277,7 @@ def test_result_is_store_and_candidate_compatible():
         ]))
     # the identity must be the agent's OWN, and never the fixed-window one
     assert res["prompt_version"] == AUDIT_AGENT_PROMPT_VERSION
-    assert AUDIT_AGENT_PROMPT_VERSION.startswith("w3e5-agent-v")
+    assert re.fullmatch(r"w3e\d+-agent-v\d+", AUDIT_AGENT_PROMPT_VERSION)
     cands = candidates_from_result(res)
     with tempfile.TemporaryDirectory() as t:
         st = store_mod.AIAuditStore(Path(t) / "r.ai-audit.json")
