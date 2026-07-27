@@ -831,3 +831,66 @@ def test_a_detection_the_verifier_refuses_is_recorded_as_weaker():
     assert backed["detected"] == refused["detected"] > 0   # same citations
     assert backed["detected_verified"] == backed["detected"]
     assert refused["detected_verified"] == 0               # none of them held
+
+
+# ---- AI-CONTEXT-GATE: the agent-only path and the token instrument -------------------
+
+def test_run_pair_can_run_one_engine_without_reshaping_its_record():
+    """A comparison that varies the context window has no reason to spend GPU
+    time on the fixed window, which does not grow one. Narrowing the engines
+    must leave the surviving record byte-identical to the paired run's — the
+    selection may not become a second, less-verified code path."""
+    from auditor.ai.quality_corpus import EXPECT_NEGATIVE, CorpusCase, CorpusFile
+    from auditor.ai.quality_harness import ENGINE_WINDOW, run_pair
+
+    case = CorpusCase(
+        "engines-sel", "AI001", EXPECT_NEGATIVE, "billing",
+        (CorpusFile("billing/InvoiceEndpoints.cs",
+                    'public class InvoiceEndpoints {\n'
+                    '  void Drop(HttpContext http, int id) {\n'
+                    '    if (!AccessPolicy.MayDelete(http)) { return; }\n'
+                    '  }\n'
+                    '}\n', "csharp"),),
+        "the protection is not in this project at all")
+
+    class Dual:
+        def __init__(self):
+            self.turns = 0
+
+        def request(self, method, url, headers, json_body, timeout):
+            if json_body.get("tools"):
+                self.turns += 1
+                call = ({"name": "read_lines",
+                         "arguments": {"file": "billing/InvoiceEndpoints.cs",
+                                       "start_line": 1, "end_line": 5}}
+                        if self.turns == 1 else
+                        {"name": "final_result",
+                         "arguments": {"outcome": "no_issue_observed",
+                                       "issues": []}})
+                return HttpResponse(200, json.dumps({
+                    "model": "m", "done_reason": "stop",
+                    "message": {"role": "assistant", "content": "",
+                                "tool_calls": [{"function": call}]},
+                    "prompt_eval_count": 11, "eval_count": 3}).encode())
+            return HttpResponse(200, json.dumps({"message": {
+                "role": "assistant",
+                "content": json.dumps({"outcome": "no_issue_observed",
+                                       "issues": []})}}).encode())
+
+    e = {**LOCAL, "AUDITOR_AI_AGENT_AUDIT": "confirm"}
+    both = run_pair(case, Provider.OLLAMA, "m", Dual, env=e)
+    only = run_pair(case, Provider.OLLAMA, "m", Dual, env=e,
+                    engines=(ENGINE_AGENT,))
+
+    assert set(both) == {ENGINE_WINDOW, ENGINE_AGENT}
+    assert set(only) == {ENGINE_AGENT}                  # nothing else ran
+    volatile = {"unit_id", "context_digest", "latency_ms", "execution_id",
+                "observed_sent_spans"}
+    assert ({k: v for k, v in both[ENGINE_AGENT].items() if k not in volatile}
+            == {k: v for k, v in only[ENGINE_AGENT].items()
+                if k not in volatile})
+
+    with pytest.raises(HarnessError):
+        run_pair(case, Provider.OLLAMA, "m", Dual, env=e, engines=())
+    with pytest.raises(HarnessError):
+        run_pair(case, Provider.OLLAMA, "m", Dual, env=e, engines=("nope",))

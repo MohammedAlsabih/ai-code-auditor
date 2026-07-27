@@ -165,9 +165,16 @@ def _issue_records(issues) -> list[dict[str, Any]]:
 
 def run_pair(case: CorpusCase, provider: Provider, model: str,
              transport_factory: Callable[[], Any],
-             env: dict[str, str] | None = None) -> dict[str, Any]:
+             env: dict[str, str] | None = None,
+             engines: tuple[str, ...] = ENGINES) -> dict[str, Any]:
     """W3-E6: run BOTH engines over the SAME unit and the SAME source snapshot,
     one run each, and return {"window": result, "agent": result}.
+
+    `engines` narrows which of them actually runs. A comparison that varies
+    something only ONE engine can respond to — the context window, which the
+    fixed window does not grow — should not spend GPU time on the other, and
+    must not reshape its records to avoid doing so: the selection happens here
+    so the surviving engine is recorded by the exact same code either way.
 
     The two engines are NOT identity-comparable: the fixed window's unit_id and
     digest come from a pack built BEFORE the model is called, while the agent
@@ -183,10 +190,15 @@ def run_pair(case: CorpusCase, provider: Provider, model: str,
     assert query is not None
     out: dict[str, Any] = {}
 
+    if not set(engines) <= set(ENGINES) or not engines:
+        raise HarnessError("unknown engine requested")
+
     with _materialised(case) as index:
         # ---- engine 1: the shipped fixed window --------------------------
-        pack = build_audit_pack(index, case.project, query)
-        if pack is None:
+        pack = build_audit_pack(index, case.project, query)             if ENGINE_WINDOW in engines else None
+        if ENGINE_WINDOW not in engines:
+            pass
+        elif pack is None:
             out[ENGINE_WINDOW] = {**base, "engine": ENGINE_WINDOW,
                                   "state": "no_unit", "unit_id": "",
                                   "context_digest": ""}
@@ -230,7 +242,9 @@ def run_pair(case: CorpusCase, provider: Provider, model: str,
         # still be a real agent unit. It is given a unit iff the index offers
         # a seed anchor, which is the runtime's own precondition.
         trace: dict[str, Any] = {}
-        if not index.candidates_for(query, case.project):
+        if ENGINE_AGENT not in engines:
+            pass
+        elif not index.candidates_for(query, case.project):
             out[ENGINE_AGENT] = {**base, "engine": ENGINE_AGENT,
                                  "state": "no_unit", "unit_id": "",
                                  "context_digest": ""}
