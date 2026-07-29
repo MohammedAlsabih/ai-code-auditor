@@ -24,11 +24,44 @@ test('parseProviders keeps only well-formed rows', () => {
     ],
   })
   assert.equal(rows.length, 2)
+  // W3-A2 added kind/capabilities/reason/version. A payload that omits them —
+  // an older server — must degrade to a plain HTTP provider claiming NOTHING,
+  // never to one that appears to support everything.
   assert.deepEqual(rows[0], { provider: 'openai', display: 'OpenAI',
-    configured: true, key_present: true, locality: 'remote' })
+    configured: true, key_present: true, locality: 'remote',
+    kind: 'http', capabilities: [], reason: '', version: null })
   // non-boolean flags are normalized to false, never truthy-guessed
   assert.equal(rows[1].configured, false)
   assert.equal(rows[1].key_present, false)
+})
+
+test('parseProviders carries CLI provider facts without guessing them', () => {
+  const rows = parseProviders({
+    providers: [
+      { provider: 'claude_cli', display: 'Claude Code CLI', configured: true,
+        key_present: false, locality: 'remote', kind: 'cli',
+        capabilities: ['test', 'review', 'fixed_audit', 7], reason: '',
+        version: '2.1.116' },
+      { provider: 'codex_cli', display: 'Codex CLI', configured: false,
+        key_present: false, locality: 'remote', kind: 'cli',
+        capabilities: [], reason: 'the command was not found on this machine',
+        version: null },
+      // a CLI claiming to be local must still be read as the server sent it;
+      // locality is the server's call, not the browser's
+      { provider: 'weird', display: 'W', locality: 'remote', kind: 'nonsense',
+        capabilities: 'not-a-list', reason: 42, version: 9 },
+    ],
+  })
+  assert.equal(rows[0].kind, 'cli')
+  assert.deepEqual(rows[0].capabilities, ['test', 'review', 'fixed_audit'])
+  assert.equal(rows[0].version, '2.1.116')
+  assert.equal(rows[1].configured, false)
+  assert.ok(rows[1].reason.length > 0)
+  // an unknown kind falls back to http, and junk fields are dropped
+  assert.equal(rows[2].kind, 'http')
+  assert.deepEqual(rows[2].capabilities, [])
+  assert.equal(rows[2].reason, '')
+  assert.equal(rows[2].version, null)
 })
 
 test('parseProviders degrades to empty on malformed payloads', () => {

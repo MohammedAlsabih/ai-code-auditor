@@ -93,6 +93,9 @@ export function AIProvidersPanel() {
           Keys and base URLs are configured in the server environment only —
           nothing is entered or stored in the browser. Nothing is contacted
           when this tab opens; only the buttons below start a request.
+          Providers marked <b>local command</b> are programs installed on this
+          machine that sign in with the session you already have: there is no
+          API key to enter for them, and none is asked for.
         </p>
       </div>
       <table className="ai-table">
@@ -118,17 +121,41 @@ export function AIProvidersPanel() {
                 </td>
                 <td>
                   {p.configured ? (
-                    <span className="ai-ok">configured</span>
+                    <span className="ai-ok">
+                      {p.kind === 'cli' ? 'available' : 'configured'}
+                      {p.version ? (
+                        <div className="cov-muted mono">{p.version}</div>
+                      ) : null}
+                    </span>
                   ) : (
                     <span
                       className="ai-muted"
-                      title="Set the provider's key/base URL in the server environment"
+                      title={
+                        p.kind === 'cli'
+                          ? /* a CLI has no key to ask for; say what is
+                               actually wrong instead of implying one */
+                            p.reason || 'the command is not usable here'
+                          : "Set the provider's key/base URL in the server environment"
+                      }
                     >
-                      not configured
+                      {p.kind === 'cli' ? 'unavailable' : 'not configured'}
+                      {p.kind === 'cli' && p.reason ? (
+                        <div className="cov-muted">{p.reason}</div>
+                      ) : null}
                     </span>
                   )}
                 </td>
-                <td>{p.locality === 'local' ? 'Local' : 'Remote'}</td>
+                <td>
+                  {p.locality === 'local' ? 'Local' : 'Remote'}
+                  {p.kind === 'cli' ? (
+                    <div
+                      className="cov-muted"
+                      title="The command runs on this machine, but it forwards the payload to the vendor's service, so it needs the same consent as any remote provider."
+                    >
+                      local command, remote service
+                    </div>
+                  ) : null}
+                </td>
                 <td>
                   {row.models.length > 0 ? (
                     <select

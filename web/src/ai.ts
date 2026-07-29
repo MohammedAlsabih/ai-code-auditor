@@ -11,6 +11,14 @@ export interface AIProviderInfo {
   configured: boolean
   key_present: boolean
   locality: 'local' | 'remote'
+  /** 'http' for an API provider, 'cli' for a locally-installed command. */
+  kind: 'http' | 'cli'
+  /** What this provider may be asked to do. Never assumed from its kind. */
+  capabilities: string[]
+  /** Safe reason a provider is unavailable. Empty when it is available. */
+  reason: string
+  /** Reported version for a CLI provider; null for everything else. */
+  version: string | null
 }
 
 export const AI_STATUSES = [
@@ -40,12 +48,22 @@ export function parseProviders(payload: unknown): AIProviderInfo[] {
     if (typeof provider !== 'string' || !provider) continue
     if (typeof display !== 'string' || !display) continue
     if (locality !== 'local' && locality !== 'remote') continue
+    // Anything the server did not send is treated as absent, not guessed: an
+    // older server that predates W3-A2 must degrade to an HTTP provider with
+    // no capability claims rather than appear to support everything.
+    const kind = raw.kind === 'cli' ? 'cli' : 'http'
     out.push({
       provider,
       display,
       configured: raw.configured === true,
       key_present: raw.key_present === true,
       locality,
+      kind,
+      capabilities: Array.isArray(raw.capabilities)
+        ? raw.capabilities.filter((c): c is string => typeof c === 'string')
+        : [],
+      reason: typeof raw.reason === 'string' ? raw.reason : '',
+      version: typeof raw.version === 'string' ? raw.version : null,
     })
   }
   return out

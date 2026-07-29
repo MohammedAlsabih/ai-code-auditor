@@ -222,7 +222,7 @@ export function AIAuditPanel({ projects }: { projects: string[] }) {
         >
           {(providers.length
             ? providers
-            : [{ provider: 'ollama', display: 'Ollama', configured: true, key_present: false, locality: 'local' as const }]
+            : [{ provider: 'ollama', display: 'Ollama', configured: true, key_present: false, locality: 'local' as const, kind: 'http' as const, capabilities: [] as string[], reason: '', version: null }]
           ).map((p) => (
             <option key={p.provider} value={p.provider}>
               {p.display}
