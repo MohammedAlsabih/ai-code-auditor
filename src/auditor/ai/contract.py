@@ -29,6 +29,13 @@ class Provider(str, Enum):
     XAI = "xai"
     OLLAMA = "ollama"
     OPENAI_COMPATIBLE = "openai_compatible"
+    # W3-A2: locally-INSTALLED coding CLIs driven as subprocesses, using the
+    # login session already on the machine. Their ids are deliberately their
+    # own and NOT `anthropic`/`openai`: the vendor may be the same, but the
+    # credential path, the failure modes and the capability set are not, and
+    # collapsing them would let a CLI inherit an HTTP provider's permissions.
+    CLAUDE_CLI = "claude_cli"
+    CODEX_CLI = "codex_cli"
 
 
 # the ONLY legal error codes. Anything a provider does maps onto one of
@@ -85,6 +92,10 @@ class ProviderConfig:
     api_key: str | None = None    # in-memory only
     model: str | None = None      # default model (AUDITOR_AI_MODEL)
     timeout: float = REQUEST_TIMEOUT_SECONDS
+    # "http" or "cli". A CLI provider has no base URL to reason about: it is a
+    # local process, and its destination is decided by a login session this
+    # code never sees.
+    transport_kind: str = "http"
 
     @property
     def key_present(self) -> bool:
@@ -92,7 +103,16 @@ class ProviderConfig:
 
     @property
     def locality(self) -> str:
-        """'local' or 'remote' — the ONLY location detail ever exposed."""
+        """'local' or 'remote' — the ONLY location detail ever exposed.
+
+        A CLI provider is always REMOTE. It executes locally, which is not the
+        same thing as keeping the data local: the process forwards the payload
+        to the vendor's service over the network. Reading `locality` off a
+        base URL that does not exist would silently answer 'local' and drop
+        the consent gate, so the question is answered by what happens to the
+        DATA, not by where the binary runs."""
+        if self.transport_kind == "cli":
+            return "remote"
         host = urlsplit(self.base_url).hostname or ""
         return "local" if host in ("127.0.0.1", "localhost", "::1") else "remote"
 

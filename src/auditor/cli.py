@@ -279,6 +279,20 @@ def _ai(args) -> int:
         print(f"error | خطأ: unknown provider (expected one of: {legal})",
               file=sys.stderr)
         return 2
+    from auditor.ai.cli_providers import (
+        CLI_CAPABILITIES, is_cli_provider, resolve_cli_config,
+        test_cli_connection)
+    if is_cli_provider(provider):
+        # A locally-installed CLI. There is no HTTP client, no key to read and
+        # no model catalogue to list: it authenticates with the session already
+        # on the machine and only the capabilities below are offered.
+        if args.ai_command == "models":
+            print("this provider is a local command; it publishes no model "
+                  f"list. capabilities: {', '.join(CLI_CAPABILITIES)}")
+            return 0
+        model = args.model or resolve_cli_config(provider).model
+        return _report_ai_test(test_cli_connection(provider, model))
+
     try:
         client = create_client(provider)
     except AIError as e:
@@ -303,6 +317,10 @@ def _ai(args) -> int:
               file=sys.stderr)
         return 2
     result = client.test_connection(model)
+    return _report_ai_test(result)
+
+
+def _report_ai_test(result) -> int:
     if result.ok:
         print(f"ok: connection test passed ({result.latency_ms} ms) — "
               "the fixed probe only; no code or findings were sent")

@@ -37,10 +37,20 @@ def test_get_providers_is_local_only(client, monkeypatch):
     body = r.json()
     rows = {p["provider"]: p for p in body["providers"]}
     assert set(rows) == {"openai", "anthropic", "xai", "ollama",
-                         "openai_compatible"}
+                         "openai_compatible", "claude_cli", "codex_cli"}
     assert rows["xai"]["display"] == "xAI (Grok)"
     assert rows["openai"]["key_present"] is True
     assert rows["ollama"]["locality"] == "local"
+    # W3-A2: the locally-installed CLIs. They must never advertise a key to
+    # ask for, and must never look local just because the process is.
+    for cli in ("claude_cli", "codex_cli"):
+        assert rows[cli]["kind"] == "cli"
+        assert rows[cli]["key_env"] is None
+        assert rows[cli]["key_present"] is False
+        assert rows[cli]["locality"] == "remote"
+        assert "agent_audit" not in rows[cli]["capabilities"]
+        if not rows[cli]["configured"]:
+            assert rows[cli]["reason"]          # unavailable says WHY, safely
     text = r.text
     assert "sk-SECRET-999" not in text
     assert "api.openai.com" not in text and "11434" not in text  # no base URLs

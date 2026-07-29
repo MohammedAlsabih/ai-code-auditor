@@ -491,8 +491,14 @@ def create_app(report_path: Path, repo_root: Path | None = None,
 
     @app.get("/api/ai/providers")
     def ai_providers() -> JSONResponse:
+        # An explicit projection, not a passthrough: the UI gets exactly these
+        # fields and nothing a future metadata change might add by accident.
+        # `key_env` is included so the UI knows WHICH variable to name - and,
+        # for a CLI provider, that there is none to ask for.
         rows = [{k: m[k] for k in ("provider", "display", "configured",
-                                   "key_present", "locality")}
+                                   "key_present", "key_env", "locality",
+                                   "kind", "capabilities", "reason",
+                                   "version")}
                 for m in provider_metadata()]
         return _AsciiJSON({"providers": rows,
                            "note": "Connection tests send a fixed probe only. "
@@ -527,13 +533,20 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         if not _AI_PROBE_LOCK.acquire(blocking=False):
             return _err(409, "another AI request is already in flight")
         try:
-            try:
-                client = create_client(provider)
-            except AIError as e:
-                return _AsciiJSON({"provider": provider.value,
-                                   "model": body.model,
-                                   "status": e.code, "message": str(e)})
-            result = client.test_connection(body.model.strip())
+            from auditor.ai.cli_providers import (
+                is_cli_provider, test_cli_connection)
+            if is_cli_provider(provider):
+                # a CLI provider has no HTTP client to build; the probe is the
+                # SAME fixed prompt, and the reply is discarded either way
+                result = test_cli_connection(provider, body.model.strip())
+            else:
+                try:
+                    client = create_client(provider)
+                except AIError as e:
+                    return _AsciiJSON({"provider": provider.value,
+                                       "model": body.model,
+                                       "status": e.code, "message": str(e)})
+                result = client.test_connection(body.model.strip())
             out: dict[str, Any] = {"provider": provider.value,
                                    "model": body.model.strip(),
                                    "status": result.status,

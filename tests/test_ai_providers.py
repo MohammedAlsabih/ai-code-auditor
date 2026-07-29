@@ -19,6 +19,7 @@ from auditor.ai.contract import (
     sanitize_model_ids,
     validate_base_url,
 )
+from auditor.ai.cli_providers import is_cli_provider
 from auditor.ai.providers import ANTHROPIC_VERSION, PROVIDER_SPECS
 
 # assembled from parts so secret scanners never flag a "hardcoded key"
@@ -71,7 +72,12 @@ MODELS_OK = {
     Provider.OPENAI_COMPATIBLE: {"data": [{"id": "m2"}, {"id": "m1"}]},
 }
 
-ALL_PROVIDERS = list(Provider)
+# The HTTP providers. W3-A2 added `claude_cli`/`codex_cli`, which are driven as
+# subprocesses and have no base URL, no headers and no request body — these
+# tests are about the shape of an HTTP request, so they do not apply. The
+# equivalent privacy and isolation guarantees for the CLI path are asserted in
+# tests/test_ai_cli_providers.py against real fake executables.
+ALL_PROVIDERS = [p for p in Provider if not is_cli_provider(p)]
 
 
 # ---- per-provider request contracts -----------------------------------------
@@ -367,7 +373,10 @@ def test_ai_layer_is_independent_of_report_schema():
 
 def test_groq_is_not_a_provider_anywhere():
     assert [p.value for p in Provider] == [
-        "openai", "anthropic", "xai", "ollama", "openai_compatible"]
+        "openai", "anthropic", "xai", "ollama", "openai_compatible",
+        # W3-A2: the locally-installed CLIs. Their ids are their own on
+        # purpose — a CLI must never inherit an HTTP provider's identity.
+        "claude_cli", "codex_cli"]
     import inspect
 
     import auditor.ai.contract

@@ -1158,6 +1158,78 @@ def _review_body(provider: Provider, model: str, system: str,
             "max_tokens": max_tokens, "temperature": 0}
 
 
+def _finish_review(request: AIReviewRequest, pack: dict[str, Any],
+                   reply: str, latency_ms: int) -> dict[str, Any]:
+    """Everything after the model has spoken, shared by both wires.
+
+    The CLI path does NOT get a second, softer validator: a payload
+    that arrived through a subprocess is exactly as untrusted as one
+    that arrived over HTTP, so it runs this same fail-closed sequence.
+    """
+    allowed = {str(p["context_id"]) for p in pack["pieces"]}
+    core = parse_review_reply(reply, allowed)
+    # W3-B2 closing FAIL-CLOSED: a server-proven literal credential on the
+    # finding line contradicts a not_matched verdict — reject it (never
+    # silently flip it to matched/confirmed). Without a policy piece the
+    # defect/impact/actionability axes are left to the model, so a
+    # matched-but-acceptable fixture is fine.
+    if core["match_assessment"] == "not_matched" \
+            and proven_credential_on_finding_line(pack):
+        raise AIError("invalid_response")
+    # W3-B2 final closing: with a review_policy piece + a proven literal on
+    # the finding line, the product policy binds the verdict — a contradicting
+    # reply is rejected, never rewritten or shown as a legitimate judgment.
+    if policy_violation(core, pack):
+        raise AIError("invalid_response")
+    return {
+        **core,
+        "review_id": request.review_id,
+        "provider": request.provider.value,
+        "model": request.model,
+        "prompt_version": PROMPT_VERSION,
+        "latency_ms": latency_ms,
+        "context_digest": pack["digest"],
+        "created_at": datetime.now(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _run_review_via_cli(request: AIReviewRequest, pack: dict[str, Any],
+                        env: dict[str, str] | None,
+                        consented: bool) -> dict[str, Any]:
+    """One review through a locally-installed CLI.
+
+    The privacy gate runs FIRST, against the CLI's own config, whose locality
+    is `remote`: executing locally does not make the payload local, so this
+    needs the admin switch and a redeemed consent like any remote provider.
+    """
+    from auditor.ai.cli_providers import (
+        CLI_TIMEOUT_SECONDS, resolve_cli_config, run_cli)
+
+    config = resolve_cli_config(request.provider, env)
+    check_privacy_gate(request.provider, config, env, consented)
+
+    system, user = build_messages(pack)
+    started = time.perf_counter()
+    out = run_cli(
+        request.provider,
+        # the CLI takes ONE prompt, so the fixed system prompt and the redacted
+        # pack are joined here and nothing else is ever appended
+        prompt=system + "\n\n" + user,
+        schema=AI_REVIEW_RESPONSE_SCHEMA,
+        model=request.model,
+        env=env,
+        timeout=min(review_timeout(env), CLI_TIMEOUT_SECONDS),
+    )
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    structured = out.get("structured")
+    if not isinstance(structured, dict):
+        # a CLI that answered in prose did not honour the schema, and there is
+        # no partial credit for an unstructured reply
+        raise AIError("invalid_response")
+    return _finish_review(request, pack, json.dumps(structured), latency_ms)
+
+
 def run_review(request: AIReviewRequest, pack: dict[str, Any],
                transport: HttpTransport,
                env: dict[str, str] | None = None,
@@ -1167,6 +1239,14 @@ def run_review(request: AIReviewRequest, pack: dict[str, Any],
     AIError; nothing unsafe propagates. `consented=True` may only be passed
     by callers that REDEEMED a one-time consent token for this exact
     payload (or the CLI's explicit --confirm-remote)."""
+    from auditor.ai.cli_providers import is_cli_provider
+
+    if is_cli_provider(request.provider):
+        # A CLI provider takes the SAME gate, the SAME pack and the SAME
+        # validator; only the wire differs. Routed first so no HTTP config,
+        # header or key is ever computed for it.
+        return _run_review_via_cli(request, pack, env, consented)
+
     spec = PROVIDER_SPECS[request.provider]
     config = resolve_config(request.provider, env)
     check_privacy_gate(request.provider, config, env, consented)
@@ -1204,29 +1284,4 @@ def run_review(request: AIReviewRequest, pack: dict[str, Any],
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise AIError("invalid_response") from None
     reply = spec.parse_probe_text(data)
-    allowed = {str(p["context_id"]) for p in pack["pieces"]}
-    core = parse_review_reply(reply, allowed)
-    # W3-B2 closing FAIL-CLOSED: a server-proven literal credential on the
-    # finding line contradicts a not_matched verdict — reject it (never
-    # silently flip it to matched/confirmed). Without a policy piece the
-    # defect/impact/actionability axes are left to the model, so a
-    # matched-but-acceptable fixture is fine.
-    if core["match_assessment"] == "not_matched" \
-            and proven_credential_on_finding_line(pack):
-        raise AIError("invalid_response")
-    # W3-B2 final closing: with a review_policy piece + a proven literal on
-    # the finding line, the product policy binds the verdict — a contradicting
-    # reply is rejected, never rewritten or shown as a legitimate judgment.
-    if policy_violation(core, pack):
-        raise AIError("invalid_response")
-    return {
-        **core,
-        "review_id": request.review_id,
-        "provider": request.provider.value,
-        "model": request.model,
-        "prompt_version": PROMPT_VERSION,
-        "latency_ms": latency_ms,
-        "context_digest": pack["digest"],
-        "created_at": datetime.now(timezone.utc)
-        .strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
+    return _finish_review(request, pack, reply, latency_ms)

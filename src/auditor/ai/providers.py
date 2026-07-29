@@ -168,6 +168,10 @@ PROVIDER_SPECS: dict[Provider, ProviderSpec] = {s.provider: s for s in (
 
 ANTHROPIC_VERSION = "2023-06-01"
 
+# What an HTTP provider can be asked to do. The agent runtime drives a model
+# API through PydanticAI, which every HTTP provider here can serve.
+HTTP_CAPABILITIES = ("test", "review", "fixed_audit", "agent_audit")
+
 
 def resolve_config(provider: Provider,
                    env: dict[str, str] | None = None) -> ProviderConfig:
@@ -337,5 +341,28 @@ def provider_metadata(env: dict[str, str] | None = None) -> list[dict[str, Any]]
             "key_present": key_present,
             "key_env": spec.key_env,
             "locality": locality,
+            "kind": "http",
+            "capabilities": list(HTTP_CAPABILITIES),
+            "reason": "",
+            "version": None,
+        })
+    # W3-A2: the locally-installed CLIs. "configured" for them means the
+    # command can actually be run — there is no key to look for, so the UI must
+    # never offer a key field. Probing costs one `--version` per provider and
+    # touches no network.
+    from auditor.ai.cli_providers import CLI_SPECS, cli_availability
+    for cli in CLI_SPECS:
+        entry = cli_availability(cli, env)
+        out.append({
+            "provider": entry["provider"],
+            "display": entry["display"],
+            "configured": entry["available"],
+            "key_present": False,
+            "key_env": None,
+            "locality": entry["locality"],
+            "kind": "cli",
+            "capabilities": entry["capabilities"],
+            "reason": entry["reason"],
+            "version": entry["version"],
         })
     return out
