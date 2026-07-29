@@ -122,9 +122,27 @@ export function AIProvidersPanel() {
                 <td>
                   {p.configured ? (
                     <span className="ai-ok">
-                      {p.kind === 'cli' ? 'available' : 'configured'}
+                      {p.kind === 'cli' ? 'installed' : 'configured'}
                       {p.version ? (
                         <div className="cov-muted mono">{p.version}</div>
+                      ) : null}
+                      {p.kind === 'cli' &&
+                       p.experimental_capabilities.length > 0 &&
+                       !p.experimental_enabled ? (
+                        /* say what is NOT on offer, and why, rather than
+                           listing a capability the backend will refuse */
+                        <div
+                          className="cov-muted"
+                          title="Set AUDITOR_AI_CLI_EXPERIMENTAL=confirm on the server to enable these. Both live attempts returned invalid_response, so they are not a proven feature."
+                        >
+                          {p.experimental_capabilities.join(' + ')}:
+                          experimental, not enabled
+                        </div>
+                      ) : null}
+                      {p.kind === 'cli' && p.experimental_enabled ? (
+                        <div className="cov-muted">
+                          experimental workflows enabled
+                        </div>
                       ) : null}
                     </span>
                   ) : (
@@ -138,7 +156,14 @@ export function AIProvidersPanel() {
                           : "Set the provider's key/base URL in the server environment"
                       }
                     >
-                      {p.kind === 'cli' ? 'unavailable' : 'not configured'}
+                      {p.kind === 'cli'
+                        ? (p.installed && !p.supported
+                            /* it runs, and is still not offered: being able to
+                               start a program is not knowing what its answers
+                               mean */
+                            ? 'installed, unsupported'
+                            : 'unavailable')
+                        : 'not configured'}
                       {p.kind === 'cli' && p.reason ? (
                         <div className="cov-muted">{p.reason}</div>
                       ) : null}

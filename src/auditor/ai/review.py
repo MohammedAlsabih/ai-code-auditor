@@ -1204,15 +1204,20 @@ def _run_review_via_cli(request: AIReviewRequest, pack: dict[str, Any],
     needs the admin switch and a redeemed consent like any remote provider.
     """
     from auditor.ai.cli_providers import (
-        CLI_TIMEOUT_SECONDS, resolve_cli_config, run_cli)
+        CLI_TIMEOUT_SECONDS, cli_supports, resolve_cli_config, run_cli)
 
     config = resolve_cli_config(request.provider, env)
     check_privacy_gate(request.provider, config, env, consented)
+    if not cli_supports(request.provider, "review", env):
+        # review through a CLI is EXPERIMENTAL and off by default: the real
+        # command has not been shown to honour the structured-output contract
+        raise AIError("not_configured")
 
     system, user = build_messages(pack)
     started = time.perf_counter()
     out = run_cli(
         request.provider,
+        "review",
         # the CLI takes ONE prompt, so the fixed system prompt and the redacted
         # pack are joined here and nothing else is ever appended
         prompt=system + "\n\n" + user,

@@ -29,7 +29,9 @@ test('parseProviders keeps only well-formed rows', () => {
   // never to one that appears to support everything.
   assert.deepEqual(rows[0], { provider: 'openai', display: 'OpenAI',
     configured: true, key_present: true, locality: 'remote',
-    kind: 'http', capabilities: [], reason: '', version: null })
+    kind: 'http', capabilities: [], reason: '', version: null,
+    installed: null, supported: false,
+    experimental_capabilities: [], experimental_enabled: false })
   // non-boolean flags are normalized to false, never truthy-guessed
   assert.equal(rows[1].configured, false)
   assert.equal(rows[1].key_present, false)
@@ -62,6 +64,40 @@ test('parseProviders carries CLI provider facts without guessing them', () => {
   assert.deepEqual(rows[2].capabilities, [])
   assert.equal(rows[2].reason, '')
   assert.equal(rows[2].version, null)
+})
+
+test('installed is not supported', () => {
+  const [row] = parseProviders({
+    providers: [
+      { provider: 'codex_cli', display: 'Codex CLI', configured: false,
+        key_present: false, locality: 'remote', kind: 'cli',
+        capabilities: [], reason: 'no verified contract',
+        version: '1.0.0', installed: true, supported: false },
+    ],
+  })
+  // the program runs, and the UI must still not offer it
+  assert.equal(row.installed, true)
+  assert.equal(row.supported, false)
+  assert.equal(row.configured, false)
+  assert.deepEqual(row.capabilities, [])
+})
+
+test('an experimental capability is carried but not counted as executable', () => {
+  const [row] = parseProviders({
+    providers: [
+      { provider: 'claude_cli', display: 'Claude Code CLI', configured: true,
+        key_present: false, locality: 'remote', kind: 'cli',
+        capabilities: ['test'],
+        experimental_capabilities: ['review', 'fixed_audit', 9],
+        experimental_enabled: 'yes',   // not a boolean -> false
+        reason: '', version: null, installed: true, supported: true },
+    ],
+  })
+  // what may run now, and what merely exists, are different lists
+  assert.deepEqual(row.capabilities, ['test'])
+  assert.deepEqual(row.experimental_capabilities, ['review', 'fixed_audit'])
+  // a non-boolean opt-in is never read as consent
+  assert.equal(row.experimental_enabled, false)
 })
 
 test('parseProviders degrades to empty on malformed payloads', () => {

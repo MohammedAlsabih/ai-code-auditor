@@ -39,6 +39,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -53,11 +55,39 @@ CLI_MAX_STDOUT_BYTES = 2 * 1024 * 1024
 CLI_MAX_STDERR_BYTES = 64 * 1024
 CLI_KILL_GRACE_SECONDS = 5.0
 
-# What a CLI provider may be asked to do. `agent_audit` is deliberately ABSENT:
-# the agent runtime is a PydanticAI tool loop against a model API, and these
-# CLIs expose no such contract. Claiming it because both are "an agent" would
-# be a capability we cannot test.
-CLI_CAPABILITIES = ("test", "review", "fixed_audit")
+# Capabilities are declared PER PROVIDER on its CliSpec, never as one shared
+# list. A shared list is a claim about a category, and a category cannot be
+# tested; only a specific command can. `agent_audit` appears nowhere: the agent
+# runtime is a PydanticAI tool loop against a model API and these CLIs expose
+# no such contract.
+# STABLE means: proven against the real command, live. Only the connection
+# test qualifies -- it asks for text and gets text.
+CLAUDE_CLI_STABLE = ("test",)
+
+# EXPERIMENTAL means: the contract is implemented and pinned by deterministic
+# tests, but the real command has NOT been shown to honour it. Both live
+# attempts returned `invalid_response` because the CLI answered in prose
+# instead of emitting `structured_output`. Refusing that is safe; it is not
+# evidence the feature works. So these are OFF unless an operator turns them on
+# for themselves, and they are never listed as executable while off.
+CLAUDE_CLI_EXPERIMENTAL = ("review", "fixed_audit")
+
+# Codex declares NOTHING in either tier. A capability is a promise that a path
+# has been exercised, and no runnable Codex CLI has ever been observed here, so
+# every promise would be a guess -- including an experimental one.
+CODEX_CLI_STABLE: tuple[str, ...] = ()
+CODEX_CLI_EXPERIMENTAL: tuple[str, ...] = ()
+
+# The opt-in. Mirrors the project's other switches: the EXACT value `confirm`,
+# never a truthy coincidence.
+CLI_EXPERIMENTAL_ENV = "AUDITOR_AI_CLI_EXPERIMENTAL"
+CLI_EXPERIMENTAL_VALUE = "confirm"
+
+
+def cli_experimental_enabled(env: dict[str, str] | None = None) -> bool:
+    e = os.environ if env is None else env
+    return e.get(CLI_EXPERIMENTAL_ENV) == CLI_EXPERIMENTAL_VALUE
+
 
 # Environment the child may see. Everything else is dropped. HOME/USERPROFILE
 # are here on purpose — that is where the CLI's existing login lives, and the
@@ -91,6 +121,11 @@ REASON_NOT_INSTALLED = "the command was not found on this machine"
 REASON_NOT_EXECUTABLE = "the command was found but could not be executed"
 REASON_NO_VERSION = "the command did not report a usable version"
 REASON_DENIED = "the operating system denied permission to run the command"
+REASON_UNSUPPORTED = ("the command is installed, but this build has no "
+                      "verified contract for it and will not guess one")
+REASON_EXPERIMENTAL_OFF = (
+    "the command is installed and its connection test works, but the "
+    "structured-output workflows are experimental and not enabled")
 
 
 @dataclass(frozen=True)
@@ -103,6 +138,11 @@ class CliSpec:
     build_argv: Callable[["CliSpec", str | None, dict[str, Any] | None],
                          list[str]]
     parse_result: Callable[[Any], dict[str, Any]]
+    # Proven live against the real command.
+    stable: tuple[str, ...] = ()
+    # Implemented and unit-proven, but NOT shown to work live. Requires the
+    # operator's explicit opt-in before it is executable or even listed.
+    experimental: tuple[str, ...] = ()
     version_argv: tuple[str, ...] = ("--version",)
 
 
@@ -218,14 +258,42 @@ def _codex_parse(data: Any) -> dict[str, Any]:
 
 CLI_SPECS: dict[Provider, CliSpec] = {s.provider: s for s in (
     CliSpec(Provider.CLAUDE_CLI, "Claude Code CLI", "claude",
-            "AUDITOR_CLAUDE_CLI_PATH", None, _claude_argv, _claude_parse),
+            "AUDITOR_CLAUDE_CLI_PATH", None, _claude_argv, _claude_parse,
+            stable=CLAUDE_CLI_STABLE, experimental=CLAUDE_CLI_EXPERIMENTAL),
     CliSpec(Provider.CODEX_CLI, "Codex CLI", "codex",
-            "AUDITOR_CODEX_CLI_PATH", None, _codex_argv, _codex_parse),
+            "AUDITOR_CODEX_CLI_PATH", None, _codex_argv, _codex_parse,
+            stable=CODEX_CLI_STABLE, experimental=CODEX_CLI_EXPERIMENTAL),
 )}
 
 
 def is_cli_provider(provider: Provider) -> bool:
     return provider in CLI_SPECS
+
+
+def executable_capabilities(spec: CliSpec,
+                            env: dict[str, str] | None = None
+                            ) -> tuple[str, ...]:
+    """What this provider may ACTUALLY be asked to do right now.
+
+    Stable always; experimental only behind the opt-in. This is the single
+    definition of "executable", so the listing, the UI and the run path cannot
+    disagree about what is on offer.
+    """
+    if cli_experimental_enabled(env):
+        return tuple(spec.stable) + tuple(spec.experimental)
+    return tuple(spec.stable)
+
+
+def cli_supports(provider: Provider, capability: str,
+                 env: dict[str, str] | None = None) -> bool:
+    """Is this EXACT provider allowed to do this EXACT thing right now?
+
+    Asked before every use. A provider with nothing executable answers False
+    for everything, however healthy its executable looks, and an experimental
+    capability answers False until the operator opts in.
+    """
+    spec = CLI_SPECS.get(provider)
+    return bool(spec and capability in executable_capabilities(spec, env))
 
 
 # ---- environment + process -------------------------------------------------
@@ -341,6 +409,55 @@ def probe_version(spec: CliSpec, env: dict[str, str] | None = None,
     return version[0].strip()[:120]
 
 
+def _drain(stream: Any, limit: int, sink: list[bytes],
+           over: "threading.Event") -> None:
+    """Read a pipe with a HARD byte budget, keeping nothing past it.
+
+    The budget is enforced WHILE reading, not after. `communicate()` returns
+    only once the child is done, so a cap applied to its result is not a cap at
+    all — a child that prints a gigabyte gets a gigabyte of our memory first,
+    and is refused afterwards. Here the excess is never stored and never even
+    read: the moment the budget is gone the event fires and the caller kills
+    the tree.
+    """
+    kept = 0
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                return
+            if kept < limit:
+                room = limit - kept
+                sink.append(chunk[:room])
+                kept += min(room, len(chunk))
+            if kept >= limit:
+                over.set()
+                return
+    except (ValueError, OSError):
+        return                      # the pipe closed under us: nothing to add
+    finally:
+        try:
+            stream.close()
+        except Exception:                                # noqa: BLE001
+            pass
+
+
+def _feed(stream: Any, text: str | None) -> None:
+    """Write the prompt and close, in a thread so a child that never reads its
+    stdin cannot deadlock the parent against a full pipe buffer."""
+    try:
+        if text:
+            stream.write(text.encode("utf-8"))
+        stream.flush()
+    except (ValueError, OSError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except Exception:                                # noqa: BLE001
+            pass
+
+
 def _run_capped(argv: list[str], stdin_text: str | None,
                 env: dict[str, str], timeout: float) -> dict[str, Any]:
     """Run argv with every bound applied. Returns capped stdout/stderr.
@@ -368,28 +485,55 @@ def _run_capped(argv: list[str], stdin_text: str | None,
         except OSError:
             raise AIError("connection_failed") from None
 
+        over = threading.Event()
+        out_sink: list[bytes] = []
+        err_sink: list[bytes] = []
+        readers = [
+            threading.Thread(target=_drain, daemon=True,
+                             args=(proc.stdout, CLI_MAX_STDOUT_BYTES,
+                                   out_sink, over)),
+            threading.Thread(target=_drain, daemon=True,
+                             args=(proc.stderr, CLI_MAX_STDERR_BYTES,
+                                   err_sink, over)),
+            threading.Thread(target=_feed, daemon=True,
+                             args=(proc.stdin, stdin_text)),
+        ]
+        for th in readers:
+            th.start()
+
+        deadline = time.monotonic() + timeout
         try:
-            out, err = proc.communicate(
-                input=(stdin_text or "").encode("utf-8"), timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc)
-            raise AIError("timeout") from None
+            while True:
+                if proc.poll() is not None:
+                    break
+                if over.is_set():
+                    # STOP the producer, do not drain it politely: a child that
+                    # has already blown the cap has nothing left worth reading,
+                    # and continuing would let it dictate our memory use.
+                    _kill_tree(proc)
+                    break
+                if time.monotonic() >= deadline:
+                    _kill_tree(proc)
+                    raise AIError("timeout") from None
+                time.sleep(0.02)
+        except AIError:
+            raise
         except BaseException:
             # cancellation included: the tree dies with the request
             _kill_tree(proc)
             raise
+        for th in readers:
+            th.join(timeout=CLI_KILL_GRACE_SECONDS)
 
-        oversized = (len(out) > CLI_MAX_STDOUT_BYTES
-                     or len(err) > CLI_MAX_STDERR_BYTES)
         return {
             "returncode": proc.returncode,
-            "stdout": out[:CLI_MAX_STDOUT_BYTES].decode("utf-8", "replace"),
-            "stderr": err[:CLI_MAX_STDERR_BYTES].decode("utf-8", "replace"),
-            "oversized": oversized,
+            "stdout": b"".join(out_sink).decode("utf-8", "replace"),
+            "stderr": b"".join(err_sink).decode("utf-8", "replace"),
+            "oversized": over.is_set(),
         }
 
 
-def run_cli(provider: Provider, prompt: str,
+def run_cli(provider: Provider, capability: str, prompt: str,
             schema: dict[str, Any] | None = None,
             model: str | None = None,
             env: dict[str, str] | None = None,
@@ -398,8 +542,17 @@ def run_cli(provider: Provider, prompt: str,
 
     Putting the payload on argv would leak it into the process table and any
     shell history, and would collide with the CLI's own flag parsing.
+
+    `capability` is REQUIRED and checked here, at the single point every caller
+    must pass through. Putting the check only at the call sites would mean a
+    future call site could forget it; putting it here means it cannot.
     """
     spec = CLI_SPECS[provider]
+    if not cli_supports(provider, capability, env):
+        # Refuse BEFORE spawning anything. An override pointing at a real
+        # executable does not make its answers meaningful, and an experimental
+        # workflow that nobody opted into is not on offer.
+        raise AIError("not_configured")
     try:
         exe = resolve_executable(spec, env)
     except CliUnavailable:
@@ -424,28 +577,68 @@ def run_cli(provider: Provider, prompt: str,
 
 
 def cli_availability(provider: Provider,
-                     env: dict[str, str] | None = None) -> dict[str, Any]:
-    """What the UI shows: available, or unavailable with a SAFE reason.
+                     env: dict[str, str] | None = None,
+                     probe: bool = False) -> dict[str, Any]:
+    """What the UI shows. **Spawns nothing unless `probe=True`.**
 
-    Never asks for an API key, because there is nothing to ask for — the CLI
+    Provider listing is a page load, and a page load must not execute programs:
+    it would put a subprocess on the critical path of every render, and turn a
+    hanging CLI into a hanging page. So `installed` is answered from the
+    filesystem — the command resolves on the PATH the child would get — and the
+    version, which requires actually running it, is only fetched when a caller
+    explicitly asks.
+
+    Three facts are kept apart because they answer different questions:
+
+    * `installed`  — the command is there and looks executable.
+    * `supported`  — this build has a verified contract for it at all.
+    * `capabilities` — what may be executed RIGHT NOW: stable always,
+      experimental only behind `AUDITOR_AI_CLI_EXPERIMENTAL=confirm`.
+
+    Never asks for an API key, because there is nothing to ask for: the CLI
     either has a session or it does not, and that is its business.
     """
     spec = CLI_SPECS[provider]
+    declared = tuple(spec.stable) + tuple(spec.experimental)
+    executable = executable_capabilities(spec, env)
     entry: dict[str, Any] = {
         "provider": spec.provider.value,
         "display": spec.display,
         "kind": "cli",
         "locality": "remote",
         "requires_api_key": False,
-        "capabilities": list(CLI_CAPABILITIES),
+        # what may run now -- EMPTY for a provider with nothing on offer, never
+        # a category default
+        "capabilities": list(executable),
+        # declared but gated, so the UI can say "experimental, not enabled"
+        # instead of pretending the workflow does not exist
+        "experimental_capabilities": list(spec.experimental),
+        "experimental_enabled": cli_experimental_enabled(env),
         "supports_agent_audit": False,
+        "supported": bool(declared),
+        "version": None,
     }
     try:
-        version = probe_version(spec, env)
+        resolve_executable(spec, env)
     except CliUnavailable as e:
-        return {**entry, "available": False, "reason": e.reason,
-                "version": None}
-    return {**entry, "available": True, "reason": "", "version": version}
+        return {**entry, "installed": False, "available": False,
+                "reason": e.reason}
+    if probe:
+        try:
+            entry["version"] = probe_version(spec, env)
+        except CliUnavailable as e:
+            return {**entry, "installed": False, "available": False,
+                    "reason": e.reason}
+    if not declared:
+        # installed and healthy, and still not offered: being able to start a
+        # program is not the same as knowing what its answers mean
+        return {**entry, "installed": True, "available": False,
+                "reason": REASON_UNSUPPORTED}
+    if not executable:
+        # everything it can do is experimental and nobody opted in
+        return {**entry, "installed": True, "available": False,
+                "reason": REASON_EXPERIMENTAL_OFF}
+    return {**entry, "installed": True, "available": True, "reason": ""}
 
 
 def resolve_cli_config(provider: Provider,
@@ -467,11 +660,14 @@ def test_cli_connection(provider: Provider, model: str | None = None,
     is DISCARDED: a connection test tells the user whether the pipe works, and
     a coding CLI's words are not something this project puts on a screen.
     """
-    import time
+    if not cli_supports(provider, "test", env):
+        return ConnectionResult(ok=False, status="not_configured",
+                                message=SAFE_MESSAGES["not_configured"])
     started = time.perf_counter()
     try:
-        out = run_cli(provider, PROBE_PROMPT, schema=None, model=model,
-                      env=env, timeout=CLI_VERSION_TIMEOUT_SECONDS * 6)
+        out = run_cli(provider, "test", PROBE_PROMPT, schema=None,
+                      model=model, env=env,
+                      timeout=CLI_VERSION_TIMEOUT_SECONDS * 6)
     except AIError as e:
         return ConnectionResult(ok=False, status=e.code,
                                 message=SAFE_MESSAGES[e.code])

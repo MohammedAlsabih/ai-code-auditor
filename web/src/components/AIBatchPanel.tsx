@@ -152,7 +152,7 @@ export function AIBatchPanel({
       >
         {(providers.length
           ? providers
-          : [{ provider: 'ollama', display: 'Ollama', configured: true, key_present: false, locality: 'local' as const, kind: 'http' as const, capabilities: [] as string[], reason: '', version: null }]
+          : [{ provider: 'ollama', display: 'Ollama', configured: true, key_present: false, locality: 'local' as const, kind: 'http' as const, capabilities: [] as string[], reason: '', version: null, installed: null, supported: true, experimental_capabilities: [] as string[], experimental_enabled: false }]
         ).map((p) => (
           <option key={p.provider} value={p.provider}>
             {p.display}

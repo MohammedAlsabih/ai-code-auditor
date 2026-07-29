@@ -345,14 +345,23 @@ def provider_metadata(env: dict[str, str] | None = None) -> list[dict[str, Any]]
             "capabilities": list(HTTP_CAPABILITIES),
             "reason": "",
             "version": None,
+            # an HTTP provider is never "installed" in the CLI sense; the
+            # question does not apply and is answered None, not False
+            "installed": None,
+            "supported": True,
+            "experimental_capabilities": [],
+            "experimental_enabled": False,
         })
-    # W3-A2: the locally-installed CLIs. "configured" for them means the
-    # command can actually be run — there is no key to look for, so the UI must
-    # never offer a key field. Probing costs one `--version` per provider and
-    # touches no network.
+    # W3-A2: the locally-installed CLIs. "configured" means something is
+    # actually on offer right now — there is no key to look for, so the UI must
+    # never offer a key field.
+    #
+    # This listing SPAWNS NOTHING. `probe=False` answers `installed` from the
+    # filesystem alone; running `--version` here would put a subprocess on the
+    # critical path of every page load and let a hanging CLI hang the page.
     from auditor.ai.cli_providers import CLI_SPECS, cli_availability
     for cli in CLI_SPECS:
-        entry = cli_availability(cli, env)
+        entry = cli_availability(cli, env, probe=False)
         out.append({
             "provider": entry["provider"],
             "display": entry["display"],
@@ -362,6 +371,10 @@ def provider_metadata(env: dict[str, str] | None = None) -> list[dict[str, Any]]
             "locality": entry["locality"],
             "kind": "cli",
             "capabilities": entry["capabilities"],
+            "experimental_capabilities": entry["experimental_capabilities"],
+            "experimental_enabled": entry["experimental_enabled"],
+            "installed": entry["installed"],
+            "supported": entry["supported"],
             "reason": entry["reason"],
             "version": entry["version"],
         })

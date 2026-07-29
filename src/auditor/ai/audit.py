@@ -57,6 +57,11 @@ AUDIT_PROMPT_VERSION = "w3e-v5"   # W3-E4C-FINAL: redaction_facts now carry a
 #                                   PROOF from privacy masking. Query piece still
 #                                   carries required_category + contract.
 AUDIT_OUTCOMES = ("issues_found", "no_issue_observed", "insufficient_context")
+
+# A CLI takes ONE prompt where an API takes a system message and a user
+# message. This is the only place the two are joined, and nothing else is ever
+# added between them.
+CLI_PROMPT_JOIN = "\n\n"
 AUDIT_CATEGORIES = ("authorization", "input_handling", "credentials",
                     "concurrency", "error_handling", "api_contract",
                     "dependency_integration", "incomplete_code", "other")
@@ -686,12 +691,91 @@ def parse_audit_reply(text: str,
 
 # ---- one unit over the wire ---------------------------------------------------------
 
+def _finish_audit(pack: dict[str, Any], provider: Provider,
+                  model: str, reply: str, latency_ms: int,
+                  num_ctx: int | None) -> dict[str, Any]:
+    """Everything after the model has spoken, shared by both wires.
+
+    The CLI wire does NOT get its own parser, its own verifier or its
+    own envelope: a reply that arrived through a subprocess is exactly
+    as untrusted as one that arrived over HTTP, and a result the UI
+    stores must have the same shape whatever produced it.
+    """
+    core = parse_audit_reply(reply, pack["piece_map"],
+                             required_category=pack.get("required_category"))
+    # W3-E4C2: deterministic evidence-content verification on the SENT pack —
+    # each issue gains a verification status; the model's words are unchanged.
+    core = verify_result(core, pack)
+    return {
+        **core,
+        "audit_unit_id": pack["unit_id"],
+        "project": pack["project"], "query_id": pack["query_id"],
+        "query_version": pack["query_version"],
+        "provider": provider.value, "model": model,
+        "prompt_version": AUDIT_PROMPT_VERSION,
+        "latency_ms": latency_ms,
+        "context_digest": pack["digest"],
+        # W3-E4D: the effective Ollama context window (None for non-Ollama) and
+        # the execution identity that distinguishes a 4096 run from an 8192 run
+        # of the SAME sent data — the sent-data digest above is unchanged.
+        "num_ctx": num_ctx,
+        "execution_id": audit_execution_id(
+            pack["unit_id"], provider.value, model, AUDIT_PROMPT_VERSION,
+            num_ctx),
+        "created_at": datetime.now(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _run_audit_via_cli(pack: dict[str, Any], provider: Provider, model: str,
+                       env: dict[str, str] | None,
+                       consented: bool) -> dict[str, Any]:
+    """One fixed audit unit through a locally-installed CLI.
+
+    The gate runs FIRST and the capability is checked BEFORE any process is
+    spawned: `fixed_audit` is only advertised for a provider whose contract has
+    been verified, and advertising is not the same as permitting.
+    """
+    from auditor.ai.cli_providers import (
+        CLI_TIMEOUT_SECONDS, cli_supports, resolve_cli_config, run_cli)
+
+    config = resolve_cli_config(provider, env)
+    check_privacy_gate(provider, config, env, consented)
+    if not cli_supports(provider, "fixed_audit", env):
+        raise AIError("not_configured")
+
+    system, user = build_audit_messages(pack)
+    started = time.perf_counter()
+    out = run_cli(
+        provider,
+        "fixed_audit",
+        prompt=system + CLI_PROMPT_JOIN + user,
+        schema=audit_schema_for(pack.get("required_category")),
+        model=model,
+        env=env,
+        timeout=min(review_timeout(env), CLI_TIMEOUT_SECONDS),
+    )
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    structured = out.get("structured")
+    if not isinstance(structured, dict):
+        raise AIError("invalid_response")
+    return _finish_audit(pack, provider, model, json.dumps(structured),
+                         latency_ms, None)
+
+
 def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
                    transport: Any, env: dict[str, str] | None = None,
                    consented: bool = False) -> dict[str, Any]:
     """Privacy gate → ONE request → strict parse. Same gate discipline as
     W3-B/C: local providers free, remote needs the admin switch + a
     redeemed consent for exactly this payload."""
+    from auditor.ai.cli_providers import is_cli_provider
+
+    if is_cli_provider(provider):
+        # Routed BEFORE PROVIDER_SPECS: a CLI provider has no HTTP spec, and
+        # indexing one would raise KeyError before the privacy gate ever ran.
+        return _run_audit_via_cli(pack, provider, model, env, consented)
+
     spec = PROVIDER_SPECS[provider]
     config = resolve_config(provider, env)
     check_privacy_gate(provider, config, env, consented)
@@ -733,30 +817,9 @@ def run_audit_unit(pack: dict[str, Any], provider: Provider, model: str,
         data = json.loads(resp.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise AIError("invalid_response") from None
-    core = parse_audit_reply(spec.parse_probe_text(data), pack["piece_map"],
-                             required_category=pack.get("required_category"))
-    # W3-E4C2: deterministic evidence-content verification on the SENT pack —
-    # each issue gains a verification status; the model's words are unchanged.
-    core = verify_result(core, pack)
-    return {
-        **core,
-        "audit_unit_id": pack["unit_id"],
-        "project": pack["project"], "query_id": pack["query_id"],
-        "query_version": pack["query_version"],
-        "provider": provider.value, "model": model,
-        "prompt_version": AUDIT_PROMPT_VERSION,
-        "latency_ms": latency_ms,
-        "context_digest": pack["digest"],
-        # W3-E4D: the effective Ollama context window (None for non-Ollama) and
-        # the execution identity that distinguishes a 4096 run from an 8192 run
-        # of the SAME sent data — the sent-data digest above is unchanged.
-        "num_ctx": num_ctx,
-        "execution_id": audit_execution_id(
-            pack["unit_id"], provider.value, model, AUDIT_PROMPT_VERSION,
-            num_ctx),
-        "created_at": datetime.now(timezone.utc)
-        .strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
+    reply = spec.parse_probe_text(data)
+    return _finish_audit(pack, provider, model, reply, latency_ms,
+                         num_ctx)
 
 
 def candidates_from_result(result: dict[str, Any],

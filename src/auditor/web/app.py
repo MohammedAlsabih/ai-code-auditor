@@ -498,7 +498,9 @@ def create_app(report_path: Path, repo_root: Path | None = None,
         rows = [{k: m[k] for k in ("provider", "display", "configured",
                                    "key_present", "key_env", "locality",
                                    "kind", "capabilities", "reason",
-                                   "version")}
+                                   "version", "installed", "supported",
+                                   "experimental_capabilities",
+                                   "experimental_enabled")}
                 for m in provider_metadata()]
         return _AsciiJSON({"providers": rows,
                            "note": "Connection tests send a fixed probe only. "

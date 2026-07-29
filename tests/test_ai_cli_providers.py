@@ -19,10 +19,13 @@ from pathlib import Path
 import pytest
 
 from auditor.ai.cli_providers import (
-    CLI_CAPABILITIES, CLI_MAX_STDOUT_BYTES, CLI_SPECS, CliUnavailable,
-    child_env, cli_availability, is_cli_provider, probe_version,
-    resolve_cli_config, resolve_executable, run_cli)
+    CLAUDE_CLI_EXPERIMENTAL, CLAUDE_CLI_STABLE, CLI_MAX_STDOUT_BYTES,
+    CLI_SPECS, CliUnavailable, child_env, cli_availability, is_cli_provider,
+    probe_version, resolve_cli_config, resolve_executable, run_cli)
 from auditor.ai.contract import ERROR_CODES, AIError, Provider
+
+# review/fixed_audit are experimental opt-in; wire-level tests turn them on
+EXPERIMENTAL_ON = {"AUDITOR_AI_CLI_EXPERIMENTAL": "confirm"}
 
 CLAUDE = Provider.CLAUDE_CLI
 CODEX = Provider.CODEX_CLI
@@ -72,7 +75,7 @@ _RESULT = textwrap.dedent('''
 
 def test_a_structured_reply_is_returned(tmp_path):
     env = _fake(tmp_path, _RESULT)
-    out = run_cli(CLAUDE, "hello", schema={"type": "object"}, env=env)
+    out = run_cli(CLAUDE, "review", "hello", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert out["structured"] == {"answer": "ok"}
     assert out["usage"] == {"input_tokens": 5, "output_tokens": 2}
 
@@ -88,7 +91,7 @@ def test_the_prompt_travels_on_stdin_and_never_on_argv(tmp_path):
                                                 "argv": sys.argv[1:]}}))
     ''')
     secret_shaped = "REVIEW-PAYLOAD-8e21"
-    out = run_cli(CLAUDE, secret_shaped, schema={"type": "object"}, env=env)
+    out = run_cli(CLAUDE, "review", secret_shaped, schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert out["structured"]["stdin"] == secret_shaped
     assert not any(secret_shaped in a for a in out["structured"]["argv"])
 
@@ -107,7 +110,7 @@ def test_no_secret_environment_variable_reaches_the_child(tmp_path):
              "OPENAI_API_KEY": "sk-nor-this",
              "AWS_SECRET_ACCESS_KEY": "x", "GITHUB_TOKEN": "y",
              "MY_SESSION_COOKIE": "z", "AUDITOR_AI_REMOTE_REVIEWS": "confirm"}
-    out = run_cli(CLAUDE, "p", schema={"type": "object"}, env=leaky)
+    out = run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**leaky, **EXPERIMENTAL_ON})
     seen = set(out["structured"]["env"])
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY",
                  "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN",
@@ -138,7 +141,7 @@ def test_the_child_runs_in_an_empty_directory_that_is_not_the_repo(tmp_path):
                           "structured_output": {"cwd": os.getcwd(),
                                                 "entries": os.listdir(".")}}))
     ''')
-    out = run_cli(CLAUDE, "p", schema={"type": "object"}, env=env)
+    out = run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert out["structured"]["entries"] == []
     cwd = Path(out["structured"]["cwd"]).resolve()
     repo = Path(__file__).resolve().parent.parent
@@ -152,8 +155,8 @@ def test_the_isolating_flags_are_actually_on_the_command_line(tmp_path):
         print(json.dumps({"type": "result", "is_error": False,
                           "structured_output": {"argv": sys.argv[1:]}}))
     ''')
-    argv = run_cli(CLAUDE, "p", schema={"type": "object"},
-                   env=env)["structured"]["argv"]
+    argv = run_cli(CLAUDE, "review", "p", schema={"type": "object"},
+                   env={**env, **EXPERIMENTAL_ON})["structured"]["argv"]
     assert "--print" in argv                       # non-interactive
     assert argv[argv.index("--tools") + 1] == ""   # no tools at all
     assert "--disable-slash-commands" in argv      # no skills
@@ -177,7 +180,7 @@ def test_exit_zero_with_is_error_true_is_still_a_failure(tmp_path):
         sys.exit(0)
     ''')
     with pytest.raises(AIError) as e:
-        run_cli(CLAUDE, "p", schema={"type": "object"}, env=env)
+        run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert e.value.code == "model_not_found"
 
 
@@ -195,7 +198,7 @@ def test_every_error_status_maps_onto_a_legal_code(tmp_path, status, code):
                            "api_error_status": {json.dumps(status)}}}))
     ''')
     with pytest.raises(AIError) as e:
-        run_cli(CLAUDE, "p", schema={"type": "object"}, env=env)
+        run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert e.value.code == code
     assert e.value.code in ERROR_CODES
 
@@ -215,7 +218,7 @@ def test_malformed_output_is_refused_not_interpreted(tmp_path, body, label):
         {body}
     ''')
     with pytest.raises(AIError) as e:
-        run_cli(CLAUDE, "p", schema={"type": "object"}, env=env)
+        run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert e.value.code == "invalid_response", label
 
 
@@ -226,8 +229,8 @@ def test_an_oversized_reply_is_refused_rather_than_buffered(tmp_path):
         sys.stdout.write("x" * {CLI_MAX_STDOUT_BYTES + 4096})
     ''')
     with pytest.raises(AIError) as e:
-        run_cli(CLAUDE, "p", schema={{"type": "object"}}
-                if False else {"type": "object"}, env=env)
+        run_cli(CLAUDE, "review", "p", schema={{"type": "object"}}
+                if False else {"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert e.value.code == "invalid_response"
 
 
@@ -242,7 +245,7 @@ def test_cli_output_is_never_echoed_in_the_error(tmp_path):
         sys.stderr.write({marker!r})
     ''')
     with pytest.raises(AIError) as e:
-        run_cli(CLAUDE, "p", schema={"type": "object"}, env=env)
+        run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
     assert marker not in str(e.value)
     assert marker not in repr(e.value)
 
@@ -257,7 +260,7 @@ def test_a_hanging_cli_times_out_instead_of_hanging(tmp_path):
     ''')
     started = time.time()
     with pytest.raises(AIError) as e:
-        run_cli(CLAUDE, "p", schema={"type": "object"}, env=env, timeout=2.0)
+        run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON}, timeout=2.0)
     assert e.value.code == "timeout"
     assert time.time() - started < 30, "the timeout did not actually bound it"
 
@@ -274,7 +277,7 @@ def test_a_timeout_leaves_no_child_still_running(tmp_path):
             open({str(marker)!r}, "a").write("tick\\n")
     ''')
     with pytest.raises(AIError):
-        run_cli(CLAUDE, "p", schema={"type": "object"}, env=env, timeout=2.0)
+        run_cli(CLAUDE, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON}, timeout=2.0)
     time.sleep(1.5)
     size_after_kill = marker.stat().st_size if marker.exists() else 0
     time.sleep(1.5)
@@ -286,7 +289,7 @@ def test_a_timeout_leaves_no_child_still_running(tmp_path):
 
 def test_a_missing_cli_is_unavailable_with_a_safe_reason():
     env = {"PATH": os.pathsep.join(["/nonexistent-dir-a2"])}
-    entry = cli_availability(CODEX, env=env)
+    entry = cli_availability(CODEX, env={**env, **EXPERIMENTAL_ON})
     assert entry["available"] is False
     assert entry["reason"] and "\\" not in entry["reason"]
     assert entry["requires_api_key"] is False          # never asks for a key
@@ -298,10 +301,16 @@ def test_an_available_cli_reports_its_version(tmp_path):
         import sys
         print("9.9.9 (Fake CLI)")
     ''')
-    entry = cli_availability(CLAUDE, env=env)
-    assert entry["available"] is True
-    assert entry["version"].startswith("9.9.9")
-    assert entry["reason"] == ""
+    # listing does not run the program, so it reports no version
+    listed = cli_availability(CLAUDE, env={**env, **EXPERIMENTAL_ON})
+    assert listed["installed"] is True and listed["available"] is True
+    assert listed["version"] is None
+
+    # asking for the version is an explicit, separate act
+    probed = cli_availability(CLAUDE, env={**env, **EXPERIMENTAL_ON},
+                              probe=True)
+    assert probed["version"].startswith("9.9.9")
+    assert probed["reason"] == ""
 
 
 def test_a_configured_but_broken_path_is_unavailable_not_guessed_around(tmp_path):
@@ -343,19 +352,26 @@ def test_a_cli_provider_is_not_in_the_no_consent_set():
 
 def test_agent_audit_is_not_claimed(tmp_path):
     """Only capabilities with a real, testable contract are advertised."""
-    assert "agent_audit" not in CLI_CAPABILITIES
-    assert set(CLI_CAPABILITIES) == {"test", "review", "fixed_audit"}
+    declared = set(CLAUDE_CLI_STABLE) | set(CLAUDE_CLI_EXPERIMENTAL)
+    assert "agent_audit" not in declared
+    assert declared == {"test", "review", "fixed_audit"}
     entry = cli_availability(CODEX, env={"PATH": "/nonexistent-dir-a2"})
     assert entry["supports_agent_audit"] is False
 
 
 def test_codex_has_no_verified_output_contract_so_it_refuses(tmp_path):
     """No runnable Codex CLI was found, so no success path has ever been
-    observed. It must not appear to work."""
+    observed. It must not appear to work.
+
+    The refusal is `not_configured` and happens BEFORE the process is spawned:
+    the closing round moved it from "run it, then fail to parse" to "declare no
+    capability, so never run it". A fake that WOULD have answered correctly is
+    used deliberately -- the point is that its answer is never sought.
+    """
     env = _fake(tmp_path, _RESULT, name="codex")
     with pytest.raises(AIError) as e:
-        run_cli(CODEX, "p", schema={"type": "object"}, env=env)
-    assert e.value.code == "invalid_response"
+        run_cli(CODEX, "review", "p", schema={"type": "object"}, env={**env, **EXPERIMENTAL_ON})
+    assert e.value.code == "not_configured"
 
 
 # ---- wiring: the CLI reaches the real surfaces ------------------------------
@@ -410,7 +426,7 @@ def test_the_connection_probe_sends_only_the_fixed_prompt(tmp_path):
         print(json.dumps({{"type": "result", "is_error": False,
                            "result": "OK"}}))
     ''')
-    res = test_cli_connection(CLAUDE, "m", env=env)
+    res = test_cli_connection(CLAUDE, "m", env={**env, **EXPERIMENTAL_ON})
     assert res.ok and res.status == "ok"
     assert seen.read_text(encoding="utf-8") == PROBE_PROMPT
     # the model's words are never surfaced
@@ -426,6 +442,6 @@ def test_a_failing_probe_reports_a_safe_status_not_the_cli_text(tmp_path):
                           "api_error_status": 401,
                           "result": "your token 12345 expired"}))
     ''')
-    res = test_cli_connection(CLAUDE, "m", env=env)
+    res = test_cli_connection(CLAUDE, "m", env={**env, **EXPERIMENTAL_ON})
     assert res.ok is False and res.status == "authentication_failed"
     assert "12345" not in res.message

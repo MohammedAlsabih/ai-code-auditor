@@ -19,6 +19,14 @@ export interface AIProviderInfo {
   reason: string
   /** Reported version for a CLI provider; null for everything else. */
   version: string | null
+  /** CLI only: the command really ran. null where the question does not apply. */
+  installed: boolean | null
+  /** Does this build have a verified contract for it? Installed is not enough. */
+  supported: boolean
+  /** Declared but gated behind the operator's opt-in. */
+  experimental_capabilities: string[]
+  /** Has the operator opted in to the experimental workflows? */
+  experimental_enabled: boolean
 }
 
 export const AI_STATUSES = [
@@ -64,6 +72,14 @@ export function parseProviders(payload: unknown): AIProviderInfo[] {
         : [],
       reason: typeof raw.reason === 'string' ? raw.reason : '',
       version: typeof raw.version === 'string' ? raw.version : null,
+      installed: typeof raw.installed === 'boolean' ? raw.installed : null,
+      // absent means unverified: never assume a provider is supported
+      supported: raw.supported === true,
+      experimental_capabilities: Array.isArray(raw.experimental_capabilities)
+        ? raw.experimental_capabilities.filter(
+            (c): c is string => typeof c === 'string')
+        : [],
+      experimental_enabled: raw.experimental_enabled === true,
     })
   }
   return out

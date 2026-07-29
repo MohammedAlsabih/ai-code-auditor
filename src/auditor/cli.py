@@ -280,15 +280,18 @@ def _ai(args) -> int:
               file=sys.stderr)
         return 2
     from auditor.ai.cli_providers import (
-        CLI_CAPABILITIES, is_cli_provider, resolve_cli_config,
-        test_cli_connection)
+        CLI_SPECS, executable_capabilities, is_cli_provider,
+        resolve_cli_config, test_cli_connection)
     if is_cli_provider(provider):
         # A locally-installed CLI. There is no HTTP client, no key to read and
         # no model catalogue to list: it authenticates with the session already
         # on the machine and only the capabilities below are offered.
         if args.ai_command == "models":
+            caps = executable_capabilities(CLI_SPECS[provider])
             print("this provider is a local command; it publishes no model "
-                  f"list. capabilities: {', '.join(CLI_CAPABILITIES)}")
+                  "list. capabilities: "
+                  + (", ".join(caps) if caps else
+                     "none - no verified contract for this command"))
             return 0
         model = args.model or resolve_cli_config(provider).model
         return _report_ai_test(test_cli_connection(provider, model))
