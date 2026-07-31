@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from auditor.web.app import _STATIC_DIR, ReportError, _AsciiJSON, create_app
 from auditor.web.library import (
     MAX_REPORTS_PER_PROJECT,
+    BaselineRefused,
     JobRunner,
     LibraryPaths,
     LibraryStore,
@@ -44,6 +45,7 @@ from auditor.web.library import (
     bad_git_url,
     new_id,
     repo_name_from_url,
+    resolve_baseline,
     resolve_local_registration,
     safe_location,
 )
@@ -56,6 +58,24 @@ _FORWARD_RE = re.compile(r"^/api/library/reports/([0-9a-f]{16})/(.+)$")
 
 def _err(status: int, msg: str) -> JSONResponse:
     return _AsciiJSON({"error": msg}, status_code=status)
+
+
+def _store_down(state: "LibraryState") -> JSONResponse | None:
+    """503 with the store's own reason, or None when the store is healthy.
+
+    Every endpoint that reads or writes library metadata goes through this,
+    because an unavailable store cannot tell "this id does not exist" from
+    "I cannot read the file that would say". Answering 404 asserts the first
+    when only the second is known — and the reports are still sitting on
+    disk while it says so.
+
+    Two endpoints deliberately do NOT call it. `capabilities` carries
+    `store_available`/`store_error` and is how a screen learns WHY everything
+    else is refusing; `session` hands back the control token, without which
+    the caller could not even authenticate a retry. Neither reads a row."""
+    if state.store.available:
+        return None
+    return _err(503, state.store.error or "library store unavailable")
 
 
 class ProjectIn(BaseModel):
@@ -74,6 +94,13 @@ class ScanIn(BaseModel):
 
     online: bool = False       # registry lookups are an EXPLICIT opt-in
     semgrep: bool = False
+    # W4-B. Comparison with the previous scan is the DEFAULT and costs
+    # nothing when there is no history. `baseline_report_id` is an opaque id
+    # from this project's own history — there is deliberately no field for a
+    # path, so a browser can never point the scanner at a file.
+    compare_previous: bool = True
+    baseline_report_id: str = ""
+    new_only: bool = False     # narrowing the gate is an EXPLICIT opt-in
 
 
 class ConfirmIn(BaseModel):
@@ -119,6 +146,14 @@ class LibraryDispatch:
             if reason is not None:
                 await _err(403, reason)(scope, receive, send)
                 return
+        # The forwarder resolves a report id through the store before it can
+        # open anything, so it answers the same way the rest of the API does:
+        # an unreadable store is 503, never "unknown report id". Checked
+        # before acquire_context, so no context is built or cached either.
+        down = _store_down(lib)
+        if down is not None:
+            await down(scope, receive, send)
+            return
         ctx, why = lib.acquire_context(rid)
         if ctx is None:
             if why == "deleting":
@@ -148,6 +183,11 @@ class LibraryState:
         self._ctx_lock = threading.Lock()
         self._contexts: dict[str, _Ctx] = {}
         self._deleting: set[str] = set()   # deletion leases (under _ctx_lock)
+        # W4-B: reports currently serving as a scan baseline, counted, under
+        # the SAME lock as the deletion lease — so "is it being deleted?" and
+        # "is it being read by a scan?" are answered in one critical section
+        # and can never both be true.
+        self._baselines: dict[str, int] = {}
         # W4-A closing: project-operation lease, SEPARATE from the report
         # deletion lease and its own lock. Serializes start_scan /
         # remove_project / delete_source per project so a scan can never
@@ -158,7 +198,8 @@ class LibraryState:
         # the stricter rule that ANY cached context counts as loaded
         self.runner = JobRunner(self.store, self.paths, spawn=spawn, env=env,
                                 reserve=self.reserve_for_prune,
-                                release=self.release_delete)
+                                release=self.release_delete,
+                                release_baseline=self.release_baseline)
         self.allowed_roots = allowed_roots
         self.token = secrets.token_urlsafe(32)
         self.origins = {f"http://127.0.0.1:{port}",
@@ -221,13 +262,16 @@ class LibraryState:
 
     def reserve_for_delete(self, rids: list[str]) -> str | None:
         """Atomic ALL-OR-NONE lease for manual deletion. Refuses if any id
-        is already being deleted or has in-flight requests; idle cached
-        contexts are evicted inside the same critical section. Returns a
-        safe refusal reason or None (all ids leased)."""
+        is already being deleted, has in-flight requests, or is serving as
+        the baseline of a running scan; idle cached contexts are evicted
+        inside the same critical section. Returns a safe refusal reason or
+        None (all ids leased)."""
         with self._ctx_lock:
             for rid in rids:
                 if rid in self._deleting:
                     return "report is being deleted"
+                if rid in self._baselines:
+                    return "report is in use as a scan baseline"
                 ctx = self._contexts.get(rid)
                 if ctx is not None and ctx.refs > 0:
                     return "report is currently open"
@@ -244,10 +288,32 @@ class LibraryState:
             for rid in rids:
                 if rid in self._deleting:
                     return "report is being deleted"
+                if rid in self._baselines:
+                    return "report is in use as a scan baseline"
                 if rid in self._contexts:
                     return "report context is loaded"
             self._deleting.update(rids)
             return None
+
+    def hold_baseline(self, rid: str) -> str | None:
+        """Lease a report as a scan's baseline. Refuses only if it is
+        already leased for deletion — the check and the hold are one step,
+        so the deleter and the scan can never both believe they won. Held
+        for the WHOLE scan, released exactly once by the job thread."""
+        with self._ctx_lock:
+            if rid in self._deleting:
+                return "report is being deleted"
+            self._baselines[rid] = self._baselines.get(rid, 0) + 1
+            return None
+
+    def release_baseline(self, rid: str) -> None:
+        """Counted, so an id is only freed when the LAST holder is done."""
+        with self._ctx_lock:
+            remaining = self._baselines.get(rid, 0) - 1
+            if remaining > 0:
+                self._baselines[rid] = remaining
+            else:
+                self._baselines.pop(rid, None)
 
     def release_delete(self, rids: list[str]) -> None:
         """ALWAYS called in finally by every lease holder — including
@@ -321,11 +387,17 @@ def _project_view(state: LibraryState, row: dict[str, Any]) -> dict[str, Any]:
         "reports_count": len(reports),
         "latest_report": ({k: latest[k] for k in
                            ("report_id", "created_at", "verdict",
-                            "findings", "duration_ms")}
+                            "findings", "duration_ms",
+                            # W4-B: the comparison, so the table can show
+                            # new/resolved and the verdict's scope without a
+                            # second request per project
+                            "baseline_report_id", "baseline_enabled",
+                            "new", "unchanged", "resolved", "gate_scope")}
                           if latest else None),
         "last_job": ({k: last_job[k] for k in
                       ("job_id", "kind", "state", "online", "semgrep",
-                       "created_at", "finished_at", "error", "report_id")}
+                       "created_at", "finished_at", "error", "report_id",
+                       "baseline_report_id", "new_only")}
                      if last_job else None),
     }
 
@@ -370,15 +442,26 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
 
     @api.get("/api/library/projects")
     def list_projects() -> JSONResponse:
+        down = _store_down(state)
+        if down is not None:
+            return down
         rows = [_project_view(state, r) for r in state.store.projects()]
         return _AsciiJSON({"projects": rows,
                            "active_job": state.runner.active_job_id() or ""})
 
     @api.post("/api/library/projects")
     def add_project(body: ProjectIn, request: Request) -> JSONResponse:
+        # Order matters and is the same in every mutating handler: WHO first,
+        # then CAN WE, then anything that touches the disk, the network, a
+        # subprocess, a lease or a context. An unauthenticated caller must
+        # not learn the store's condition, and a broken store must not cause
+        # a filesystem probe that will be thrown away.
         denied = state.guard(request)
         if denied is not None:
             return denied
+        down = _store_down(state)
+        if down is not None:
+            return down
         if body.kind == "local":
             resolved, reason = resolve_local_registration(
                 body.path, state.allowed_roots)
@@ -425,6 +508,9 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         denied = state.guard(request)
         if denied is not None:
             return denied
+        down = _store_down(state)
+        if down is not None:
+            return down                   # before any lease is taken
         if not confirm:
             return _err(409, "removal requires confirm=true")
         # W4-A closing: take the project lease FIRST — a scan cannot start
@@ -481,6 +567,9 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         denied = state.guard(request)
         if denied is not None:
             return denied
+        down = _store_down(state)
+        if down is not None:
+            return down                   # before any lease or filesystem work
         if not body.confirm:
             return _err(409, "source deletion requires confirm=true")
         # W4-A closing: same project lease — no scan can start (and thus
@@ -515,12 +604,18 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         denied = state.guard(request)
         if denied is not None:
             return denied
+        down = _store_down(state)
+        if down is not None:
+            # before the lease, before resolve_baseline reads a report file,
+            # and long before a subprocess
+            return down
         # W4-A closing: the project lease is held across the WHOLE start —
         # the job row and runner slot exist before it is released, so a
         # concurrent removal/source-delete sees the active job and refuses.
         if not state.reserve_project(pid):
             return _err(409, "another operation is in progress for this "
                              "project")
+        baseline_id, held = "", False
         try:
             project = state.store.project(pid)
             if project is None:
@@ -528,20 +623,44 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
             if state.source_dir_for(project) is None:
                 return _err(409, "project source is not available "
                                  "(clone it first or restore the folder)")
+            # W4-B: resolution, legality and the lease happen HERE — before
+            # any subprocess exists. A refusal leaves no job row, no report,
+            # and no lease behind.
+            try:
+                baseline_id, baseline_path = resolve_baseline(
+                    state.store, state.paths, pid,
+                    requested_id=body.baseline_report_id,
+                    compare_previous=body.compare_previous,
+                    new_only=body.new_only,
+                    hold=state.hold_baseline, release=state.release_baseline)
+            except BaselineRefused as e:
+                return _err(e.status, str(e))
+            held = bool(baseline_id)
             try:
                 jid = state.runner.start(project, "scan", online=body.online,
-                                         semgrep=body.semgrep)
+                                         semgrep=body.semgrep,
+                                         baseline_report_id=baseline_id,
+                                         baseline_path=baseline_path,
+                                         new_only=body.new_only)
             except LibraryStoreError as e:
                 # runner.start rolls back its own slot/job on failure; the
                 # lease is freed here so a retry works and nothing leaks
                 return _err(409, str(e))
+            held = False           # the runner owns the baseline lease now
         finally:
+            if held:
+                state.release_baseline(baseline_id)
             state.release_project(pid)
-        return _AsciiJSON({"job_id": jid, "state": "pending"},
-                          status_code=202)
+        return _AsciiJSON({"job_id": jid, "state": "pending",
+                           "baseline_report_id": baseline_id,
+                           "baseline_enabled": bool(baseline_id),
+                           "new_only": body.new_only}, status_code=202)
 
     @api.get("/api/library/scans/{jid}")
     def scan_status(jid: str) -> JSONResponse:
+        down = _store_down(state)
+        if down is not None:
+            return down
         row = state.store.job(jid)
         if row is None:
             return _err(404, "unknown job id")
@@ -552,6 +671,9 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         denied = state.guard(request)
         if denied is not None:
             return denied
+        down = _store_down(state)
+        if down is not None:
+            return down                   # never signal a cancel we cannot record
         if state.store.job(jid) is None:
             return _err(404, "unknown job id")
         state.runner.cancel(jid)
@@ -561,6 +683,9 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
 
     @api.get("/api/library/projects/{pid}/reports")
     def list_reports(pid: str) -> JSONResponse:
+        down = _store_down(state)
+        if down is not None:
+            return down
         if state.store.project(pid) is None:
             return _err(404, "unknown project id")
         return _AsciiJSON({"reports": state.store.reports_for(pid)})
@@ -571,6 +696,14 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         denied = state.guard(request)
         if denied is not None:
             return denied
+        # BEFORE the existence check, and therefore before confined_delete.
+        # Reproducing this round found the reason: with a stale in-memory row
+        # and an unwritable store, the existence check PASSED, the report
+        # files were really deleted, and only the metadata commit then failed
+        # — a 503 handed back after the data was already gone.
+        down = _store_down(state)
+        if down is not None:
+            return down
         if not confirm:
             return _err(409, "report deletion requires confirm=true")
         if state.store.report(rid) is None:
@@ -603,6 +736,9 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
 
     @api.get("/api/library/reports/{rid}")
     def report_meta(rid: str) -> JSONResponse:
+        down = _store_down(state)
+        if down is not None:
+            return down
         row = state.store.report(rid)
         if row is None:
             return _err(404, "unknown report id")

@@ -17,6 +17,7 @@ from auditor.web.app import create_app
 from auditor.web.library import (
     JOB_KEYS,
     MAX_REPORTS_PER_PROJECT,
+    SCHEMA_VERSION,
     JobRunner,
     LibraryPaths,
     LibraryStore,
@@ -35,6 +36,10 @@ from auditor.web.library_app import CONTROL_HEADER, create_library_app
 # ---- fixtures ----------------------------------------------------------------------
 
 GOOD_REPORT = {
+    # `tool` is what makes this a report the baseline loader will ACCEPT —
+    # without it a rescan is refused, which is the loader's compatibility
+    # gate doing its job, not a library-mode failure
+    "tool": "ai-code-auditor",
     "summary": {"counts": {}, "verdict": "pass"},
     "analysis_manifest": {"catalog": [], "execution": {"projects": []},
                           "policy": {}},
@@ -45,6 +50,29 @@ GOOD_REPORT = {
                                 "line": 1, "title": "t", "detail": "d",
                                 "snippet": "s", "engine": "patterns"}]}],
 }
+
+
+def with_baseline_block(report: dict, baseline_path: Path,
+                        gate_scope: str) -> dict:
+    """What the real scanner writes into `summary.baseline`, computed with
+    the PRODUCT's own matcher rather than an imitation of it — so a fake
+    subprocess cannot accidentally agree with a fake expectation."""
+    from auditor.core.baseline import (
+        fingerprint_of_serialized, load_baseline_counter, match_findings)
+
+    out = json.loads(json.dumps(report))
+    flat = [(proj["root"], f) for proj in out["projects"]
+            for f in proj["findings"]]
+    fps = [f.get("fingerprint") or fingerprint_of_serialized(root, f)
+           for root, f in flat]
+    states, counts = match_findings(fps, load_baseline_counter(baseline_path))
+    for (_root, finding), fp, state in zip(flat, fps, states):
+        finding["fingerprint"] = fp
+        finding["baseline_state"] = state
+    out["summary"] = {**out["summary"],
+                      "baseline": {"enabled": True, "gate_scope": gate_scope,
+                                   **counts}}
+    return out
 
 
 def make_source(root: Path, marker: str = "m") -> Path:
@@ -108,8 +136,15 @@ class FakeSpawn:
             elif self.write_report and "--output" in argv:
                 out = Path(argv[argv.index("--output") + 1])
                 out.mkdir(parents=True, exist_ok=True)
+                report = self.report
+                if "--baseline" in argv:
+                    # honour the request: a scan given --baseline MUST come
+                    # back with a comparison, or the runner refuses the report
+                    report = with_baseline_block(
+                        report, Path(argv[argv.index("--baseline") + 1]),
+                        "new" if "--new-only" in argv else "all")
                 (out / "report.json").write_text(
-                    json.dumps(self.report), encoding="utf-8")
+                    json.dumps(report), encoding="utf-8")
         proc = FakeProc(rc=self.rc, block=block)
         self.procs.append(proc)
         return proc
@@ -294,8 +329,8 @@ def test_store_load_rejects_malformed_and_marks_interrupted(tmp_path):
     job = dict.fromkeys(JOB_KEYS, "")
     job.update({"job_id": jid, "project_id": pid, "kind": "scan",
                 "state": "running", "online": False, "semgrep": False,
-                "created_at": "2026-01-01"})
-    data = {"schema_version": "library-1", "projects": {}, "reports": {},
+                "new_only": False, "created_at": "2026-01-01"})
+    data = {"schema_version": SCHEMA_VERSION, "projects": {}, "reports": {},
             "jobs": {jid: job}}
     p.write_text(json.dumps(data), encoding="utf-8")
     store = LibraryStore(p)
