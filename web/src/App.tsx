@@ -56,9 +56,10 @@ function toggleSet(set: Set<string>, value: string): Set<string> {
   return next
 }
 
-function ReportExplorer({ onBack, contextLabel }: {
+function ReportExplorer({ onBack, contextLabel, initialBaselineFilter }: {
   onBack?: () => void
   contextLabel?: string
+  initialBaselineFilter?: BaselineFilter
 }) {
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -77,7 +78,8 @@ function ReportExplorer({ onBack, contextLabel }: {
   const [ruleF, setRuleF] = useState<Set<string>>(new Set())
   const [reviewF, setReviewF] = useState<Set<string>>(new Set())
   // All/New/Existing — rendered ONLY for reports with a real baseline block
-  const [baselineF, setBaselineF] = useState<BaselineFilter>('all')
+  const [baselineF, setBaselineF] = useState<BaselineFilter>(
+    initialBaselineFilter ?? 'all')
   // W3-D: AI-assessment filter + rid -> latest assessment map (local sidecar)
   const [aiF, setAIF] = useState<AIFilter>('all')
   const [aiMap, setAIMap] = useState<Record<string, string>>({})
@@ -593,7 +595,10 @@ function ReportExplorer({ onBack, contextLabel }: {
 // the library filters (they live here, not in the panel).
 export default function App() {
   const [mode, setMode] = useState<'detect' | 'serve' | 'library'>('detect')
-  const [open, setOpen] = useState<{ rid: string; name: string } | null>(null)
+  // W4-B: `focus` is the filter the report opens on, so "Open new" lands on
+  // the new findings instead of leaving the user to find the filter.
+  const [open, setOpen] = useState<
+    { rid: string; name: string; focus?: BaselineFilter } | null>(null)
   const [libQuery, setLibQuery] = useState('')
   const [libState, setLibState] = useState('all')
 
@@ -628,9 +633,9 @@ export default function App() {
           onQuery={setLibQuery}
           stateFilter={libState}
           onStateFilter={setLibState}
-          onOpenReport={(rid, name) => {
+          onOpenReport={(rid, name, focus) => {
             setReportBase(`/api/library/reports/${rid}`)
-            setOpen({ rid, name })
+            setOpen({ rid, name, focus })
           }}
         />
       </div>
@@ -638,8 +643,9 @@ export default function App() {
   }
   return (
     <ReportExplorer
-      key={open.rid}
+      key={`${open.rid}:${open.focus ?? 'all'}`}
       contextLabel={open.name}
+      initialBaselineFilter={open.focus}
       onBack={() => setOpen(null)}
     />
   )

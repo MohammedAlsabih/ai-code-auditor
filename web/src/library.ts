@@ -21,6 +21,18 @@ export type LibraryReportRow = {
   verdict: string
   findings: number
   duration_ms: number
+  // W4-B. `findings` stays the WHOLE report's count; these describe the
+  // comparison with an earlier report and never replace it.
+  baseline_report_id: string
+  baseline_enabled: boolean
+  baseline_findings: number
+  new: number
+  unchanged: number
+  resolved: number
+  gate_scope: string
+  // The server's committed order. `created_at` is for reading; THIS is what
+  // "newer" means — two reports can share a timestamp, never a seq.
+  seq: number
 }
 
 export type LibraryJobRow = {
@@ -33,6 +45,8 @@ export type LibraryJobRow = {
   finished_at: string
   error: string
   report_id: string
+  baseline_report_id: string
+  new_only: boolean
 }
 
 export type LibraryProject = {
@@ -109,12 +123,36 @@ function parseReportRow(raw: unknown): LibraryReportRow | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
   if (typeof o.report_id !== 'string' || !o.report_id) return null
+  // W4-B: a comparison is shown only when the row says there WAS one and
+  // names what it compared against. A row from an older server (no baseline
+  // fields at all) degrades to "no comparison" rather than to zeros that
+  // would read as "nothing changed".
+  const enabled = bool(o.baseline_enabled) && typeof o.baseline_report_id
+    === 'string' && o.baseline_report_id !== ''
+  const findings = num(o.findings)
+  const fresh = enabled ? num(o.new) : 0
+  const same = enabled ? num(o.unchanged) : 0
+  const gone = enabled ? num(o.resolved) : 0
+  // The server refuses to store counts that do not add up, so a row that
+  // arrives not adding up did not come from a healthy server. Showing it
+  // as "not compared" is the honest degradation: a partial comparison read
+  // as a real one is worse than no comparison at all.
+  const coherent = enabled && fresh + same === findings
+    && same + gone === num(o.baseline_findings)
   return {
     report_id: o.report_id,
     created_at: str(o.created_at),
     verdict: str(o.verdict),
-    findings: num(o.findings),
+    findings,
     duration_ms: num(o.duration_ms),
+    baseline_report_id: coherent ? str(o.baseline_report_id) : '',
+    baseline_enabled: coherent,
+    baseline_findings: coherent ? num(o.baseline_findings) : 0,
+    new: coherent ? fresh : 0,
+    unchanged: coherent ? same : 0,
+    resolved: coherent ? gone : 0,
+    gate_scope: o.gate_scope === 'new' && coherent ? 'new' : 'all',
+    seq: num(o.seq),
   }
 }
 
@@ -132,6 +170,8 @@ function parseJobRow(raw: unknown): LibraryJobRow | null {
     finished_at: str(o.finished_at),
     error: str(o.error),
     report_id: str(o.report_id),
+    baseline_report_id: str(o.baseline_report_id),
+    new_only: bool(o.new_only),
   }
 }
 
@@ -170,6 +210,112 @@ export function parseReports(raw: unknown): LibraryReportRow[] {
 export function parseJob(raw: unknown): LibraryJobRow | null {
   if (!raw || typeof raw !== 'object') return null
   return parseJobRow((raw as Record<string, unknown>).job)
+}
+
+// ---- W4-B: scan options and the change summary ---------------------------------------
+
+export type ScanOptions = {
+  online: boolean
+  semgrep: boolean
+  comparePrevious: boolean
+  baselineReportId: string      // '' = let the server pick the newest
+  newOnly: boolean
+}
+
+export function defaultScanOptions(hasHistory: boolean): ScanOptions {
+  // Comparison is on by default once there is something to compare with, and
+  // costs nothing when there is not. Narrowing the gate is never a default:
+  // a scan that only gates NEW findings is a deliberate choice.
+  return {
+    online: false,
+    semgrep: false,
+    comparePrevious: hasHistory,
+    baselineReportId: '',
+    newOnly: false,
+  }
+}
+
+/** The request body, as the server's `ScanIn` expects it. Pure, so the
+ * contract is testable without a browser: no path field exists here, and
+ * `new_only` can never be sent without a comparison. */
+export function scanRequestBody(o: ScanOptions): {
+  online: boolean; semgrep: boolean; compare_previous: boolean
+  baseline_report_id: string; new_only: boolean
+} {
+  const compare = o.comparePrevious
+  return {
+    online: o.online,
+    semgrep: o.semgrep,
+    compare_previous: compare,
+    baseline_report_id: compare ? o.baselineReportId : '',
+    new_only: compare && o.newOnly,
+  }
+}
+
+/** Why "gate new findings only" cannot be chosen, or null when it can. */
+export function newOnlyBlockedReason(
+  o: ScanOptions, hasHistory: boolean,
+): string | null {
+  if (!hasHistory) return 'Needs a previous report to compare against.'
+  if (!o.comparePrevious) return 'Turn on "Compare with previous" first.'
+  return null
+}
+
+export type ChangeCounts = { new: number; unchanged: number; resolved: number }
+
+/** The New/Existing/Resolved triple, or null when the report was not
+ * compared with anything — a first scan shows "—", never three zeros, which
+ * would read as "nothing changed". */
+export function changeCounts(row: LibraryReportRow | null): ChangeCounts | null {
+  if (!row || !row.baseline_enabled) return null
+  return { new: row.new, unchanged: row.unchanged, resolved: row.resolved }
+}
+
+export function changeSummary(row: LibraryReportRow | null): string {
+  const c = changeCounts(row)
+  if (!c) return 'not compared'
+  return `${c.new} new · ${c.unchanged} existing · ${c.resolved} resolved`
+}
+
+/** True when the verdict counted only the new findings — the badge that
+ * stops a "pass" from being read as "this project is clean". */
+export function isNewOnlyGate(row: LibraryReportRow | null): boolean {
+  return row !== null && row.baseline_enabled && row.gate_scope === 'new'
+}
+
+export function gateScopeLabel(row: LibraryReportRow | null): string {
+  if (!row) return '—'
+  return isNewOnlyGate(row) ? 'new findings only' : 'all findings'
+}
+
+export type BaselineChoice = { id: string; label: string; current: boolean }
+
+/** The baseline picker's options: this project's own history, newest first,
+ * labelled by TIME only — never by path, and never by another project's
+ * report. The first entry is the server's own default.
+ *
+ * Seconds are included on purpose. Two scans of a small project can finish
+ * in the same minute, and a picker whose entries all read alike cannot be
+ * used to pick — which is exactly what the minute-precision label produced
+ * the first time this screen was looked at. */
+export function baselineChoices(
+  rows: LibraryReportRow[], selected: string,
+): BaselineChoice[] {
+  const out: BaselineChoice[] = [{
+    id: '',
+    label: rows.length > 0
+      ? `Most recent (${formatWhenPrecise(rows[0].created_at)})`
+      : 'Most recent',
+    current: selected === '',
+  }]
+  for (const r of rows) {
+    out.push({
+      id: r.report_id,
+      label: `${formatWhenPrecise(r.created_at)} · ${r.findings} finding(s)`,
+      current: selected === r.report_id,
+    })
+  }
+  return out
 }
 
 // ---- client-side pre-validation mirrors ---------------------------------------------
@@ -236,6 +382,17 @@ export function formatWhen(iso: string): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** Same as `formatWhen`, to the second — for places where two entries must
+ * be told apart rather than merely read (the baseline picker). */
+export function formatWhenPrecise(iso: string): string {
+  if (!iso) return '—'
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  const d = new Date(t)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${formatWhen(iso)}:${pad(d.getSeconds())}`
 }
 
 export function verdictClass(verdict: string): string {

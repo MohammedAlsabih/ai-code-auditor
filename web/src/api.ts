@@ -1,3 +1,4 @@
+import { resolveApiPath } from './apiPath'
 import type { Coverage, Finding, Report, Review, ReviewsResponse, SourceWindow } from './types'
 
 // ---- W4-A2: explicit report context + library control token -------------------------
@@ -26,9 +27,7 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
     merged.headers = { ...(init?.headers as Record<string, string>),
       [CONTROL_HEADER]: controlToken }
   }
-  // library endpoints are server-global; report endpoints get the base
-  const target = path.startsWith('/api/library/') ? path : `${reportBase}${path}`
-  return fetch(target, merged)
+  return fetch(resolveApiPath(reportBase, path), merged)
 }
 
 export async function fetchCoverage(): Promise<Coverage> {
@@ -510,14 +509,18 @@ export async function deleteLibrarySource(pid: string): Promise<unknown> {
     }))
 }
 
+// W4-B: the body comes from `scanRequestBody` in library.ts — a pure
+// function, so what this sends is testable without a browser. Note what is
+// NOT in it: any kind of path. The server resolves the baseline itself, from
+// an opaque report id belonging to the same project.
 export async function startLibraryScan(
-  pid: string, online: boolean, semgrep: boolean,
+  pid: string, body: Record<string, unknown>,
 ): Promise<unknown> {
   return libJson(await apiFetch(
     `/api/library/projects/${encodeURIComponent(pid)}/scans`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ online, semgrep }),
+      body: JSON.stringify(body),
     }))
 }
 

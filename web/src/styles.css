@@ -1257,7 +1257,9 @@ tr.sev-blue td.c-sev {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
-  min-width: 860px; /* dense table scrolls inside .projects-panel on 375px */
+  /* dense table scrolls inside .projects-panel on 375px; W4-B added the
+     New and Resolved columns, so the floor moved with them */
+  min-width: 980px;
 }
 .lib-table th,
 .lib-table td {
@@ -1292,6 +1294,17 @@ tr.sev-blue td.c-sev {
   margin-left: 6px;
 }
 .lib-badge-warn { background: #f5a52333; color: #b97d10; }
+/* W4-B: the verdict counted NEW findings only — a "pass" next to this badge
+   does not mean the project is clean. */
+.lib-badge-scope { background: #8e7cc333; color: #6b58a6; }
+
+/* W4-B: the New count doubles as the way into the report's New filter. */
+.lib-new-link { font-variant-numeric: tabular-nums; }
+.lib-new-link:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+}
 
 .lib-state {
   display: inline-flex;
@@ -1415,8 +1428,37 @@ tr.sev-blue td.c-sev {
 }
 .lib-note { font-size: 11.5px; margin: 0; }
 
+/* W4-B scan options: one row per decision, checkbox left, explanation
+   wrapping beside it — readable at 375px without a horizontal scroll. */
+.lib-opt-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.lib-opt-row input { margin-top: 3px; flex: none; }
+.lib-opt-row strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+.lib-opt-row.muted { cursor: default; }
+.lib-sep { border: 0; border-top: 1px solid var(--border); margin: 2px 0; }
+.lib-baseline-field { margin-left: 24px; }
+.lib-baseline-field .review-select { max-width: 100%; }
+.lib-warn-note {
+  margin-left: 24px;
+  color: #b97d10;
+  border-left: 2px solid #f5a52355;
+  padding-left: 8px;
+}
+
 @media (max-width: 480px) {
   .lib-toolbar { gap: 6px; }
   .lib-count { display: none; }
   .modal { max-width: 100%; }
+  .lib-baseline-field, .lib-warn-note { margin-left: 0; }
 }
