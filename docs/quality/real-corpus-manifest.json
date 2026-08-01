@@ -1,0 +1,90 @@
+{
+  "corpus": "REAL-CORPUS-1A",
+  "tool_commit": "b55d371cd9911f1b8e18033dc1ce0590f24b804b",
+  "repositories": [
+    {
+      "repo_id": "attrs",
+      "url": "https://github.com/python-attrs/attrs",
+      "commit": "5aa76a4450c311d87eda43946ec0ecd743572649",
+      "license_spdx": "MIT",
+      "language": "python"
+    },
+    {
+      "repo_id": "flask",
+      "url": "https://github.com/pallets/flask",
+      "commit": "6a2f545bfd8ed31e19066a299296917e034aca58",
+      "license_spdx": "BSD-3-Clause",
+      "language": "python"
+    },
+    {
+      "repo_id": "fluentvalidation",
+      "url": "https://github.com/FluentValidation/FluentValidation",
+      "commit": "0f02e0aaabbf1812c87d23865c723e952d39c927",
+      "license_spdx": "Apache-2.0",
+      "language": "csharp"
+    },
+    {
+      "repo_id": "gson",
+      "url": "https://github.com/google/gson",
+      "commit": "ff521d70b2ecf2ed85dd1012081493ad7d8c0ba6",
+      "license_spdx": "Apache-2.0",
+      "language": "java"
+    },
+    {
+      "repo_id": "httpie-cli",
+      "url": "https://github.com/httpie/cli",
+      "commit": "5b604c37c6c67e18e7c3e9aee6c88a8c22b98345",
+      "license_spdx": "BSD-3-Clause",
+      "language": "python"
+    },
+    {
+      "repo_id": "jjwt",
+      "url": "https://github.com/jwtk/jjwt",
+      "commit": "401ba26ee72969c373d62a618b48444fc01e0e73",
+      "license_spdx": "Apache-2.0",
+      "language": "java"
+    },
+    {
+      "repo_id": "requests",
+      "url": "https://github.com/psf/requests",
+      "commit": "414f0513c33883adf6f2b46901d4f0b38a455851",
+      "license_spdx": "Apache-2.0",
+      "language": "python"
+    },
+    {
+      "repo_id": "restsharp",
+      "url": "https://github.com/restsharp/RestSharp",
+      "commit": "9b2fe0a054eb732d4246ae5e117ffa02c703abd2",
+      "license_spdx": "Apache-2.0",
+      "language": "csharp"
+    },
+    {
+      "repo_id": "serilog",
+      "url": "https://github.com/serilog/serilog",
+      "commit": "497f80fda4f9e8f98b9c13ba34b1f0530f8c4449",
+      "license_spdx": "Apache-2.0",
+      "language": "csharp"
+    },
+    {
+      "repo_id": "swr",
+      "url": "https://github.com/vercel/swr",
+      "commit": "4a984f299de2254059e1789ebd03f9714656a3b7",
+      "license_spdx": "MIT",
+      "language": "typescript"
+    },
+    {
+      "repo_id": "zod",
+      "url": "https://github.com/colinhacks/zod",
+      "commit": "912f0f51b0ced654d0069741e7160834dca742ee",
+      "license_spdx": "MIT",
+      "language": "typescript"
+    },
+    {
+      "repo_id": "zustand",
+      "url": "https://github.com/pmndrs/zustand",
+      "commit": "beca84e600e4e250f6b244d22878e72948f331c7",
+      "license_spdx": "MIT",
+      "language": "typescript"
+    }
+  ]
+}
