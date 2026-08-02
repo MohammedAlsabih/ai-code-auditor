@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 from auditor.ai.audit import AuditContextError, build_audit_pack
 from auditor.ai.audit_index import RepositoryAuditIndex
-from auditor.ai.audit_queries import AUDIT_QUERIES, query_by_id
+from auditor.ai.audit_queries import AUDIT_QUERIES, audit_language, query_by_id
 from tools.real_corpus import RepoSpec, sample_id
 
 # Size buckets are a fraction of THE QUERY'S OWN cap, never a shared constant.
@@ -50,7 +50,8 @@ class AuditPackProfile:
     profile_id: str
     repo_id: str
     project: str
-    language: str
+    language: str                   # the REPORT's own language, unmodified
+    query_language: str             # after the product's alias — what gated
     query_id: str
     query_version: int
     cap_bytes: int                  # the query's own max_context_bytes
@@ -63,7 +64,9 @@ class AuditPackProfile:
     def public(self) -> dict[str, Any]:
         """Counts and categories. No path, no code, no pack."""
         return {"profile_id": self.profile_id, "repo_id": self.repo_id,
-                "language": self.language, "query_id": self.query_id,
+                "language": self.language,
+                "query_language": self.query_language,
+                "query_id": self.query_id,
                 "query_version": self.query_version,
                 "cap_bytes": self.cap_bytes, "pack_bytes": self.pack_bytes,
                 "source_bytes": self.source_bytes,
@@ -119,31 +122,37 @@ CATALOG_LANGUAGES = frozenset(
 
 
 def unsupported_languages(report: dict[str, Any]) -> dict[str, int]:
-    """Project languages the report declares that NO query supports.
+    """Project languages that NO query supports, AFTER the product's alias.
 
-    This is not bookkeeping. The scanner names .NET projects `dotnet` and the
-    audit catalog names its queries for `csharp`, so on this corpus every .NET
-    project produces zero legal pairs and the audit path never runs on it at
-    all — serilog produced no pack of any kind. A profile that only reported
-    the packs it did build would show that as silence."""
+    REAL-CORPUS-1A3: this used to test the raw report language against the
+    catalog and therefore counted `dotnet` as unsupported. That was wrong
+    about the product. `auditor.ai.audit_queries.audit_language` is the
+    central alias the web audit gate itself applies (`dotnet` -> `csharp`),
+    so a .NET project reaches every csharp query in production. The tool was
+    measuring its own omission and reporting it as a product gap.
+
+    The alias is imported, never re-implemented here: a second copy could
+    drift from the gate and start telling the same kind of lie again."""
     out: dict[str, int] = {}
     for _root, language in project_roots(report):
-        if language not in CATALOG_LANGUAGES:
+        if audit_language(language) not in CATALOG_LANGUAGES:
             out[language] = out.get(language, 0) + 1
     return out
 
 
 def legal_pairs(report: dict[str, Any]
                 ) -> list[tuple[str, str, str]]:
-    """Every (project, language, query_id) the catalog actually supports.
+    """Every (project, report_language, query_id) the product would admit.
 
-    A query is legal for a project when the catalog lists the project's
-    language. Running an unsupported pair would measure a refusal, not a
-    pack."""
+    Support is decided on the ALIASED language, exactly as the web audit gate
+    decides it. The tuple keeps the REPORT's own language, because that is
+    what the repository actually declares and what a reader of the summary
+    needs to see; only the support test is normalised."""
     pairs: list[tuple[str, str, str]] = []
     for root, language in project_roots(report):
+        gate = audit_language(language)
         for query in AUDIT_QUERIES:
-            if language in query.languages:
+            if gate in query.languages:
                 pairs.append((root, language, query.id))
     return sorted(pairs)
 
@@ -189,6 +198,7 @@ def profile_repository(spec: RepoSpec, tree: Path, report: dict[str, Any],
             repo_id=spec.repo_id,
             project=project,
             language=language,
+            query_language=audit_language(language),
             query_id=query.id,
             query_version=query.query_version,
             cap_bytes=cap,
@@ -234,7 +244,12 @@ def audit_summary(profiles: list[AuditPackProfile], skips: dict[str, int],
                        "canonical/cap above 1.0 is expected, not a breach. "
                        "The bucket follows source_bytes.",
         "by_repo": _dist(profiles, lambda p: p.repo_id),
-        "by_language": _dist(profiles, lambda p: p.language),
+        # BOTH, and labelled: the report's own language is what the
+        # repository declares; the query language is what decided support.
+        # Reporting only the first hides the alias; only the second hides
+        # that .NET is in the corpus at all.
+        "by_report_language": _dist(profiles, lambda p: p.language),
+        "by_query_language": _dist(profiles, lambda p: p.query_language),
         "by_query": _dist(profiles, lambda p: p.query_id),
         "by_size_bucket": _dist(profiles, lambda p: p.size_bucket),
         "canonical_pack_bytes": {"min": sizes[0],
@@ -249,8 +264,10 @@ def audit_summary(profiles: list[AuditPackProfile], skips: dict[str, int],
             1 for p in profiles if p.source_bytes >= p.cap_bytes * 0.80),
         "files_sent": _dist(profiles, lambda p: p.files_sent),
         "skipped": dict(sorted(skips.items())),
-        # A language the catalog does not name is not a small gap: it means
-        # the audit path never runs on those projects at all.
+        # A language that survives the alias and STILL matches no query means
+        # the audit path never runs on those projects. Measured through
+        # `audit_language`, so it reports the product's behaviour rather than
+        # the tool's own omission.
         "project_languages_no_query_supports": unsupported,
     }
 

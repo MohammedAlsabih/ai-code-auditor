@@ -23,6 +23,7 @@ from auditor.ai.review import (PACK_MAX_BYTES, SOURCE_MAX_BYTES,
                                ContextTooLargeError, build_context_pack,
                                finding_review_id)
 from tools.real_corpus import RepoSpec
+from auditor.ai.audit_queries import AUDIT_QUERIES, audit_language
 from tools.real_corpus_audit import (AuditProfilingError, audit_size_bucket,
                                      audit_summary, legal_pairs,
                                      profile_repository, project_roots,
@@ -205,16 +206,74 @@ def test_audit_pack_size_is_taken_from_build_audit_pack_verbatim(monkeypatch,
     assert all(p.source_bytes == 900 for p in profiles)
 
 
-def test_a_language_no_query_supports_is_reported_not_silently_dropped():
-    """The scanner names .NET projects `dotnet`; the audit catalog names its
-    queries for `csharp`. Every .NET project therefore has zero legal pairs
-    and never gets audited at all. Reporting only the packs that were built
-    would show that as silence."""
+def test_dotnet_reaches_the_csharp_queries_through_the_product_alias():
+    """REGRESSION (REAL-CORPUS-1A3). The scanner names .NET projects
+    `dotnet` and the catalog names its queries for `csharp`, but the product
+    has carried the alias since W4-A3 and the web audit gate applies it —
+    so a .NET project reaches every csharp query in production.
+
+    The first version of this tool compared the RAW report language against
+    the catalog, found nothing, and published "27 dotnet projects have zero
+    query support" as a product gap. That was the tool measuring its own
+    omission. Support is now decided by `audit_language`, imported from the
+    one place that defines it."""
+    assert audit_language("dotnet") == "csharp"
     report = _report([], root=".", language="dotnet")
-    assert legal_pairs(report) == []
-    assert unsupported_languages(report) == {"dotnet": 1}
+
+    pairs = legal_pairs(report)
+    assert len(pairs) == len(AUDIT_QUERIES), "every csharp query is reachable"
+    assert {q for _root, _lang, q in pairs} == {q.id for q in AUDIT_QUERIES}
+    # the tuple keeps what the REPORT said, not the aliased value
+    assert {lang for _root, lang, _q in pairs} == {"dotnet"}
+
+    assert unsupported_languages(report) == {}
     summary = audit_summary([], {}, unsupported_languages(report))
-    assert summary["project_languages_no_query_supports"] == {"dotnet": 1}
+    assert summary["project_languages_no_query_supports"] == {}
+
+
+def test_a_language_with_no_alias_and_no_query_stays_unsupported():
+    """REGRESSION. The alias must not become a blanket pass: a language the
+    product cannot audit is still counted, and still reported."""
+    assert audit_language("cobol") == "cobol"     # no alias exists
+    report = _report([], root=".", language="cobol")
+    assert legal_pairs(report) == []
+    assert unsupported_languages(report) == {"cobol": 1}
+    summary = audit_summary([], {}, unsupported_languages(report))
+    assert summary["project_languages_no_query_supports"] == {"cobol": 1}
+
+
+def test_the_tool_imports_the_alias_and_does_not_keep_its_own_copy():
+    """A second copy of the alias could drift from the gate and start
+    telling the same kind of lie again."""
+    import tools.real_corpus_audit as audit_mod
+    from auditor.ai import audit_queries
+
+    assert audit_mod.audit_language is audit_queries.audit_language
+    source = Path(audit_mod.__file__).read_text(encoding="utf-8")
+    assert "LANGUAGE_ALIASES" not in source
+    assert '"dotnet": "csharp"' not in source
+    assert "'dotnet': 'csharp'" not in source
+
+
+def test_both_languages_are_reported_and_labelled(tmp_path, monkeypatch):
+    """The report's own language and the language that decided support are
+    different facts. Publishing only one of them hides either the alias or
+    the fact that .NET is in the corpus at all."""
+    monkeypatch.setattr(
+        "tools.real_corpus_audit.build_audit_pack",
+        lambda *_a, **_k: {"canonical": "c" * 500,
+                           "pieces": [{"context_id": "src:1", "text": "s" * 400}],
+                           "privacy_manifest": {"files_sent": 1,
+                                                "pieces_sent": 1}})
+    profiles = profile_repository(_spec(), _py_tree(tmp_path),
+                                  _report([], language="dotnet"), skips={})
+    assert profiles, "a dotnet project must now produce packs"
+    assert {p.language for p in profiles} == {"dotnet"}
+    assert {p.query_language for p in profiles} == {"csharp"}
+    summary = audit_summary(profiles, {}, {})
+    assert summary["by_report_language"] == {"dotnet": len(profiles)}
+    assert summary["by_query_language"] == {"csharp": len(profiles)}
+    assert "by_language" not in summary, "the ambiguous key is gone"
 
 
 def test_project_roots_come_from_the_report_not_from_the_tree():
@@ -805,7 +864,7 @@ def test_the_public_view_of_a_unit_carries_no_content(tmp_path):
     ('{"code": "def f(): pass"}', "code"),
     ('{"claim": {}}', "claim"),
     ('{"code_unit": {}}', "code_unit"),
-    ('{"x": "C:/project/auditor"}', "path"),
+    ('{"x": "C:/synthetic/workspace"}', "path"),
     ('{"x": ".quality-local/real-corpus"}', "path"),
 ])
 def test_the_scrubber_refuses_anything_that_must_stay_local(blob, why):
@@ -836,12 +895,16 @@ def test_the_audit_summary_reports_its_own_distribution_and_its_skips(
                                   _report([], language="python"), skips=skips)
     summary = audit_summary(profiles, skips, {"dotnet": 2})
 
-    for key in ("by_repo", "by_language", "by_query", "by_size_bucket",
-                "skipped", "canonical_pack_bytes", "source_bytes",
-                "caps_in_play", "project_languages_no_query_supports"):
+    for key in ("by_repo", "by_report_language", "by_query_language",
+                "by_query", "by_size_bucket", "skipped",
+                "canonical_pack_bytes", "source_bytes", "caps_in_play",
+                "project_languages_no_query_supports"):
         assert key in summary, key
     assert summary["by_repo"] == {"repo-one": len(profiles)}
-    assert summary["by_language"] == {"python": len(profiles)}
+    # python is its own query language — the alias is a no-op here, which is
+    # exactly why both keys must be present rather than one standing in
+    assert summary["by_report_language"] == {"python": len(profiles)}
+    assert summary["by_query_language"] == {"python": len(profiles)}
     assert set(summary["by_query"]) == {f"AI00{i}" for i in range(1, 9)}
     assert summary["skipped"]["no real candidate files for this query"] == 3
     assert summary["project_languages_no_query_supports"] == {"dotnet": 2}

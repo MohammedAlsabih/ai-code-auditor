@@ -18,7 +18,7 @@ defect the closing round removed.
 |---|---|---|---|
 | single-finding review | one `review.build_context_pack` per emitted finding | 1293 findings | `PACK_MAX_BYTES` 24576 |
 | blind human review | code units drawn without reading the report | 12578 units | none — no packer, no budget |
-| AI Audit packs | one `audit.build_audit_pack` per (project, query) | 218 packs | the query's own: AI001 16384, AI002–AI008 12288 |
+| AI Audit packs | one `audit.build_audit_pack` per (project, query) | 343 packs | the query's own: AI001 16384, AI002–AI008 12288 |
 
 ## Repositories
 
@@ -117,17 +117,28 @@ a finding at line 146 marked a function spanning lines 60–98.
 
 ## AI Audit pack profiling (a different packer, its own caps)
 
-218 packs over 11 repositories. Denominator: packs.
+343 packs over all twelve repositories. Denominator: packs.
 
 | | value |
 |---|---|
-| canonical pack bytes | min 1296, median 7086, p95 14783, max 18461 |
-| source bytes (what the cap governs) | min 194, median 5053, p95 12232, max 16227 |
-| size buckets | small 127, medium 37, **large 54** |
+| canonical pack bytes | min 1046, median 6624, p95 14343, max 18980 |
+| source bytes (what the cap governs) | min 75, median 4965, p95 12224, max 16227 |
+| size buckets | small 203, medium 57, **large 83** |
 | largest source as a fraction of its own cap | **99.8 %** |
-| packs at ≥80 % of their own cap | **54** |
-| files sent | 1 → 30, 2 → 31, 3 → 145, 4 → 12 |
-| skipped | 294, all "no real candidate files for this query" |
+| packs at ≥80 % of their own cap | **83** |
+| files sent | 1 → 52, 2 → 47, 3 → 224, 4 → 20 |
+| skipped | 385, all "no real candidate files for this query" |
+
+Language is reported twice, because two different facts are involved: what
+the repository declares, and what decided query support after the product's
+own alias.
+
+| | distribution |
+|---|---|
+| by report language | dotnet 125, typescript 82, java 80, python 56 |
+| by query language | csharp 125, typescript 82, java 80, python 56 |
+
+Project languages that survive the alias and still match no query: **none**.
 
 `AuditQuery.max_context_bytes` bounds the **source** text, not the canonical
 pack — which also carries the query piece and its decision contract — so a
@@ -137,17 +148,40 @@ follows source bytes.
 **This path does reach its cap where the review path cannot.** That contrast
 is only visible because the two are measured separately.
 
-### A gap this profiling exposed
+### Correction (REAL-CORPUS-1A3) — a claim withdrawn
 
-**27 `dotnet` projects have no query support at all.** The scanner names .NET
-projects `dotnet`; the audit catalog declares its queries for `csharp`. Every
-.NET project therefore produces zero legal (project, query) pairs and is never
-audited — serilog produced no pack of any kind, and the packs attributed to
-fluentvalidation and restsharp come from their incidental Python and
-TypeScript projects, not from their C# code.
+An earlier version of this document reported that *"27 `dotnet` projects have
+no query support at all"*, that .NET is never audited, and that serilog
+produced no pack of any kind. **All three statements were false, and they are
+withdrawn.**
 
-This is recorded, not fixed: the round changed no rule, prompt, provider,
-packer or frontend.
+They were a defect in this measurement tool, not in the product. The product
+has carried a central alias since W4-A3 —
+`auditor.ai.audit_queries.audit_language` maps `dotnet` → `csharp` — and the
+web audit gate applies it, so a .NET project reaches all eight queries in
+production. The profiler compared the **raw** report language against the
+catalog, matched nothing, and published its own omission as a product gap.
+
+What the corrected run shows, on the same repositories, the same commit SHAs
+and the same local reports:
+
+| | withdrawn | corrected |
+|---|---|---|
+| packs | 218 | **343** |
+| large-bucket packs | 54 | **83** |
+| skips | 294 | 385 |
+| serilog | 0 packs | **26 packs** |
+| restsharp | 5 | **78** |
+| fluentvalidation | 4 | **30** |
+| languages with no query support | `dotnet: 27` | **none** |
+
+The tool now imports `audit_language` rather than keeping a second copy, and
+tests pin both directions: a `dotnet` project reaches every csharp query, and
+a language with no alias and no query is still counted as unsupported.
+
+The lesson is the one this corpus exists to enforce: **a measurement that does
+not go through the product's own code path measures the harness.** Nothing in
+the scanner, catalog, runtime or gate was changed to produce these numbers.
 
 ## Two review contracts
 
