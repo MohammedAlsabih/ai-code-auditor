@@ -13,6 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import auditor.web.library as lib_mod
+import auditor.web.library_contract as contract_mod
+import auditor.web.library_runtime as runtime_mod
 from auditor.web.app import create_app
 from auditor.web.library import (
     JOB_KEYS,
@@ -153,7 +155,7 @@ class FakeSpawn:
 @pytest.fixture(autouse=True)
 def _no_real_kill(monkeypatch):
     """kill_process_tree must NEVER run taskkill against a fake pid."""
-    monkeypatch.setattr(lib_mod, "kill_process_tree",
+    monkeypatch.setattr(runtime_mod, "kill_process_tree",
                         lambda proc: proc.kill())
 
 
@@ -531,7 +533,7 @@ def test_default_spawn_uses_no_shell(tmp_path):
     the given files — proven with this interpreter, no git or network."""
     import sys as _sys
     out, err = tmp_path / "o.log", tmp_path / "e.log"
-    proc = lib_mod._default_spawn(
+    proc = runtime_mod._default_spawn(
         [_sys.executable, "-c", "print('argv-ok')"],
         tmp_path, out, err, dict(os.environ))
     assert proc.wait(timeout=60) == 0
@@ -1020,7 +1022,7 @@ def test_w4a3_retention_never_deletes_an_open_report(tmp_path, monkeypatch):
     def ticking_now():
         counter["n"] += 1
         return f"2026-07-24T00:00:{counter['n']:02d}Z"
-    monkeypatch.setattr(lib_mod, "_now_iso", ticking_now)
+    monkeypatch.setattr(contract_mod, "_now_iso", ticking_now)
     client, token, app, allowed = make_client(tmp_path)
     pid = add_local(client, token, allowed)
     first = run_scan(client, token, app, pid)["report_id"]

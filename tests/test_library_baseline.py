@@ -23,6 +23,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import auditor.web.library as lib_mod
+import auditor.web.library_contract as contract_mod
+import auditor.web.library_runtime as runtime_mod
 from auditor.web.library import (
     JOB_KEYS,
     MAX_REPORTS_PER_PROJECT,
@@ -131,7 +133,8 @@ class FailingSpawn:
 
 @pytest.fixture(autouse=True)
 def _no_real_kill(monkeypatch):
-    monkeypatch.setattr(lib_mod, "kill_process_tree", lambda proc: proc.kill())
+    monkeypatch.setattr(runtime_mod, "kill_process_tree",
+                    lambda proc: proc.kill())
 
 
 # ---- fixtures ---------------------------------------------------------------------
@@ -680,7 +683,10 @@ def test_retention_never_prunes_the_report_it_is_comparing_against(
         tmp_path, monkeypatch):
     """The prune runs at the END of the same scan that used the baseline, so
     this is the case where the two really do collide."""
-    monkeypatch.setattr(lib_mod, "MAX_REPORTS_PER_PROJECT", 1)
+        # LIBRARY-REFACTOR-1A1: patch the module that OWNS the name. A
+    # re-export is a binding, not an alias, so replacing it on the facade
+    # would leave the runtime calling the original.
+    monkeypatch.setattr(contract_mod, "MAX_REPORTS_PER_PROJECT", 1)
     client, token, app, allowed, spawn = make_client(tmp_path)
     src = make_source(allowed)
     pid = register(client, token, src)
