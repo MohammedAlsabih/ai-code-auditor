@@ -34,6 +34,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auditor.web.app import _STATIC_DIR, ReportError, _AsciiJSON, create_app
+from auditor.web.library_runtime import (
+    CANCEL_ACCEPTED,
+    CANCEL_ALREADY_REQUESTED,
+)
 from auditor.web.library import (
     MAX_REPORTS_PER_PROJECT,
     BaselineRefused,
@@ -371,6 +375,40 @@ class LibraryState:
             self._contexts.pop(rid, None)
 
 
+def _job_view(state: LibraryState, row: dict[str, Any]) -> dict[str, Any]:
+    """A job row as a CALLER may act on it.
+
+    LIBRARY-REFACTOR-1A2. The store row and the runtime are two different
+    facts. The report and the job commit in ONE transaction — unchanged, and
+    it must stay that way — but that transaction happens BEFORE the job
+    releases its baseline lease, deletes its tmp directory and frees the
+    runner slot. Publishing `completed` inside that window told callers a job
+    was over while it still held everything: the next scan was refused as
+    busy and the baseline could not be deleted. A poll-until-terminal loop
+    resumes inside that window, which is the retention flake — about one run
+    in four.
+
+    A terminal state is therefore published only once the runtime has let go.
+    Until then the job keeps its last non-final state and carries
+    `finalizing: true`. `running` is reused rather than a new state name on
+    purpose: every existing client already reads it as "not done, keep
+    polling", which is exactly right, so none of them has to learn a new word
+    in order to stay correct.
+
+    `finalizing` covers the WHOLE settled phase, not only the unwind. It goes
+    true the moment the subprocess ends, so post-processing, validation and
+    promotion report it too — and at that point the store row still reads
+    `running`. Publishing it only after the terminal write would leave a
+    window where a cancel is refused with 409 while the API showed nothing
+    that explained why."""
+    jid = row["job_id"]
+    terminal = row["state"] in ("completed", "failed", "canceled",
+                                "interrupted")
+    if state.runner.is_unwinding(jid) and terminal:
+        return {**row, "state": "running", "finalizing": True}
+    return {**row, "finalizing": state.runner.is_finalizing(jid)}
+
+
 def _project_view(state: LibraryState, row: dict[str, Any]) -> dict[str, Any]:
     """The API-facing project row: NO absolute machine paths, ever."""
     reports = state.store.reports_for(row["project_id"])
@@ -394,10 +432,11 @@ def _project_view(state: LibraryState, row: dict[str, Any]) -> dict[str, Any]:
                             "baseline_report_id", "baseline_enabled",
                             "new", "unchanged", "resolved", "gate_scope")}
                           if latest else None),
-        "last_job": ({k: last_job[k] for k in
-                      ("job_id", "kind", "state", "online", "semgrep",
-                       "created_at", "finished_at", "error", "report_id",
-                       "baseline_report_id", "new_only")}
+        "last_job": ({k: v for k, v in _job_view(state, last_job).items()
+                      if k in ("job_id", "kind", "state", "online", "semgrep",
+                               "created_at", "finished_at", "error",
+                               "report_id", "baseline_report_id", "new_only",
+                               "finalizing")}
                      if last_job else None),
     }
 
@@ -664,7 +703,7 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
         row = state.store.job(jid)
         if row is None:
             return _err(404, "unknown job id")
-        return _AsciiJSON({"job": row})
+        return _AsciiJSON({"job": _job_view(state, row)})
 
     @api.post("/api/library/scans/{jid}/cancel")
     def cancel_scan(jid: str, request: Request) -> JSONResponse:
@@ -676,8 +715,22 @@ def create_library_app(library_root: Path, allowed_roots: list[Path],
             return down                   # never signal a cancel we cannot record
         if state.store.job(jid) is None:
             return _err(404, "unknown job id")
-        state.runner.cancel(jid)
-        return _AsciiJSON({"job_id": jid, "cancel_requested": True})
+        # LIBRARY-REFACTOR-1A2: answer what the RUNTIME did, never what was
+        # asked for. This used to discard the runner's verdict and reply 200
+        # `cancel_requested: true` unconditionally — for a job that finished
+        # long ago, and for one already past the point of being stoppable.
+        outcome = state.runner.cancel(jid)
+        if outcome == CANCEL_ACCEPTED:
+            return _AsciiJSON({"job_id": jid, "cancel_requested": True,
+                               "already_requested": False}, status_code=202)
+        if outcome == CANCEL_ALREADY_REQUESTED:
+            # idempotent and honest: the first request stands, and nothing
+            # was killed a second time
+            return _AsciiJSON({"job_id": jid, "cancel_requested": True,
+                               "already_requested": True}, status_code=202)
+        # terminal, or finalizing: there is nothing left to stop, and no
+        # signal is sent. The message names no path and no process.
+        return _err(409, "this job can no longer be canceled")
 
     # -- reports ---------------------------------------------------------------
 

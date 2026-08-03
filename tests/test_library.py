@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 import auditor.web.library as lib_mod
 import auditor.web.library_contract as contract_mod
 import auditor.web.library_runtime as runtime_mod
+from auditor.web.library_runtime import (CANCEL_ACCEPTED,
+                                         CANCEL_ALREADY_REQUESTED)
 from auditor.web.app import create_app
 from auditor.web.library import (
     JOB_KEYS,
@@ -464,7 +466,11 @@ def test_cancel_stops_the_job_safely(tmp_path):
     deadline = time.monotonic() + 5
     while not spawn.procs and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert runner.cancel(jid) is True
+    # LIBRARY-REFACTOR-1A2: the runtime reports WHAT IT DID, not a bare bool
+    assert runner.cancel(jid) == CANCEL_ACCEPTED
+    # a repeat while the first is in flight is idempotent, and kills nothing
+    # a second time
+    assert runner.cancel(jid) == CANCEL_ALREADY_REQUESTED
     runner.wait(jid)
     job = store.job(jid)
     assert job["state"] == "canceled"
@@ -805,7 +811,9 @@ def test_scan_conflicts_and_unknown_ids(tmp_path):
                      headers=H(token))
     assert r2.status_code == 409                       # one job at a time
     r3 = client.post(f"/api/library/scans/{jid}/cancel", headers=H(token))
-    assert r3.status_code == 200
+    assert r3.status_code == 202                       # accepted, not "done"
+    assert r3.json() == {"job_id": jid, "cancel_requested": True,
+                         "already_requested": False}
     app.library.runner.wait(jid)
     assert client.get(f"/api/library/scans/{jid}") \
         .json()["job"]["state"] == "canceled"
@@ -1431,7 +1439,7 @@ def test_w4a5_scan_reserves_then_remove_is_refused(tmp_path):
     # invariant: job accepted with 202 stays readable + cancelable via API
     assert client.get(f"/api/library/scans/{jid}").status_code == 200
     assert client.post(f"/api/library/scans/{jid}/cancel",
-                       headers=H(token)).status_code == 200
+                       headers=H(token)).status_code == 202
     app.library.runner.wait(jid)
 
 

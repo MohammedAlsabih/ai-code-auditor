@@ -82,12 +82,25 @@ def tail_of(path: Path, cap: int = OUTPUT_TAIL_BYTES) -> str:
         return ""
 
 
+# What `JobRunner.cancel` actually did. The HTTP layer maps these to status
+# codes; nothing else may invent a fourth answer.
+CANCEL_ACCEPTED = "accepted"
+CANCEL_ALREADY_REQUESTED = "already_requested"
+CANCEL_NOT_ACTIVE = "not_active"
+
+
 @dataclass
 class _ActiveJob:
     job_id: str
     project_id: str = ""
     proc: Any = None
     cancel_requested: bool = False
+    # LIBRARY-REFACTOR-1A2: set the moment this job's outcome is decided —
+    # before any terminal row is written — and never cleared. From here on
+    # the job cannot be cancelled (there is nothing left to stop) and its
+    # terminal state is not yet publishable (it still holds the slot, the
+    # baseline lease and its tmp directory).
+    finalizing: bool = False
     thread: threading.Thread | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     # W4-B. The id is persisted on the job row; the PATH is not — it exists
@@ -183,17 +196,90 @@ class JobRunner:
         thread.start()
         return jid
 
-    def cancel(self, jid: str) -> bool:
+    def cancel(self, jid: str) -> str:
+        """Ask to cancel. Returns what the RUNTIME actually did, so no caller
+        can announce a cancellation that did not happen.
+
+        This used to return a bare bool that the HTTP layer discarded, so
+        `POST /cancel` answered 200 `cancel_requested: true` for a job that
+        finished minutes ago — and, in the unwind window, set a flag nobody
+        reads and fired a kill at a process that had already exited.
+
+        * CANCEL_ACCEPTED          — the job was running; it is now asked to
+                                     stop and its process tree was killed.
+        * CANCEL_ALREADY_REQUESTED — a cancel is already in flight. Nothing
+                                     is killed twice; the honest answer to a
+                                     repeat is that the first one stands.
+        * CANCEL_NOT_ACTIVE        — not cancellable: unknown to the runner,
+                                     already terminal, or past the point
+                                     where its outcome was decided. NOTHING
+                                     is killed.
+        """
+        with self._lock:
+            active = self._active
+        if active is None or active.job_id != jid:
+            return CANCEL_NOT_ACTIVE
+        with active.lock:
+            if active.finalizing:
+                # the outcome is decided and may already be committed; a kill
+                # would land on a dead process and the flag would be read by
+                # nobody
+                return CANCEL_NOT_ACTIVE
+            if active.cancel_requested:
+                return CANCEL_ALREADY_REQUESTED
+            # Recorded ONCE, under the lock, before any signalling. The
+            # logical cancellation is this flag — `_wait_proc` reads it when
+            # the process ends — and it must survive a failed signal. A
+            # repeat returns above, so the kill is never retried in a loop.
+            active.cancel_requested = True
+            proc = active.proc
+        if proc is not None:
+            self._safe_kill(proc)
+        return CANCEL_ACCEPTED
+
+    @staticmethod
+    def _safe_kill(proc: Any) -> bool:
+        """Signal a process tree. Returns whether the signal got through.
+
+        A kill genuinely fails sometimes: the pid already exited, or the OS
+        refuses. That is not a reason to fail a control-plane request — the
+        exception used to escape `cancel` and turn `POST /cancel` into a 500,
+        which tells the caller nothing and loses the fact that the
+        cancellation WAS recorded. Delivery is best-effort; the record is
+        not."""
+        try:
+            kill_process_tree(proc)
+            return True
+        except BaseException:              # noqa: BLE001 - see above
+            return False
+
+    def is_finalizing(self, jid: str) -> bool:
+        """True once this job's outcome is settled: the process is over (or
+        never started) and post-processing, validation, promotion and the
+        unwind are all past the point of being cancellable.
+
+        Distinct from `is_unwinding`, which is true for the whole time the
+        runner holds the job — including while its subprocess is still
+        running and a cancel would still work."""
         with self._lock:
             active = self._active
         if active is None or active.job_id != jid:
             return False
         with active.lock:
-            active.cancel_requested = True
-            proc = active.proc
-        if proc is not None:
-            kill_process_tree(proc)
-        return True
+            return active.finalizing
+
+    def is_unwinding(self, jid: str) -> bool:
+        """True while this job still owns ANYTHING: the runner slot, its
+        baseline lease, or its tmp directory.
+
+        The store row can already read `completed` — the report and the job
+        commit in one transaction, and that transaction happens BEFORE the
+        unwind. Until this returns False the job is not finished in any sense
+        a caller can act on: its lease still blocks deleting the baseline and
+        its slot still refuses the next scan."""
+        with self._lock:
+            active = self._active
+        return active is not None and active.job_id == jid
 
     def wait(self, jid: str, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
@@ -241,6 +327,10 @@ class JobRunner:
         left a finished job reading `running` for the life of the process
         and `interrupted` after a restart — while its report sat in the
         library, eligible to be the next scan's baseline."""
+        # the outcome is decided HERE, before it is written. From this point
+        # a cancel has nothing left to stop, and the state about to be
+        # written is not yet publishable.
+        self._mark_finalizing()
         try:
             self._store.put_job(self._terminal(row, state, error=error,
                                                report_id=report_id))
@@ -248,6 +338,15 @@ class JobRunner:
             self._store.mark_unavailable(
                 "a job's final state could not be recorded, so the library "
                 "no longer describes what has run")
+
+    def _mark_finalizing(self) -> None:
+        """This job's outcome is settled. Exactly one job is active at a
+        time and only its own thread calls this, so `self._active` is it."""
+        with self._lock:
+            active = self._active
+        if active is not None:
+            with active.lock:
+                active.finalizing = True
 
     def _run(self, active: _ActiveJob, project: dict[str, Any],
              row: dict[str, Any]) -> None:
@@ -257,13 +356,32 @@ class JobRunner:
         except BaseException:          # noqa: BLE001 - the slot MUST free
             self._finish(row, "failed", error="internal job error")
         finally:
-            self._paths.confined_delete(tmp)
-            # W4-B: the baseline lease is released on EVERY exit — success,
-            # failure, cancellation, or an internal error — and after the
-            # retention prune inside _execute, so a scan can never delete the
-            # report it was still comparing against.
-            if active.baseline_report_id and self._release_baseline is not None:
-                self._release_baseline(active.baseline_report_id)
+            # every path reaches the unwind, including the ones that never
+            # wrote a terminal row (an unavailable store). Nothing here is
+            # cancellable, so the flag is set unconditionally.
+            self._mark_finalizing()
+            # LIBRARY-REFACTOR-1A2: each step of the unwind is INDEPENDENT.
+            # These used to run as three bare statements, so a raising tmp
+            # delete aborted the rest of the `finally` and leaked both the
+            # baseline lease and the runner slot for the life of the process
+            # — one unlucky job wedging the whole library, with the slot
+            # never freed and the baseline never deletable again. The slot
+            # is released last, and unconditionally, because it is what
+            # publishes the terminal state.
+            try:
+                self._paths.confined_delete(tmp)
+            except BaseException:              # noqa: BLE001 - see above
+                pass
+            try:
+                # W4-B: released on EVERY exit — success, failure,
+                # cancellation, internal error — and after the retention
+                # prune inside `_execute`, so a scan can never delete the
+                # report it was still comparing against.
+                if active.baseline_report_id \
+                        and self._release_baseline is not None:
+                    self._release_baseline(active.baseline_report_id)
+            except BaseException:              # noqa: BLE001 - see above
+                pass
             with self._lock:
                 if self._active is active:
                     self._active = None
@@ -391,7 +509,9 @@ class JobRunner:
         # ONE transaction: the report and the job that claims it, or neither.
         # Committing them separately left an orphan report — usable, and
         # picked as the next scan's baseline — behind a job still reading
-        # `running`.
+        # `running`. That transaction is UNCHANGED here; what changed is when
+        # its result becomes visible.
+        self._mark_finalizing()
         try:
             self._store.put_report_and_finish_job(
                 report_row, self._terminal(row, "completed", report_id=rid))
@@ -440,26 +560,48 @@ class JobRunner:
         try:
             proc = self._spawn(argv, cwd, stdout_p, stderr_p, env)
         except OSError:
+            self._mark_finalizing()      # nothing was started to stop
             return False, "the job process could not be started"
         with active.lock:
             if active.cancel_requested:
-                kill_process_tree(proc)
-                return False, "canceled"
-            active.proc = proc
+                active.finalizing = True         # decided: canceled
+                doomed = True
+            else:
+                active.proc = proc
+                doomed = False
+        if doomed:
+            self._safe_kill(proc)
+            return False, "canceled"
+
         timeout = job_timeout(self._env)
+        timed_out = False
+        rc: int | None = None
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            kill_process_tree(proc)
+            timed_out = True
+        finally:
+            # THE decision point, and it is atomic. Once the process is over
+            # the outcome is settled, so cancellability closes in the SAME
+            # critical section that reads whether a cancel got in first.
+            #
+            # Closing it here is what makes post-processing honest. Before,
+            # this only cleared `proc` — so a cancel arriving while
+            # load_report, validation or promotion ran was accepted (202) and
+            # then changed nothing: the job completed regardless. Whoever
+            # takes this lock first now decides, and the loser is told so.
+            with active.lock:
+                active.proc = None
+                canceled = active.cancel_requested
+                active.finalizing = True
+        if timed_out:
+            self._safe_kill(proc)
             try:
                 proc.wait(timeout=10)
             except (subprocess.TimeoutExpired, OSError):
                 pass
             return False, f"timed out after {int(timeout)}s"
-        finally:
-            with active.lock:
-                active.proc = None
-        if active.cancel_requested:
+        if canceled:
             return False, "canceled"
         if allow_rc is not None and rc not in allow_rc:
             return False, f"the job process exited with code {rc}"
