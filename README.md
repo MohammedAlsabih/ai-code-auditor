@@ -12,7 +12,7 @@ produces the same findings, and nothing is executed from the scanned
 repository. The tool does not attempt to prove *who* wrote a piece of code;
 it only checks for the mistakes that generated code tends to contain.
 
-> **Status: alpha (`0.1.0a1`).** Interfaces, report schemas, and rule
+> **Status: alpha (`0.1.0a2`).** Interfaces, report schemas, and rule
 > behavior may change between releases. The tool narrows human attention;
 > it is not a replacement for code review, tests, or a security audit, and
 > an empty report is not evidence that code is safe.
@@ -108,7 +108,7 @@ this block per rule and per project.
 python -m venv .venv
 .venv/Scripts/pip install -e .           # core scanner
 .venv/Scripts/pip install -e ".[web]"    # + local report explorer
-auditor --version                        # ai-code-auditor 0.1.0a1
+auditor --version                        # ai-code-auditor 0.1.0a2
 ```
 
 Or install the wheel attached to the

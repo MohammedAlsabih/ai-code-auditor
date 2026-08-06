@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-code-auditor"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Deterministic auditor for AI-generated code: hallucinated dependencies and risky patterns across Python, Java, .NET and TypeScript/React/Next.js"
 readme = "README.md"
 requires-python = ">=3.11"
